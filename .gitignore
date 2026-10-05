@@ -1,0 +1,20 @@
+# Secrets — never commit
+config.toml
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor
+.vscode/
+.idea/
+
+# Build / install
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+windows-check-report.txt

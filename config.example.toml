@@ -1,0 +1,271 @@
+# Ixel MAT: example configuration
+#
+# `ixel setup` writes ~/.config/ixel-mat/config.toml for you. To set it up by hand,
+# copy this file there, delete the agents you don't use, and edit the rest.
+#
+# API keys never go in this file. Put them in ~/.config/ixel-mat/.env
+# (`ixel setup` does this, readable only by you) or export them in your shell;
+# `token_env` names the variable to read.
+#
+# A config file in the current directory is ignored on purpose: agents can name
+# commands to run, so they are only read from your own ~/.config/ixel-mat.
+
+# ── API models ─────────────────────────────────────────────────────────────────
+#   model    "latest"      the provider's newest top model (the default when blank)
+#            "latest-fast" its newest small, fast model (good saver-mode drafters)
+#            or a specific model id; `ixel model <agent>` lists what your key offers.
+#            The aliases are looked up again every time Ixel starts, so new releases
+#            are used without updating anything.
+#   effort   thinking level: minimal | low | medium | high | xhigh | max
+#            (sent as the provider's own setting. Through the OpenAI-style API
+#            used for OpenAI, Gemini, xAI and local servers, xhigh and max are
+#            sent as high; for Claude, minimal is sent as low)
+#   timeout  seconds per call; in a review this replaces the review's timeout
+#            for this model (default: the review's, 180)
+#   label, color   the name and color shown on the panel
+#   token_env      the variable that holds the key (or token = "${VAR}")
+#   billing, accepts   see below
+
+[agents.opus]
+type = "http"
+url = "https://api.anthropic.com/v1/messages"
+token_env = "ANTHROPIC_API_KEY"
+model = "latest"
+effort = "high"
+label = "Claude Opus"
+color = "blue"
+
+[agents.gpt]
+type = "http"
+url = "https://api.openai.com/v1/chat/completions"
+token_env = "OPENAI_API_KEY"
+model = "latest-fast"
+label = "GPT (fast)"
+color = "green"
+
+[agents.gemini]
+type = "http"
+url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+token_env = "GOOGLE_API_KEY"
+model = "latest-fast"
+label = "Gemini (fast)"
+color = "red"
+
+[agents.grok]
+type = "http"
+url = "https://api.x.ai/v1/chat/completions"
+token_env = "XAI_API_KEY"
+model = "latest"
+label = "Grok"
+color = "magenta"
+
+# ── Local models ───────────────────────────────────────────────────────────────
+# Anything that speaks the OpenAI chat API on this machine or your own network
+# (an Ollama on another PC: http://192.168.1.20:11434/..., nas.local, or a
+# Tailscale address). No key needed, and plain http:// is fine. Ixel never sends
+# a key over plain http:// to another computer, so a server that wants one needs
+# https://.
+
+[agents.llama]
+type = "http"
+url = "http://127.0.0.1:11434/v1"   # Ollama; LM Studio is http://127.0.0.1:1234/v1 (the address it shows works)
+model = "llama3.3"
+label = "llama3.3 (local)"
+color = "yellow"
+
+# Every review ends with what it cost (`ixel saves` keeps a running total). Each
+# agent's `billing` says how its calls are paid for; Ixel guesses it, so set it
+# only when the guess is wrong:
+#   billing  "api" (per token: API models) | "local" (free: this machine, or a
+#            private address or .local/.lan name on your network) | "plan" (a
+#            subscription: the Claude Code, Codex, Gemini CLI and Copilot logins)
+#            | "unknown" (counted, not priced: other CLIs, gateways). Set "api" on
+#            a paid proxy on your network.
+#
+# Pictures you attach in the app go to API models that can see them. Claude,
+# GPT, Grok and Gemini can; a local or other model only with:
+#   accepts  ["image"] to send it pictures, [] to never send it any
+
+# ── Your subscription logins ───────────────────────────────────────────────────
+# These run the vendors' own CLIs with the login you already have, so they use
+# your plan instead of API credits. `preset` names one of Ixel's locked-down
+# setups (ixel_mat/presets.py): no tools (Gemini CLI keeps its read-only ones
+# and web search; see SECURITY.md), a fresh empty folder per run, none of
+# Ixel's keys, and stray API keys dropped so your subscription is what gets
+# billed (OpenCode keeps them: it may be set up to use them).
+# tests/test_cli_presets_live.py checks each one refuses to run commands or
+# read your files. Referring to the preset (rather than copying its
+# flags) means an improved preset reaches your config when you update Ixel.
+#
+# Settings you add override the preset's:
+#   model     leave it out for the CLI's own default, which its maker keeps
+#             current, or name one (Claude Code: opus, sonnet, haiku…)
+#   effort    as above. Claude Code, Codex and Copilot take it (a level the CLI
+#             doesn't have is sent as the nearest one it does); Gemini CLI and
+#             OpenCode have no such setting, so it's not sent to them
+#   timeout   seconds per call (the presets: 300, in a review too)
+#   label     the name shown on the panel
+#   billing   "api" if you signed the CLI in with an API key, not a subscription
+#   pass_env  keys from Ixel's .env this CLI may see (none, unless listed)
+
+[agents.claude_code]
+preset = "claude_code"
+
+[agents.codex]
+preset = "codex"
+
+[agents.gemini_cli]
+preset = "gemini_cli"
+
+[agents.copilot]
+preset = "copilot"
+
+[agents.opencode]
+preset = "opencode"
+
+# ── Other agents ───────────────────────────────────────────────────────────────
+# An OpenClaw gateway on this machine (or over wss:// elsewhere):
+#
+# [agents.claw]
+# type = "websocket"
+# url = "ws://127.0.0.1:18789"
+# token_env = "IXELMAT_GATEWAY_TOKEN"   # the default
+# session_key = "agent:claw:main"       # the default: agent:<name>:main
+#
+# Any other command-line program. Unlike the presets above, nothing is locked
+# down for you: it gets whatever tools and files the program itself allows, so
+# only add one you trust.
+#
+# [agents.mycli]
+# type = "oneshot"            # a fresh run per question ("subprocess" keeps one
+#                             # running, for chat-style programs)
+# command = "mycli"           # looked up on PATH only
+# args = ["--quiet"]
+# prompt_via = "stdin"        # stdin | arg (after --) | auto (arg, or stdin when
+#                             # too long) | flag (-q PROMPT, the default)
+# stdout_format = "text"      # or "claude-stream-json"
+# output_flag = "-o"          # if it writes its answer to a file you name
+# workdir = "temp"            # a fresh empty folder (the default) | "inherit" |
+#                             # a path
+# pass_env = ["MYCLI_KEY"]    # keys from Ixel's .env it may see
+# drop_env = ["OPENAI_API_KEY"]   # removed from its environment
+# env = { MYCLI_COLOR = "never" } # fixed settings (not secrets)
+# model_args = ["--model", "{model}"]     # how it takes `model`
+# effort_args = ["--effort", "{effort}"]  # how it takes `effort`
+# effort_levels = ["low", "high"]         # the levels it has
+
+# ── Review defaults ────────────────────────────────────────────────────────────
+
+[review]
+mode = "review"          # quick | review | deep | saver | auto (triage picks; see [triage] below)
+# plain_questions = "quick"   # a question typed without a command in `ixel`: quick | review | deep | saver | auto | compare
+# private = true         # only models on your own computers answer (keyless servers on this computer or your
+#                        # network); every other model, verdict writer, verifier and Triage sits out
+moderator = "opus"       # writes the verdict; default: author of the best-rated answer
+# timeout = 240          # seconds per model call during a review, for models with no timeout of
+#                        # their own (default 180)
+# slowest_wait = "auto"  # once all but one model are done with a round, how long the last one gets:
+#                        # "auto" = as long again as the others took (at least 30 s), then the round goes
+#                        # on without it; "always" = wait for everyone; or a number of seconds.
+#                        # (Only with three or more models: two always wait for each other.)
+# agents = ["opus", "gpt", "gemini"]   # panel for reviews; default: every agent.
+#                                      # A panel takes 8 at most: past that, the
+#                                      # rest are left out of the run
+
+# ── Usage saver (/saver, ixel review --saver) ──────────────────────────────────
+# Cheaper models draft and review each other; the verifier (your big model)
+# only checks the result. Each accepted draft counts as a save (`ixel saves`).
+
+[saver]
+verifier = "opus"             # default: the [review] moderator
+# drafters = ["gpt", "gemini", "llama"]   # default: every agent except the verifier
+escalate = "always"           # or "disagreement": skip the verifier when every draft was rated correct
+                              # (with triage on, it must also be sure the drafts agree)
+on_wrong = "send_back"        # or "correct": the verifier fixes wrong drafts itself
+verifier_effort = "low"       # checking is easier than writing (left out: the verifier's own effort)
+
+# ── Triage (optional) ─────────────────────────────────────────────────────────
+# Quick decisions between rounds: pick the mode for each question (auto), and
+# skip checks the panel doesn't need. `ixel triage` shows the settings and asks a
+# test question. Who decides:
+#   agent = "…"            one of your own models (a fast, cheap one is best). No
+#                          new account, and nothing goes anywhere new. It writes
+#                          a short reply, so it takes seconds, and its confidence
+#                          is its own guess, so keep skip_review off or the
+#                          threshold high.
+#   provider = "typesafe"  TypeSafe AI's decision API: calibrated, about a second,
+#                          a fraction of a cent. It sends TypeSafe your questions
+#                          and the models' answers; the key goes in
+#                          TYPESAFE_API_KEY. Get it only from typesafe.ai:
+#                          lookalike sites that resell it would see everything.
+#                          With TypeSafe you can also set model (one of their
+#                          model names; left out, their current one), url (an
+#                          https:// address; a host other than TypeSafe's own
+#                          is warned about at every start, unless it's on this
+#                          computer) and token_env (the variable that holds
+#                          the key).
+
+# [triage]
+# enabled = true
+# agent = "grok"        # your model that decides (leave out, and set provider = "typesafe", for TypeSafe)
+# auto_mode = true      # "auto" mode (--auto, /auto, the browser's Auto button) asks triage
+# skip_review = false   # skip peer review when triage is sure every first answer agrees
+# saver_gate = true     # [saver] escalate = "disagreement": triage must agree before the verifier is skipped
+# threshold = 0.9       # how sure triage must be before a check is skipped (0.5 – 1)
+# timeout = 90          # seconds (TypeSafe: 10); with no answer, the run just carries on without it
+
+# ── Sound (the app's Sound button) ────────────────────────────────────────────
+# Sound you record or attach in the app is written out by a transcription
+# service and the words go into your question; no model on the panel hears it.
+# It goes to OpenAI or Groq with your key (OPENAI_API_KEY, GROQ_API_KEY) and
+# isn't kept. With keys for both, the first one is used unless you pick.
+# openai_url and groq_url point a service at a compatible server instead.
+
+# [sound]
+# provider = "groq"                          # "openai" or "groq"
+# openai_model = "gpt-4o-mini-transcribe"
+# groq_model = "whisper-large-v3-turbo"
+
+# ── Pictures (ixel image, and pictures on the Board) ─────────────────────────
+# Pictures are made by xAI or OpenAI with your key (XAI_API_KEY, OPENAI_API_KEY).
+# With keys for both, xAI is used unless you pick. Each has a built-in model;
+# xai_model and openai_model name another, and xai_url and openai_url point at
+# a compatible server (https://, or http:// on this computer).
+
+# [images]
+# provider = "openai"         # "xai" (or "grok") or "openai" (or "gpt")
+
+# ── Pull requests (the Board) ─────────────────────────────────────────────────
+# The Board lists the open pull requests (merge requests on GitLab) of a
+# project's origin. github.com, gitlab.com and codeberg.org are known; for your
+# own server, say what kind it is and where its web pages are (the Board asks
+# and writes this for you). The name is the origin's host, with its port when
+# the remote has one (an https://macmini:3000/… remote is "macmini:3000"), and
+# the address must be on that same host and port.
+# kind: "gitea" (Gitea or Forgejo), "gitlab" or "github" (GitHub Enterprise).
+# A token for a private repository goes in .env, never here: the Board saves it
+# as IXEL_CONN_<HOST>_<PORT>_<CHECK>_TOKEN, and it's only ever sent to that
+# address.
+
+# [connections."macmini"]           # an ssh remote (git@macmini:robin/shop.git)
+# kind = "gitea"
+# url = "http://macmini:3000"       # a token goes over plain http only to this
+#                                   # computer or across Tailscale (a public
+#                                   # repository needs no token)
+
+# ── Updates ───────────────────────────────────────────────────────────────────
+# Once a day `ixel` asks GitHub (without prompting for anything) whether there's
+# a newer Ixel, and says so. `ixel update` installs it.
+
+# [updates]
+# check = false
+
+# ── Prices (optional) ─────────────────────────────────────────────────────────
+# What an API-key call costs, in $ per million tokens. Claude's list prices are
+# built in; add the models you use from other providers, from their price lists.
+# A name matches that model and its dated snapshots (gpt-x also covers
+# gpt-x-2026-01-01). cache_read / cache_write default to 0.1× / 1.25× input.
+
+# [pricing]
+# "model-name" = { input = 1.0, output = 4.0 }
+# "other-model" = { input = 0.5, output = 2.0, cache_read = 0.05 }

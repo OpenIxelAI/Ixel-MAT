@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="90 50 240 250">
+  <defs>
+    <radialGradient id="moon" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#e8f0f7"/>
+      <stop offset="60%" stop-color="#c8d8e8"/>
+      <stop offset="100%" stop-color="#7eb8d4" stop-opacity="0.85"/>
+    </radialGradient>
+    <mask id="crescent">
+      <rect x="0" y="0" width="400" height="400" fill="#fff"/>
+      <circle cx="230" cy="170" r="90" fill="#000"/>
+    </mask>
+  </defs>
+  <circle cx="200" cy="185" r="100" fill="url(#moon)" mask="url(#crescent)"/>
+  <polygon points="268,95 272,108 285,108 275,116 279,129 268,121 257,129 261,116 251,108 264,108" fill="#d4af37"/>
+  <polygon points="300,145 303,153 311,153 305,158 307,166 300,161 293,166 295,158 289,153 297,153" fill="#c8d8e8"/>
+  <polygon points="255,60 257,67 264,67 259,71 261,78 255,74 249,78 251,71 246,67 253,67" fill="#9b7fc7"/>
+  <circle cx="310" cy="100" r="3" fill="#d4af37" opacity="0.7"/>
+  <circle cx="320" cy="130" r="2.5" fill="#9b7fc7" opacity="0.7"/>
+</svg>

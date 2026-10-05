@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0e0f11">
+  <title>Ixel</title>
+  <link rel="icon" href="/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/theme.js"></script>
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+  <nav class="rail" aria-label="Ixel">
+    <img src="/mark.svg" alt="" class="mark rail-mark" width="24" height="24">
+    <button type="button" class="rail-item" data-view="ask"><i data-icon="message"></i><span>Ask</span><b class="rail-dot rec" id="rec-dot" title="Recording" hidden></b></button>
+    <button type="button" class="rail-item" data-view="board"><i data-icon="board"></i><span>Board</span><b class="rail-dot" hidden></b></button>
+    <button type="button" class="rail-item" data-view="machines"><i data-icon="server"></i><span>Machines</span></button>
+    <button type="button" class="rail-item" data-view="health"><i data-icon="pulse"></i><span>Health</span><b class="rail-dot" hidden></b></button>
+    <button type="button" class="rail-item" data-view="settings"><i data-icon="sliders"></i><span>Settings</span></button>
+  </nav>
+
+  <div class="app view" id="view-ask" data-view="ask">
+    <aside class="sidebar" id="sidebar" aria-label="Conversations and panel">
+      <div class="side-head">
+        <div class="brand">
+          <img src="/mark.svg" alt="" class="mark" width="22" height="22">
+          <span class="wordmark">Ixel <b>MAT</b></span>
+          <span class="version" id="version"></span>
+        </div>
+        <button type="button" class="icon-btn only-narrow" id="close-sidebar" aria-label="Close sidebar"><i data-icon="x"></i></button>
+      </div>
+
+      <div class="side-actions">
+        <button type="button" class="new-convo" id="new-question"><i data-icon="plus"></i><span>New conversation</span></button>
+      </div>
+
+      <div class="side-scroll">
+        <nav class="side-section" aria-labelledby="h-convos">
+          <h2 id="h-convos">Conversations</h2>
+          <ul class="convos" id="convos"></ul>
+        </nav>
+
+        <section class="side-section" aria-labelledby="h-panel">
+          <h2 id="h-panel">Panel <span class="count" id="panel-count"></span></h2>
+          <ul class="models" id="panel"></ul>
+        </section>
+
+        <section class="side-section" id="saver-box" aria-labelledby="h-saver" hidden>
+          <h2 id="h-saver">Usage saver</h2>
+          <div class="saver-card">
+            <div class="saves" id="saves"></div>
+            <div class="saves-sub" id="saves-sub"></div>
+            <div class="meter" id="saves-meter" hidden><i></i></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="side-foot">
+        <i data-icon="lock"></i>
+        <span>Runs on this computer. Your API keys stay here and go only to the providers you set up.</span>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+
+    <main class="main">
+      <header class="topbar">
+        <button type="button" class="icon-btn only-narrow" id="open-sidebar" aria-label="Open sidebar"><i data-icon="menu"></i></button>
+        <h1 class="convo-title" id="convo-title">New conversation</h1>
+        <span class="local-pill" title="The page and its server run only on this computer (127.0.0.1)"><i data-icon="lock"></i>Local</span>
+      </header>
+
+      <div class="scroller" id="scroller">
+        <div class="thread-wrap">
+          <div id="notice" class="notice" role="status" hidden></div>
+
+          <section class="empty" id="empty" aria-labelledby="empty-title">
+            <img src="/mark.svg" alt="" class="empty-mark" width="44" height="44">
+            <h2 id="empty-title">Ask the panel</h2>
+            <p class="lede" id="empty-lede"></p>
+            <ol class="flow" id="flow" aria-label="What happens when you ask"></ol>
+            <p class="keys"><kbd id="key-mod"></kbd><kbd>Enter</kbd> to ask <span aria-hidden="true">·</span> <kbd>/</kbd> to start typing</p>
+          </section>
+
+          <div id="threads"></div>
+        </div>
+      </div>
+
+      <div class="dock">
+        <section class="composer" aria-label="Ask the panel">
+          <div class="followup" id="followup" hidden>
+            <i data-icon="reply"></i>
+            <span id="followup-text"></span>
+            <button type="button" class="linkish" id="followup-new">Start over</button>
+          </div>
+          <label for="question" class="sr-only">Your question</label>
+          <textarea id="question" rows="1" spellcheck="true"
+            placeholder="Ask the panel anything. Paste code, an error, or a decision you're weighing."></textarea>
+          <div class="attach" id="attach" hidden>
+            <label for="material">Code to review <span>A diff, files or a document. Every model checks it, and follow-ups don't resend it.</span></label>
+            <textarea id="material" rows="6" spellcheck="false" autocomplete="off"
+              placeholder="Paste a diff (git diff), a file, or a document"></textarea>
+          </div>
+          <div class="pic-tray" id="pic-tray" hidden>
+            <ul class="pics" id="pic-list" aria-label="Pictures for this question"></ul>
+            <p class="pic-note" id="pic-note" aria-live="polite"></p>
+          </div>
+          <div class="sound-bar" id="sound-bar" role="group" aria-label="Sound" hidden>
+            <i class="sound-rec" id="sound-rec" aria-hidden="true" hidden></i>
+            <span class="sound-state" id="sound-state" aria-live="polite"></span>
+            <span class="sound-clock" id="sound-clock" hidden></span>
+            <span class="spacer"></span>
+            <button type="button" class="btn" id="sound-record"><i data-icon="mic"></i><span>Record</span></button>
+            <button type="button" class="btn" id="sound-pick">Choose a file</button>
+            <button type="button" class="btn primary" id="sound-stop" hidden>Stop and write it out</button>
+            <button type="button" class="btn" id="sound-cancel" hidden>Cancel</button>
+            <button type="button" class="btn" id="sound-retry" hidden>Send it again</button>
+            <button type="button" class="btn" id="sound-save" hidden>Save the recording</button>
+            <button type="button" class="icon-btn" id="sound-close" aria-label="Close sound" title="Close"><i data-icon="x"></i></button>
+          </div>
+          <div class="composer-bar">
+            <div class="modes" role="radiogroup" aria-label="Review mode">
+              <button type="button" role="radio" data-mode="quick">Quick</button>
+              <button type="button" role="radio" data-mode="review">Review</button>
+              <button type="button" role="radio" data-mode="deep">Deep</button>
+              <button type="button" role="radio" data-mode="saver">Saver</button>
+              <button type="button" role="radio" data-mode="auto" hidden title="Triage picks quick, review or deep for each question">Auto</button>
+            </div>
+            <button type="button" class="attach-toggle" id="attach-toggle" aria-expanded="false" aria-controls="attach"
+              title="Attach code for the panel to review" aria-label="Attach code"><i data-icon="code"></i><span>Code</span></button>
+            <button type="button" class="attach-toggle" id="picture-add"
+              title="Attach pictures or a video (you can also paste or drop them)"
+              aria-label="Attach pictures or a video"><i data-icon="image"></i><span>Picture</span></button>
+            <input type="file" id="picture-file" accept="image/*,video/*" multiple hidden>
+            <button type="button" class="attach-toggle" id="sound-add" aria-expanded="false" aria-controls="sound-bar"
+              title="Record or attach sound (or a video's): it's written out into your question" aria-label="Sound"><i data-icon="mic"></i><span>Sound</span></button>
+            <input type="file" id="sound-file" accept="audio/*,video/*,.m4a,.mp3,.wav,.webm,.ogg,.oga,.opus,.flac" hidden>
+            <span class="spacer"></span>
+            <button type="button" class="stop" id="stop" hidden><i data-icon="stop"></i>Stop</button>
+            <button type="button" class="ask" id="ask"><span>Ask</span><kbd id="shortcut"></kbd><i data-icon="arrowUp"></i></button>
+          </div>
+        </section>
+        <p class="hint" id="mode-hint"></p>
+      </div>
+    </main>
+  </div>
+
+  <section class="view page board-view" id="view-board" data-view="board" aria-labelledby="board-title" hidden>
+    <header class="topbar">
+      <h1 class="page-title" id="board-title" tabindex="-1">Board</h1>
+      <span class="page-sub" id="board-where"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn primary" id="board-new" disabled><i data-icon="plus"></i><span>New task</span></button>
+    </header>
+    <form class="board-project" id="board-project" hidden>
+      <label for="board-project-input">Project</label>
+      <input type="text" id="board-project-input" class="handoff-project" list="board-recent" spellcheck="false"
+        autocomplete="off" placeholder="The project's folder, like C:\Users\you\code\shop">
+      <datalist id="board-recent"></datalist>
+      <button type="submit" class="btn">Open</button>
+    </form>
+    <section class="board-prs" id="board-prs" aria-labelledby="board-prs-title" hidden></section>
+    <div class="board-main" id="board-main"></div>
+    <aside class="task-panel" id="task-panel" aria-labelledby="task-title" hidden></aside>
+    <dialog class="board-dialog" id="board-dialog" aria-label="Board"></dialog>
+  </section>
+
+  <section class="view page machines-view" id="view-machines" data-view="machines" aria-labelledby="machines-title" hidden>
+    <header class="topbar">
+      <h1 class="page-title" id="machines-title" tabindex="-1">Machines</h1>
+      <span class="page-sub" id="machines-sub"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn" id="machines-import" hidden>Import</button>
+      <button type="button" class="btn" id="machines-run-open" aria-label="Run on machines" aria-expanded="false" hidden><i data-icon="play"></i><span>Run on machines</span></button>
+      <button type="button" class="btn primary" id="machines-add"><i data-icon="plus"></i><span>Add machine</span></button>
+    </header>
+    <div class="scroller">
+      <div class="page-wrap" id="machines-body"></div>
+    </div>
+    <dialog class="board-dialog machines-dialog" id="machines-dialog" aria-label="Machines"></dialog>
+  </section>
+
+  <section class="view page" id="view-health" data-view="health" aria-labelledby="health-title" hidden>
+    <header class="topbar">
+      <h1 class="page-title" id="health-title" tabindex="-1">Health</h1>
+      <span class="page-sub" id="health-when"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn" id="health-check"><i data-icon="refresh"></i><span>Check now</span></button>
+    </header>
+    <div class="scroller">
+      <div class="page-wrap">
+        <div class="health-summary" id="health-summary" role="status"></div>
+        <div id="health-groups"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view page" id="view-settings" data-view="settings" aria-labelledby="settings-title" hidden>
+    <header class="topbar">
+      <h1 class="page-title" id="settings-title" tabindex="-1">Settings</h1>
+      <span class="page-sub" id="settings-where"></span>
+      <span class="spacer"></span>
+      <span class="page-sub" id="settings-docs-note" role="status"></span>
+      <button type="button" class="btn" id="settings-docs" title="Ixel's docs, in your browser"><i data-icon="book"></i><span>Docs</span></button>
+    </header>
+    <div class="scroller">
+      <div class="page-wrap">
+        <div id="settings-appearance"></div>
+        <div id="settings-body"></div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+</body>
+</html>

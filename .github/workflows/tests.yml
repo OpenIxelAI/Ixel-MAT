@@ -1,0 +1,222 @@
+name: tests
+
+# Runs only when started by hand (Actions → tests → Run workflow), so pushes and pull
+# requests spend no Actions minutes. Test locally with `pytest` before pushing.
+# Windows first: that's where Ixel is used and tested today. A run covers the Windows
+# jobs, the live check that the subscription CLIs are locked down, and the Linux and
+# macOS jobs (macOS minutes count 10x).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest-windows:
+    name: pytest (windows-latest, py3.12)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Test
+        run: python -m pytest -q
+
+  pytest:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.10" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: ubuntu-latest, python: "3.14" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Test
+        run: python -m pytest -q
+
+  installer-linux:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run install.sh
+        env:
+          IXEL_INSTALL_ROOT: ${{ runner.temp }}/ixel
+          IXEL_BIN_DIR: ${{ runner.temp }}/bin
+          IXEL_SKIP_PATH_UPDATE: "1"
+        run: ./install.sh
+      - name: Smoke test
+        run: |
+          "$RUNNER_TEMP/bin/ixel" version
+          "$RUNNER_TEMP/bin/ixel" help
+      - name: The install is recorded for ixel update
+        run: |
+          python3 -c 'import json, os; i = json.load(open(os.environ["RUNNER_TEMP"] + "/ixel/install.json")); assert (i["source"], i["installer"]) == (os.environ["GITHUB_WORKSPACE"], "install.sh"), i'
+
+  macos:
+    # One job for tests and the installer: macOS runner minutes are billed at 10x.
+    name: macOS (tests + install.sh)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Test
+        run: python -m pytest -q
+      - name: Run install.sh
+        env:
+          IXEL_INSTALL_ROOT: ${{ runner.temp }}/ixel
+          IXEL_BIN_DIR: ${{ runner.temp }}/bin
+          IXEL_SKIP_PATH_UPDATE: "1"
+        run: ./install.sh
+      - name: Smoke test
+        run: |
+          "$RUNNER_TEMP/bin/ixel" version
+          "$RUNNER_TEMP/bin/ixel" help
+          "$RUNNER_TEMP/bin/ixel" mcp --setup
+
+  installer-distros:
+    name: install.sh on ${{ matrix.image }}
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:stable-slim
+            prepare: apt-get update -qq && apt-get install -y -qq python3 git ca-certificates >/dev/null
+            finish: apt-get install -y -qq python3-venv >/dev/null
+          - image: fedora:latest
+            prepare: dnf install -y -q python3 git
+            finish: "true"
+          - image: archlinux:latest
+            prepare: pacman -Sy --noconfirm --quiet python git >/dev/null
+            finish: "true"
+    env:
+      IXEL_INSTALL_ROOT: /opt/ixel
+      IXEL_BIN_DIR: /opt/ixel-bin
+      IXEL_SKIP_PATH_UPDATE: "1"
+    steps:
+      - name: Prepare
+        run: ${{ matrix.prepare }}
+      - uses: actions/checkout@v4
+      - name: Missing pieces are explained
+        shell: bash
+        run: |
+          # Stock Debian ships python3 without venv; the installer must say how to fix it
+          if [ "${{ matrix.finish }}" != "true" ]; then
+            if ./install.sh > out.txt 2>&1; then echo "expected failure"; exit 1; fi
+            cat out.txt
+            grep -q "apt install python3-venv" out.txt
+            ${{ matrix.finish }}
+          fi
+      - name: Run install.sh
+        shell: bash
+        run: ./install.sh
+      - name: Smoke test
+        shell: bash
+        run: |
+          /opt/ixel-bin/ixel version
+          /opt/ixel-bin/ixel help
+          /opt/ixel/.venv/bin/python --version
+      - name: Test suite with the distro's Python
+        if: matrix.image == 'fedora:latest'
+        shell: bash
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/python -m pip install -q -e ".[dev]"
+          /tmp/venv/bin/python -m pytest -q
+
+  installer-windows:
+    # Both shells: Windows PowerShell 5.1 is what most people run, and it passes
+    # arguments to programs differently from PowerShell 7.
+    name: install.ps1 (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}  # a step's own shell: can't use expressions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run install.ps1
+        env:
+          IXEL_INSTALL_ROOT: ${{ runner.temp }}\ixel
+          IXEL_BIN_DIR: ${{ runner.temp }}\bin
+          IXEL_SKIP_PATH_UPDATE: "1"
+        run: ./install.ps1
+      - name: Smoke test
+        shell: cmd
+        run: |
+          "%RUNNER_TEMP%\bin\ixel.cmd" version
+          "%RUNNER_TEMP%\bin\ixel.cmd" help
+      - name: The install is recorded for ixel update
+        run: |
+          $info = Get-Content "$env:RUNNER_TEMP\ixel\install.json" -Raw | ConvertFrom-Json
+          if ($info.source -ne $env:GITHUB_WORKSPACE -or $info.installer -ne 'install.ps1') { throw "install.json: $info" }
+
+  cli-presets:
+    # The latest release of each subscription CLI, attacked through a fake model
+    # API: a vendor changing what a lock-down flag means turns this red.
+    name: Subscription CLIs are answer-only (live)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the CLIs
+        run: npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli @github/copilot opencode-ai
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Versions
+        run: |
+          claude --version; codex --version; gemini --version; copilot --version; opencode --version
+      - name: Presets refuse shell, file and MCP access
+        env:
+          IXEL_REQUIRE_CLIS: "1"
+        run: python -m pytest -q -rs tests/test_cli_presets_live.py
+
+  gui-browser:
+    name: GUI in a real browser (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install -e ".[dev]" "playwright==1.56.*"
+          python -m playwright install chromium
+      - name: Browser tests (full flow, hostile model output, CSP)
+        run: python -m pytest -q -rs tests/test_gui_browser.py
