@@ -252,12 +252,55 @@ def key(body):
 def test_a_saved_key_is_used_at_once_and_still_kept_from_the_programs_ixel_starts(config):
     status, data = key({"name": "OPENAI_API_KEY", "value": f'  "{SECRET}"\n'})
     assert status == 200 and data["state"] == "file" and SECRET not in json.dumps(data)
-    assert f'OPENAI_API_KEY="{SECRET}"' in secrets.get_env_file_path().read_text(encoding="utf-8")
+    assert SECRET.encode() not in secrets.get_keys_file_path().read_bytes()  # encrypted
+    assert not secrets.get_env_file_path().exists() and secrets.saved_names() == {"OPENAI_API_KEY"}
     assert os.environ["OPENAI_API_KEY"] == SECRET and load_settings().agent_configs["gpt"].token == SECRET
     assert "OPENAI_API_KEY" not in secrets.child_env()  # Claude Code and Codex don't get it
     status, data = key({"name": "OPENAI_API_KEY", "remove": True})
     assert status == 200 and data["state"] == "none" and "OPENAI_API_KEY" not in os.environ
-    assert "OPENAI_API_KEY" not in secrets.get_env_file_path().read_text(encoding="utf-8")
+    assert not secrets.saved_names() and not secrets.get_keys_file_path().exists()
+
+
+def test_the_page_says_where_saved_keys_are(config, keychain):
+    store = snapshot()["key_store"]
+    assert store == {"kind": "keychain", "problem": "",
+                     "where": "Keys saved in Ixel are encrypted, and the key that opens them is kept in your Mac's "
+                              "Keychain."}
+    keychain.restart(present=False)
+    store = snapshot()["key_store"]
+    assert store["kind"] == "file" and "plain-text file" in store["where"]
+    assert "because this computer has no keychain Ixel can use" in store["where"]
+    status, data = key({"name": "OPENAI_API_KEY", "value": SECRET})  # then a key goes in .env, as before
+    assert status == 200 and f'OPENAI_API_KEY="{SECRET}"' in secrets.get_env_file_path().read_text(encoding="utf-8")
+
+
+def test_a_key_isnt_saved_while_the_keychain_cant_be_opened(config, keychain):
+    key({"name": "OPENAI_API_KEY", "value": SECRET})
+    before = secrets.get_keys_file_path().read_bytes()
+    keychain.restart()
+    keychain.error = RuntimeError("locked")
+    status, data = key({"name": "XAI_API_KEY", "value": "xai-0123456789abcdef"})
+    assert status == 503 and data["error"] == ("Ixel couldn't open your Mac's Keychain, so nothing was saved. "
+                                               "Unlock it and try again.")
+    assert secrets.get_keys_file_path().read_bytes() == before and not secrets.get_env_file_path().exists()
+    store = data["settings"]["key_store"]
+    assert store["kind"] == "unavailable" and "Unlock it, then restart Ixel" in store["problem"]
+    status, data = key({"name": "OPENAI_API_KEY", "remove": True})
+    assert status == 503 and secrets.get_keys_file_path().read_bytes() == before
+    keychain.error = None  # unlocked: trying again works
+    status, data = key({"name": "XAI_API_KEY", "value": "xai-0123456789abcdef"})
+    assert status == 200 and secrets.saved_names() == {"OPENAI_API_KEY", "XAI_API_KEY"}
+    assert data["settings"]["key_store"]["kind"] == "keychain"
+
+
+def test_a_keychain_that_refuses_to_keep_a_key_still_lets_keys_be_saved(config, keychain):
+    keychain.refuse = RuntimeError("not allowed")  # a company policy against saved passwords, say
+    status, data = key({"name": "OPENAI_API_KEY", "value": SECRET})
+    assert status == 200 and data["state"] == "file" and os.environ["OPENAI_API_KEY"] == SECRET
+    assert not secrets.get_keys_file_path().exists()
+    store = data["settings"]["key_store"]
+    assert store["kind"] == "refused" and not store["problem"]
+    assert "plain-text file" in store["where"] and "your Mac's Keychain refused to keep the key" in store["where"]
 
 
 def test_a_key_set_outside_ixel_wins_and_the_page_says_so(config, monkeypatch):
@@ -285,7 +328,7 @@ def test_a_key_set_outside_ixel_wins_and_the_page_says_so(config, monkeypatch):
 def test_only_keys_ixel_uses_and_only_key_shaped_values(config, body):
     status, data = key(body)
     assert status == 400 and data["error"]
-    assert not secrets.get_env_file_path().exists()
+    assert not secrets.get_env_file_path().exists() and not secrets.get_keys_file_path().exists()
 
 
 

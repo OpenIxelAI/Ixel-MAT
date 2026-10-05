@@ -47,6 +47,7 @@ from ixel_mat.agents.base import needs_api_key
 from ixel_mat.modes.review import MAX_EARLIER_TURNS, MAX_PANEL, EarlierTurn, run_review
 from ixel_mat.runtime import (MODE_CHOICES, choose_mode, connect_agents, disconnect_agents, load_settings,
                               local_agent_names)
+from ixel_mat.config.secrets import load_env, where_keys_are
 from ixel_mat.material import Material, MaterialError, code_for_review
 from ixel_mat.sanitize import sanitize_terminal_text
 
@@ -192,7 +193,8 @@ class GuiServer:
         *,
         port: int = 0,
         token: str | None = None,
-        settings_loader: Callable = load_settings,
+        # Requests never wait for the keychain or another save (secrets.load_env)
+        settings_loader: Callable = lambda: load_settings(wait=False),
         connect: Callable[..., Awaitable[dict]] = connect_agents,
         disconnect: Callable[..., Awaitable[None]] = disconnect_agents,
         health_report: Callable[[bool], Awaitable[dict]] | None = None,
@@ -1079,6 +1081,10 @@ class GuiServer:
 
 
 async def _start(port: int) -> tuple[GuiServer, web.AppRunner]:
+    # The saved keys first, on a thread: the keychain may wait for a password prompt, and the event loop
+    # mustn't stop while it does. After this, what the keychain said is remembered, and requests read the
+    # keys without waiting (load_settings(wait=False)); anything more is asked on a thread of its own.
+    await asyncio.to_thread(lambda: (load_env(), where_keys_are()))
     gui = GuiServer(port=port)
     runner = web.AppRunner(gui.app(), access_log=None)
     await runner.setup()

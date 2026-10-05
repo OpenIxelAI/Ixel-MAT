@@ -11,9 +11,9 @@ other host is set once, as Gitea (Forgejo too) or GitLab, with the address its w
     url = "https://git.example.com"
 
 A token is optional for a public repository and needed for a private one. It's saved for one host and port
-only, as IXEL_CONN_<HOST>_<PORT>_<CHECK>_TOKEN in Ixel's .env (secrets.set_live: the programs Ixel starts
-never get it; CHECK is a hash of the exact host and port, so two names that only look alike never share
-one), and only ever sent to that host's API: over https, or over plain http only to this computer or a
+only, with the keys saved in Ixel, as IXEL_CONN_<HOST>_<PORT>_<CHECK>_TOKEN (secrets.set_live: the programs
+Ixel starts never get it; CHECK is a hash of the exact host and port, so two names that only look alike
+never share one), and only ever sent to that host's API: over https, or over plain http only to this computer or a
 Tailscale address (WireGuard already encrypts those), connecting to the address that was checked and never
 through a proxy. A public repository needs no token, so a server on your own network over plain http works
 too. Host names are compared in the form DNS uses (an international name as xn--…). Redirects

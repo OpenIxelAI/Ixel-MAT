@@ -829,10 +829,14 @@ function soundCard() {
 }
 
 function keys() {
-  return card("keys", "Keys",
-    "A saved key stays in Ixel's own file on this computer and is never shown again, here or anywhere. " +
+  const store = data.key_store;
+  const section = card("keys", "Keys",
+    `${store.where} A saved key is never shown again, here or anywhere. ` +
     "A key set in your system or shell wins over one saved here.",
     data.keys.map(keyRow));
+  // Saved keys that can't be opened (the keychain is locked, or its key is gone): above the list, in red
+  if (store.problem) section.querySelector(".set-list").before(notice("error", store.problem));
+  return section;
 }
 
 // One key's row, which can be drawn again on its own (Remove's question works while a save is under way)

@@ -4,7 +4,7 @@ on stdin, one JSON reply on stdout; see Handoff's handoff/api.py).
 
 Handoff runs as its own install's Python (`python -I -m handoff api`), found where Handoff's installers
 put it, else from the `handoff` command on PATH. The command line is fixed, so nothing a task says passes
-through a shell, and Handoff gets the environment without the keys Ixel loaded from its own .env (an API
+through a shell, and Handoff gets the environment without the keys saved in Ixel (an API
 key there would otherwise be billed instead of Claude's or Codex's subscription when Handoff runs them).
 
 Watching a board is cheap: the board's files are looked at first (their size and time), and Handoff
@@ -102,7 +102,7 @@ def handoff_command(env=os.environ, home: Path | None = None) -> list[str] | Non
 # ── Calling it ────────────────────────────────────────────────────────────────
 
 def _env() -> dict[str, str]:
-    """What Handoff runs with: none of the keys Ixel loaded from its .env (Handoff runs Claude and Codex,
+    """What Handoff runs with: none of the keys saved in Ixel (Handoff runs Claude and Codex,
     which would bill an API key instead of their subscription logins), and this Ixel findable on PATH,
     last, for the answers, reviews and pictures Handoff asks `ixel` for (an app started from a menu may
     not have the folder the installer put on PATH)."""

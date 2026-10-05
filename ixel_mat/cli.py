@@ -408,7 +408,7 @@ def cmd_status():
     """Single-screen status dashboard for providers, agents, secrets, and config."""
     from rich.table import Table
     from rich import box as rbox
-    from ixel_mat.config.secrets import load_env, get_env_file_path
+    from ixel_mat.config.secrets import get_env_file_path, load_env, where_keys_are
     from ixel_mat.config.loader import load_config, build_agent_configs, validate_config, find_config
     from ixel_mat.config.setup import PROVIDERS, _mask_key
 
@@ -417,8 +417,10 @@ def cmd_status():
     configs, warnings = build_agent_configs(config)
     issues = validate_config(config)
     config_path = find_config() or config.get("_source", "defaults")
-    secret_path = get_env_file_path()
-    secret_status = get_secret_file_status(secret_path)
+    store = where_keys_are()
+    secret_paths = [store.path]
+    if get_env_file_path() != store.path and get_env_file_path().exists():
+        secret_paths.append(get_env_file_path())  # still holding keys in plain text, beside keys.enc
 
     print_banner()
     console.print(f"  [{C['gold']}]Status Dashboard[/]\n")
@@ -491,7 +493,7 @@ def cmd_status():
     console.print()
 
     stable = Table(
-        title=f"[{C['gold']}]Secrets[/]",
+        title=f"[{C['gold']}]Saved keys[/]",
         box=rbox.SIMPLE,
         show_header=True,
         header_style=f"bold {C['moon']}",
@@ -502,13 +504,19 @@ def cmd_status():
     stable.add_column("Exists", min_width=10)
     stable.add_column("Perms", style=C["dim"], min_width=8)
     stable.add_column("Last Modified", style=C["dim"], min_width=20)
-    stable.add_row(
-        hyperlink_text(str(secret_path)),
-        f"[{C['green']}]✓[/]" if secret_status["exists"] else f"[{C['red']}]✗[/]",
-        str(secret_status["permissions_octal"]),
-        str(secret_status["last_modified"]),
-    )
+    for secret_path in secret_paths:
+        secret_status = get_secret_file_status(secret_path)
+        stable.add_row(
+            hyperlink_text(str(secret_path)),
+            f"[{C['green']}]✓[/]" if secret_status["exists"] else f"[{C['red']}]✗[/]",
+            str(secret_status["permissions_octal"]),
+            str(secret_status["last_modified"]),
+        )
     console.print(stable)
+    mark = f"[{C['green']}]✓[/]" if store.kind == "keychain" else f"[{C['gold']}]⚠[/]"
+    console.print(f"  {mark} [{C['dim']}]{safe_markup(store.summary)}[/]")
+    if store.problem:
+        console.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{safe_markup(store.problem)}[/]")
     console.print()
 
     console.print(f"  [{C['gold']}]Warnings[/]")

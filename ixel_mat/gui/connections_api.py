@@ -101,7 +101,10 @@ def set_token(settings, body: Any) -> dict:
         raise ConnectionsApiError(str(exc)) from None
     name = urlparse(host.web).netloc
     if body.get("remove") is True:
-        secrets.remove_live(host.token_env)
+        try:
+            secrets.remove_live(host.token_env)
+        except secrets.KeyStoreError as exc:
+            raise ConnectionsApiError(str(exc), 503) from None
         state = secrets.key_state(host.token_env)
         return {"state": state, "message": f"The token for {name} is also set outside Ixel ({host.token_env}), and "
                                            "that one is still used." if state == "system" else
@@ -113,7 +116,11 @@ def set_token(settings, body: Any) -> dict:
         value = settings_api.check_key_value(body.get("value"))
     except settings_api.SettingsError as exc:
         raise ConnectionsApiError(str(exc).replace("key", "token")) from None
-    if secrets.set_live(host.token_env, value) == "system":
+    try:
+        outcome = secrets.set_live(host.token_env, value)
+    except secrets.KeyStoreError as exc:
+        raise ConnectionsApiError(str(exc), 503) from None
+    if outcome == "system":
         return {"state": "system", "message": f"Saved, but {host.token_env} is also set outside Ixel, and that one "
                                               "wins. Change or remove it there."}
     return {"state": "file", "message": f"Saved the token for {name}. It's only ever sent to {name}."}

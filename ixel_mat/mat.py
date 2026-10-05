@@ -36,7 +36,7 @@ from ixel_mat.sanitize import safe_markup, sanitize_terminal_text
 from ixel_mat.theme import C, PROMPT_ARROW, moon
 from ixel_mat.update import start_background_notice
 
-# Load secrets from ~/.config/ixel-mat/.env FIRST (before config reads token_env)
+# Load the saved keys FIRST (before config reads token_env)
 _loaded_secrets = load_env()
 from ixel_mat.modes.full import FullModeDispatcher
 from ixel_mat.conversation import continued

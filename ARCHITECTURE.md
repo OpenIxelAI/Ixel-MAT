@@ -40,7 +40,7 @@ MCP plugin. The engine doesn't know which one is calling.
 | `ixel_mat/machines/` | Machines (SSH): `store.py` (`machines.json`, and imports from `~/.ssh/config` and Ixel Console), `ssh.py` (pinned host keys, learned with ssh into a temporary file; the ssh lines, with the destination after `--`), `terminal.py` (Connect's terminal window, given the argv unjoined, held open by a Python helper until Enter), `runs.py` ("Run on machines": 8 at a time, time and output limits), `log.py` (`machines.log`), `cli.py` (`ixel machines`) |
 | `ixel_mat/mcp_server.py` | `ixel mcp`: the MCP server (tools `ixel_review`, `ixel_panel`) and host setup snippets |
 | `ixel_mat/agents/` | Transports, one per kind of model (below); `launch.py` finds the program to run for a CLI (PATH only, and npm `.cmd` shims resolved on Windows) |
-| `ixel_mat/config/` | `loader.py` (TOML → `AgentConfig`, `set_agent_model`), `secrets.py` (.env, child environments, file I/O), `setup.py` (the wizard) |
+| `ixel_mat/config/` | `loader.py` (TOML → `AgentConfig`, `set_agent_model`), `secrets.py` (saved keys: `keys.enc` and its key in the system keychain, or `.env` without one; child environments, file I/O), `setup.py` (the wizard) |
 | `ixel_mat/presets.py` | The locked-down subscription CLI presets; configs refer to them by name (`preset = "codex"`) |
 | `ixel_mat/models.py` | `latest` / `latest-fast`: which model id each means, from a provider's live list |
 | `ixel_mat/sanitize.py` | Strips terminal control sequences; escapes Rich markup |
@@ -225,7 +225,20 @@ sanitized so the marker can't be forged. Runs refuse to start inside another pan
 
 `~/.config/ixel-mat/config.toml` holds `[agents.<id>]` tables plus optional `[review]`, `[saver]`,
 `[triage]`, `[sound]`, `[connections."<host>"]`, `[updates]` and `[pricing]`.
-Secrets are in `~/.config/ixel-mat/.env`, loaded at start; `token_env` names the variable. The loader
+Saved keys are in `~/.config/ixel-mat/keys.enc`, a Fernet token of `{NAME: value}` whose key is one item
+in the system keychain (`keyring`: macOS Keychain, Windows Credential Manager, Secret Service or KWallet;
+service `Ixel`, account `keys`; on Windows with keyring's own persistence, so it roams with a roaming profile
+as `keys.enc` does), or in `~/.config/ixel-mat/.env` as plain text where there's no keychain, or where it
+refuses to keep that item while there's no `keys.enc` yet.
+`secrets.load_env()` reads them at start (moving any found in `.env` into `keys.enc`); `token_env` names
+the variable. Keychain calls run on a thread with a 30-second limit, and one that fails or runs out of time
+leaves the keychain unavailable for the run: keys are then never written in plain text, and `keys.enc` is
+never overwritten. A `keys.enc` the keychain's key doesn't open is set aside as `keys.enc.unreadable` when
+a key is saved (older ones are kept, numbered, or merged back when they open with the new file's key).
+The app's requests load settings with `load_settings(wait=False)`: the keys as this run already has them,
+never waiting for the keychain or another save; what that leaves undone runs on a thread of its own
+(`secrets._load_later`), and Health runs its Ixel checks off the loop. `where_keys_are()` says where they
+are for Health, `ixel status`, `ixel setup` and Settings. The loader
 validates each field and reports problems as warnings instead of failing. Config in the current folder
 is never read. `config.example.toml` documents every option, and `tests/test_docs.py` keeps it loading
 cleanly and matching the CLI presets.
@@ -236,7 +249,10 @@ cleanly and matching the CLI presets.
 
 - `tests/conftest.py`: points every file Ixel keeps in `~/.config/ixel-mat`, and the installer's
   `install.json`, at each test's own folder, so the suite never writes yours; `test_user_files.py` fails if
-  a module still holds a path to them.
+  a module still holds a path to them. It also sets `IXEL_TEST_KEYCHAIN=memory` before Ixel is imported
+  (the programs the suite starts inherit it) and gives each test a fresh keychain in memory (the `keychain`
+  fixture, which can fail, refuse, hang or be missing), so no test reads or changes yours. Outside the
+  suite (no pytest, no `PYTEST_CURRENT_TEST`), that variable turns the keychain off instead.
 - `tests/fake_providers.py`: an in-process fake OpenAI/Anthropic API that plays a whole panel, so reviews
   run end to end with no network.
 - `tests/cli_capture.py` + `test_cli_presets_live.py`: the real subscription CLIs against a fake API that

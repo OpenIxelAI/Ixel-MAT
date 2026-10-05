@@ -2,9 +2,11 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -161,6 +163,93 @@ def test_a_keys_file_others_can_read_is_flagged(tmp_path, monkeypatch):
     assert check["state"] == "warn" and check["fix"] == f"chmod 600 '{env}'"
     env.chmod(0o600)
     assert checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]["state"] == "ok"
+
+
+def test_saved_keys_say_where_they_are(keychain):
+    from ixel_mat.config import secrets
+    check = checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]
+    assert check["state"] == "ok" and check["label"] == "Saved keys"
+    assert check["detail"] == (f"None yet. Keys you save are encrypted in {secrets.get_keys_file_path()}, and the "
+                               "key that opens them is kept in your Mac's Keychain")
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    report = run_report(settings_with(CLOUD), False, Calls())
+    assert checks_of(report)["keys-file"]["detail"] == (f"Encrypted in {secrets.get_keys_file_path()}, and the key "
+                                                        "that opens them is kept in your Mac's Keychain")
+    assert KEY not in json.dumps(report)
+
+
+def test_keys_in_plain_text_are_flagged_and_say_why(keychain):
+    from ixel_mat.config import secrets
+    keychain.restart(present=False)
+    check = checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]
+    assert check["state"] == "ok" and check["detail"].startswith("None yet. Keys you save go in")
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    check = checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]
+    who = "only you can read" if os.name == "posix" else "in your user folder"
+    assert check["state"] == "warn" and check["detail"] == (
+        f"In {secrets.get_env_file_path()}, a plain-text file {who}, because this computer has no keychain Ixel "
+        "can use")
+
+
+def test_keys_in_plain_text_because_the_keychain_refused_say_so(keychain):
+    from ixel_mat.config import secrets
+    keychain.refuse = RuntimeError("not allowed")
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    check = checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]
+    who = "only you can read" if os.name == "posix" else "in your user folder"
+    assert check["state"] == "warn" and check["detail"] == (
+        f"In {secrets.get_env_file_path()}, a plain-text file {who}, because your Mac's Keychain refused to keep "
+        "the key that would encrypt them. Ixel tries again when you next save a key or start it")
+
+
+def test_the_ixel_checks_run_off_the_event_loop(monkeypatch):
+    """Where the saved keys are may mean asking the keychain, which can wait for a password."""
+    import threading
+    ran_on = []
+    checks = health.ixel_checks
+
+    def recording(*args):
+        ran_on.append(threading.current_thread())
+        return checks(*args)
+
+    monkeypatch.setattr(health, "ixel_checks", recording)
+    report = run_report(settings_with(CLOUD), False, Calls())
+    assert ran_on and ran_on[0] is not threading.main_thread()
+    assert report["groups"][0]["id"] == "ixel" and checks_of(report)["version"]["state"] == "ok"
+
+
+def test_saved_keys_that_cant_be_used_say_what_to_do(keychain):
+    from ixel_mat.config import secrets
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    keychain.restart()
+    keychain.error = RuntimeError("locked")
+    secrets.load_env()
+    check = checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]
+    assert check["state"] == "warn" and "Unlock it, then restart Ixel" in check["detail"]
+    keychain.error = None
+    keychain.items.clear()  # the key that opens them is gone
+    keychain.restart()
+    check = checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]
+    assert check["state"] == "fail" and check["fix"] == "ixel setup"
+    assert "Add them again in Settings or with ixel setup" in check["detail"]
+
+
+def test_saved_keys_that_cant_be_read_are_one_failed_check(monkeypatch):
+    from ixel_mat.config import secrets
+
+    def unreadable():
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(secrets, "where_keys_are", unreadable)
+    check = checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]
+    assert check["state"] == "fail" and "Permission denied" in check["detail"]
+
+
+def test_every_package_ixel_needs_is_checked():
+    from ixel_mat.config.loader import tomllib
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    needed = {re.split(r"[<>=;\s\[]", dep, maxsplit=1)[0].lower() for dep in pyproject["project"]["dependencies"]}
+    assert set(health.PACKAGES) | {"tomli"} == needed  # tomli only before Python 3.11, checked on its own
 
 
 def test_failing_is_only_what_needs_fixing():

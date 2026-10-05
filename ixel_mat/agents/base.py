@@ -162,7 +162,7 @@ class AgentConfig:
     output_flag: str = ""            # e.g. "-o": the CLI writes its final answer to a file we name
     stdout_format: str = "text"      # one of STDOUT_FORMATS
     workdir: str = "temp"            # "temp" (fresh empty dir), "inherit", or a path
-    pass_env: list[str] | None = None  # ixel .env keys this process may see
+    pass_env: list[str] | None = None  # keys saved in Ixel this process may see
     env: dict[str, str] | None = None  # fixed settings for the CLI (not secrets)
     drop_env: list[str] | None = None  # removed from its environment, e.g. an API key that would
                                        # otherwise be billed instead of the subscription login

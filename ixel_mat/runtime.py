@@ -305,8 +305,10 @@ def parse_saver_settings(config: dict[str, Any], agent_names: set[str],
     return settings, warnings
 
 
-def load_settings(explicit_path: str | None = None) -> Settings:
-    load_env()
+def load_settings(explicit_path: str | None = None, wait: bool = True) -> Settings:
+    """Every setting, with the saved keys loaded first. wait=False: for the app, whose requests mustn't wait
+    for a password prompt or another save (see secrets.load_env)."""
+    load_env(wait=wait)
     return settings_from(load_config(explicit_path))
 
 

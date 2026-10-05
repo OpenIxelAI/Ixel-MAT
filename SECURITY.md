@@ -14,7 +14,7 @@ the repository is public, so if you don't see it, email us.
 
 | Asset | Where it lives |
 |---|---|
-| Your API keys | `~/.config/ixel-mat/.env` (mode 0600), or your shell environment |
+| Your API keys | `~/.config/ixel-mat/keys.enc` (0600), encrypted with a key kept in your system's keychain (below). On a computer with no keychain Ixel can use, or one that won't keep that key, `~/.config/ixel-mat/.env` (0600), in plain text. Or your shell environment |
 | Your subscription logins | Each CLI's own storage (`~/.claude`, `~/.codex`, `~/.gemini`…). Ixel never reads these |
 | Your files | Anything your user account can read |
 | Your code | Only the diff or files you name for a review (`--diff`, `--file`…) are read, once, and sent to the models on your panel (below) |
@@ -31,15 +31,64 @@ the repository is public, so if you don't see it, email us.
 4. **Other programs' settings** that make a CLI more permissive than Ixel expects.
 5. **Lookalike services.** Sites that resell a model's API under its name see everything sent through them.
 
-We don't try to protect against someone who already controls your user account. They can read your keys
-directly.
+We don't try to protect against someone who already controls your user account. They can get your keys
+anyway: from your keychain, which gives them to programs you run (below), or from Ixel while it runs.
 
 ## Protections
 
 ### Keys
 
-- Stored with owner-only permissions (0600) and written atomically, so a crash never leaves a
-  half-written or world-readable file.
+- **Encrypted, with the key in your keychain.** A key you save with `ixel setup` or in Settings goes in
+  `~/.config/ixel-mat/keys.enc`, encrypted (Fernet: AES-128 with an HMAC-SHA256), and the key that opens
+  that file is one item in your system's keychain, as Chrome keeps its saved passwords: the macOS Keychain,
+  Windows Credential Manager, or on Linux GNOME Keyring, KWallet or another keyring that offers the Secret
+  Service, through the `keyring` package. The item is named `Ixel`, account `keys`. On Windows it goes with
+  a profile that roams, as `keys.enc` in it does, so the keys open on each computer you sign in to. Ixel
+  reads that item once per run and keeps it in memory while it runs.
+- **A copy of your files.** A backup, a synced folder or a copy of your home folder holds no key anyone can
+  read without your keychain's password. Your keychain is kept in your home folder too (on Windows, in your
+  profile's AppData folder), so a full copy of your home folder is only as safe as that password, which on
+  a Mac and on Windows is usually the one you sign in with. A Linux keyring given a blank password, so that
+  it stops asking, protects nothing.
+- **Moved out of `.env`.** Keys an earlier Ixel kept in `~/.config/ixel-mat/.env` move into `keys.enc` the
+  first time Ixel runs with a keychain it can use, and so does a line you add to `.env` by hand later.
+  `.env` is deleted once nothing but comments is left in it.
+- **A keychain that doesn't answer.** Ixel gives the keychain 30 seconds (time to type your password when a
+  Mac asks, or to unlock a Linux keyring). If it doesn't answer in time, or fails, the keys in `keys.enc`
+  aren't used in that run, Health says so, and saving a key fails with "unlock it and try again". A key is
+  never written in plain text instead, and `keys.enc` is never overwritten while it can't be opened. The
+  app's pages never wait for the keychain, except to save or remove a key: the app asks it once as it
+  starts, and after that on a thread of its own (for keys another Ixel saved meanwhile, or ones to move out
+  of `.env`).
+- **A keychain that won't keep the key.** If your keychain opens but refuses to keep Ixel's item (a company
+  policy against saved passwords, say, or a Linux keyring with nowhere to keep it), and there's no
+  `keys.enc` yet, keys go in `.env` in plain text, readable only by you, as on a computer with no keychain,
+  and Health, `ixel doctor`, `ixel status`, `ixel setup` and Settings say the keychain refused. Ixel asks
+  again each time you save a key, and each time it starts with keys in `.env`; they move into `keys.enc`
+  once the keychain keeps the item. Beside a `keys.enc`, a refusal means nothing is saved. A keychain
+  that's locked, or a password prompt you turn down, isn't a refusal: saving then fails with "unlock it
+  and try again".
+- **No keychain, plain text.** Only those keychains count. On a computer with none, such as a Linux server
+  with no Secret Service, or with `keyring` turned off (`PYTHON_KEYRING_BACKEND`, or its own settings
+  file), keys stay in `.env` in plain text, readable only by you (0600), and Health, `ixel doctor`,
+  `ixel status`, `ixel setup` and Settings say so. keyring's other backends, such as the plain-text files of
+  `keyrings.alt`, are never used: they'd keep the key next to the file it opens.
+- **If the key is gone.** When `keys.enc` can't be opened with the keychain's key (the item was deleted, or
+  the file came from another computer), Ixel uses none of its keys, leaves the file as it is, and Health
+  says to add them again. Saving a key then renames it `keys.enc.unreadable` and starts a new `keys.enc`.
+  A file set aside this way is never overwritten: an older `keys.enc.unreadable` is kept as
+  `keys.enc.unreadable-2` (then `-3`…), unless it opens with the key of the new `keys.enc` (it's this
+  computer's own, from before another computer's keychain wrote `keys.enc` in a folder that's synced, or
+  from before the keychain's item came back). Then its keys go into the new file, and it's deleted.
+- Written with owner-only permissions (0600) and atomically, so a crash never leaves a half-written or
+  world-readable file. Two Ixels saving at once take turns (through `keys.enc.lock`, which is taken over
+  if an Ixel that stopped mid-save left it behind for 2 minutes). When the keychain is still asking for
+  your password as Ixel stops waiting for a new item, the lock stays until it answers (or those 2 minutes
+  pass), so no other Ixel makes a different one meanwhile.
+- **What the keychain doesn't stop.** A program running as you can usually ask the keychain too: Windows
+  gives it to any program you run, an unlocked Linux keyring to any program in your session, and a Mac
+  asks first, except for the Python that saved it (a script run with that same Python counts as it). While
+  Ixel runs, your keys are in its memory and environment, as before.
 - Never written to `config.toml` (it holds only the *name* of the variable), the browser app, the
   plugin's output, or `ixel config` output. `ixel_panel` reports "missing API key", never a key.
 - Sent only over HTTPS/WSS, or over plain `http://` and `ws://` to this machine, and refused for any
@@ -47,8 +96,8 @@ directly.
   in `ixel agents`, `ixel status`, `ixel doctor --check`, `ixel model` and Health's **Check now**. A model
   server on your own network that needs no key (an Ollama on another PC) may use plain `http://`, and gets
   no `Authorization` header; give it a key and Ixel refuses to send it over `http://`.
-- **Checked only with their own provider.** `ixel status` checks each provider key it finds (in Ixel's
-  `.env` or your environment) by asking that provider for its list of models, even a key no agent uses
+- **Checked only with their own provider.** `ixel status` checks each provider key it finds (saved in
+  Ixel, or in your environment) by asking that provider for its list of models, even a key no agent uses
   yet. That request carries the key and nothing else: no question, no other key.
 - **Redirects are never followed** when a key is involved (API calls, the setup wizard's model lists, the
   gateway connection). A redirect would re-send the request to another host, cleartext `http://`
@@ -88,7 +137,7 @@ files. Ixel uses them only to answer, and for each preset:
   line that other users of the computer can read with `ps`. An agent you set up with `prompt_via = "auto"`
   or `"arg"` gets it after `--`, never as a bare argument, so a question that starts with
   `--dangerously-…` stays a question.
-- **None of Ixel's keys:** keys Ixel loaded from its `.env` are withheld unless an agent lists them in
+- **None of Ixel's keys:** keys saved in Ixel are withheld unless an agent lists them in
   `pass_env`. The Claude Code, Codex, Gemini CLI and Copilot presets also drop every AI vendor's key from
   your environment with `drop_env` (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`…): their own
   would make the CLI bill an API account instead of your plan, and the others are no business of theirs.
@@ -279,8 +328,8 @@ authors hidden. It never gets your keys, which model wrote what, or anything els
   address works only if you set it, and then every start warns you, naming the host that will see your
   questions: in the terminal, on the app's page and in the plugin's results. An address on this computer
   (`localhost`, `127.0.0.1`) isn't flagged, since only a program you run there can answer it. `http://` is refused except to this machine. The key is never accepted in `config.toml`; it
-  lives in `TYPESAFE_API_KEY`, which `ixel setup` stores in your 0600 `.env`. Keys Ixel loads from there are
-  withheld from the CLIs it runs, like every other key. A redirect is an error, never followed, so the key
+  lives in `TYPESAFE_API_KEY`, which `ixel setup` saves with your other keys (see Keys, above). Keys saved
+  in Ixel are withheld from the CLIs it runs, like every other key. A redirect is an error, never followed, so the key
   and your text can't be forwarded. Replies over 64 KB are refused.
 - **Checked replies.** Probabilities and confidences must be numbers from 0 to 1, and anything unexpected
   counts as "no answer". A model that leaves its confidence out is taken as a coin flip, which never

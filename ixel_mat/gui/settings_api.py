@@ -100,6 +100,12 @@ def known_keys(settings) -> list[dict]:
             for entry in found.values()]
 
 
+def key_store() -> dict:
+    """Where saved keys are kept, in words, and what's wrong when they can't be used ("" when nothing is)."""
+    store = secrets.where_keys_are()
+    return {"kind": store.kind, "where": store.summary, "problem": store.problem}
+
+
 def _holds_secrets(config: dict) -> bool:
     """A key written into config.toml itself (an agent's token or env, Triage's token): the backup copy
     would keep it after it's taken out, so there's no backup then."""
@@ -174,6 +180,7 @@ def snapshot(settings, version: str | None = None) -> dict:
         "images": {"provider": image_provider if image_provider in images.PROVIDERS else ""},
         "sound": _sound(settings),
         "keys": known_keys(settings),
+        "key_store": key_store(),
         "choices": {"modes": list(MODES), "plain": list(PLAIN), "escalate": list(ESCALATE),
                     "on_wrong": list(ON_WRONG), "efforts": list(EFFORT_LEVELS),
                     "triage_providers": list(TRIAGE_PROVIDERS),
@@ -583,7 +590,7 @@ def change(settings, body: Any) -> dict | None:
 
 
 NEW_FILE = ("# Ixel MAT — Agent Configuration\n"
-            "# Started in the app's Settings. ixel setup can add more; secrets live in .env, never here.\n")
+            "# Started in the app's Settings. ixel setup can add more. Keys never go in this file.\n")
 
 
 def _new_file(version: str) -> tuple[Path, str]:
@@ -664,14 +671,20 @@ def set_key(settings, body: Any) -> dict:
         raise SettingsError("That isn't a key Ixel uses.")
     label = allowed[name]["label"]
     if body.get("remove") is True:
-        removed = secrets.remove_live(name)
+        try:
+            removed = secrets.remove_live(name)
+        except secrets.KeyStoreError as exc:
+            raise SettingsError(str(exc), 503) from None
         state = secrets.key_state(name)
         if state == "system":
             return {"state": state, "message": f"{label}'s key is also set outside Ixel ({name}), and that one is "
                                                "still used. Remove it there to stop using it."}
         return {"state": state, "message": f"Removed {label}'s key." if removed else f"{label} had no key saved here."}
     value = check_key_value(body.get("value"))
-    outcome = secrets.set_live(name, value)
+    try:
+        outcome = secrets.set_live(name, value)
+    except secrets.KeyStoreError as exc:
+        raise SettingsError(str(exc), 503) from None
     if outcome == "system":
         return {"state": "system", "message": f"Saved, but {name} is also set outside Ixel (in your system or "
                                               "shell), and that one wins. Change or remove it there."}

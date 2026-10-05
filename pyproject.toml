@@ -17,6 +17,7 @@ dependencies = [
     "aiohttp>=3.9",
     "anthropic>=1.8",
     "mcp>=2.2",
+    "keyring>=24",
     "tomli>=2.0; python_version < '3.11'",
 ]
 

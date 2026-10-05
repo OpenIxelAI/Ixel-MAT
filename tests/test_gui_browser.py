@@ -1444,8 +1444,11 @@ def test_settings_keys_go_in_and_never_come_back(settings_gui, browser):
     page.wait_for_selector('[data-note="key:OPENAI_API_KEY"].ok')
     assert "Saved OpenAI's key" in row.inner_text()
     assert row.locator(".set-state").inner_text() == "Saved in Ixel"
-    env_file = path.parent / ".env"
-    assert secret in env_file.read_text(encoding="utf-8")
+    keys_file = path.parent / "keys.enc"  # encrypted, with the key in the suite's keychain (in memory)
+    assert keys_file.exists() and secret.encode() not in keys_file.read_bytes()
+    assert not (path.parent / ".env").exists()
+    assert page.locator("section[aria-labelledby=set-h-keys] .set-hint").inner_text().startswith(
+        "Keys saved in Ixel are encrypted, and the key that opens them is kept in your keychain.")
 
     # Nowhere in the page, nor in anything the page can ask for
     assert row.locator("input[type=password]").input_value() == ""
@@ -1460,12 +1463,12 @@ def test_settings_keys_go_in_and_never_come_back(settings_gui, browser):
     assert page.evaluate("document.activeElement.textContent") == "Remove"
     row.locator("button:has-text('Keep it')").click()
     assert page.evaluate("document.activeElement.textContent") == "Remove"
-    assert secret in env_file.read_text(encoding="utf-8")
+    assert keys_file.exists()
     row.locator("button:has-text('Remove')").click()
     row.locator("button:has-text('Remove')").click()
     page.wait_for_selector('[data-note="key:OPENAI_API_KEY"]:has-text("Removed")')
     assert row.locator(".set-state").inner_text() == "Not set"
-    assert secret not in env_file.read_text(encoding="utf-8")
+    assert not keys_file.exists()  # its only key is gone
 
     # Something that isn't a key is refused before it's saved
     row.locator("input[type=password]").fill("my key has spaces")
@@ -1503,7 +1506,8 @@ def test_settings_without_a_file_say_so_and_still_take_keys(tmp_path, browser):
         row.locator("input[type=password]").fill("sk-ant-test-0123456789")
         row.locator("button:has-text('Save')").click()
         page.wait_for_selector('[data-note="key:ANTHROPIC_API_KEY"].ok')
-        assert "sk-ant-test-0123456789" in (home / ".config" / "ixel-mat" / ".env").read_text(encoding="utf-8")
+        keys_file = home / ".config" / "ixel-mat" / "keys.enc"
+        assert keys_file.exists() and b"sk-ant-test-0123456789" not in keys_file.read_bytes()
         assert not errors, errors
 
 

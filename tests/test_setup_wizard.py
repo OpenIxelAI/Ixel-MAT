@@ -1,6 +1,7 @@
 """Setup wizard: live model lists, command-line agent presets, review defaults, config output."""
 import io
 import json
+import os
 
 import pytest
 
@@ -447,7 +448,7 @@ def test_triage_step_saves_the_key_privately_and_writes_a_triage_section(monkeyp
     assert saved == {"TYPESAFE_API_KEY": "ts-pasted-key"}
 
     text = wizard._build_toml([], review, None, triage)
-    assert "ts-pasted-key" not in text  # the key lives only in the private .env file
+    assert "ts-pasted-key" not in text  # the key is saved with your other keys, never in config.toml
     parsed = tomllib.loads(text)
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-pasted-key")
     settings, warnings = parse_triage_settings(parsed)
@@ -767,3 +768,59 @@ def test_a_settings_file_that_cant_be_read_is_replaced_and_kept_as_the_backup(mo
     # And a copy that the next run's backup won't replace
     [aside] = tmp_path.glob("config.toml.unreadable-*")
     assert aside.read_text(encoding="utf-8") == "[agents.broken\n"
+
+
+# ── Where keys go ─────────────────────────────────────────────────────────────
+
+def wizard_output(monkeypatch):
+    from rich.console import Console
+    buf = io.StringIO()
+    monkeypatch.setattr(wizard, "console", Console(file=buf, width=300))
+    return lambda: " ".join(buf.getvalue().split())
+
+
+def test_setup_says_where_keys_go(monkeypatch, keychain):
+    for p in wizard.PROVIDERS:
+        monkeypatch.delenv(p["env_name"], raising=False)
+    said = wizard_output(monkeypatch)
+    wizard._print_welcome(wizard._detect_status())
+    assert "Keys saved in Ixel are encrypted, and the key that opens them is kept in your Mac's Keychain." in said()
+    keychain.restart(present=False)
+    said = wizard_output(monkeypatch)
+    wizard._print_welcome(wizard._detect_status())
+    assert "plain-text file" in said() and "because this computer has no keychain Ixel can use." in said()
+
+
+def test_setup_says_when_a_key_couldnt_be_saved_and_never_writes_it_in_plain_text(monkeypatch, keychain):
+    from ixel_mat.config import secrets
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    secrets.save_secret("OPENAI_API_KEY", "sk-one")
+    keychain.restart()
+    keychain.error = RuntimeError("locked")
+    said = wizard_output(monkeypatch)
+    wizard._save_key("XAI_API_KEY", "xai-two")
+    assert ("Ixel couldn't open your Mac's Keychain, so nothing was saved. Unlock it and try again. Until then, "
+            "setup uses the key without saving it.") in said()
+    assert os.environ["XAI_API_KEY"] == "xai-two" and not secrets.get_env_file_path().exists()
+
+
+def test_setup_saves_keys_where_the_keychain_refuses_to_keep_one_and_says_so(monkeypatch, keychain):
+    from ixel_mat.config import secrets
+    for p in wizard.PROVIDERS:
+        monkeypatch.delenv(p["env_name"], raising=False)
+    keychain.refuse = RuntimeError("not allowed")  # a company policy against saved passwords, say
+    said = wizard_output(monkeypatch)
+    wizard._save_key("XAI_API_KEY", "xai-two")
+    assert "nothing was saved" not in said()
+    assert 'XAI_API_KEY="xai-two"' in secrets.get_env_file_path().read_text(encoding="utf-8")
+    keychain.restart()  # the next run of setup
+    said = wizard_output(monkeypatch)
+    wizard._print_welcome(wizard._detect_status())
+    assert "plain-text file" in said()
+    assert "because your Mac's Keychain refused to keep the key that would encrypt them." in said()
+
+
+def test_the_settings_file_says_keys_never_go_in_it():
+    text = wizard._build_toml([{"id": "gpt", "type": "http", "url": "https://api.openai.com/v1/chat/completions",
+                                "token_env": "OPENAI_API_KEY", "label": "GPT"}])
+    assert "# Keys never go in this file" in text and ".env —" not in text
