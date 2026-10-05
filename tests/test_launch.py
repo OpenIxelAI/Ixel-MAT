@@ -309,3 +309,85 @@ def test_windows_counts_the_quoting_a_prompt_needs(monkeypatch):
     quotes = '"' * 20_000
     assert oneshot.arg_size(quotes) == 40_000  # each " is passed as \"
     assert oneshot.arg_size("é" * 100) == 100  # characters, not bytes
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows gives a program from the Start menu your whole PATH")
+def test_programs_where_their_installers_put_them_are_found_from_the_app_menu(tmp_path, monkeypatch):
+    # The app menu's PATH has nothing your shell's startup file adds, where OpenCode's installer adds ~/.opencode/bin
+    monkeypatch.setenv("HOME", str(tmp_path))
+    program = tmp_path / ".opencode" / "bin" / "opencode"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\n")
+    program.chmod(0o755)
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    (tmp_path / "empty").mkdir()
+    env = {"PATH": str(tmp_path / "empty")}
+    added = launch.add_install_folders(env)
+    assert str(program.parent) in added and str(tmp_path / ".local" / "bin") in added
+    assert not any(".bun" in folder for folder in added)  # only folders that are there
+    # After what PATH had, so a program on it is still the one that runs
+    assert env["PATH"].split(os.pathsep)[0] == str(tmp_path / "empty")
+    monkeypatch.setenv("PATH", env["PATH"])
+    assert find_on_path("opencode") == str(program)
+    assert launch.add_install_folders(env) == [] and env["PATH"] == os.environ["PATH"]  # never twice
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows gives a program from the Start menu your whole PATH")
+def test_a_folder_anyone_can_write_to_is_never_added(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    folder = tmp_path / ".opencode" / "bin"
+    folder.mkdir(parents=True)
+    folder.chmod(0o777)
+    env = {"PATH": "/usr/bin"}
+    assert not any(".opencode" in f for f in launch.add_install_folders(env))
+    folder.chmod(0o755)
+    monkeypatch.setattr(launch.os, "getuid", lambda: 4242)  # someone else's
+    if os.stat(folder).st_uid != 0:
+        assert not any(".opencode" in f for f in launch.add_install_folders(env))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows gives a program from the Start menu your whole PATH")
+def test_no_path_at_all_keeps_the_default_one(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".opencode" / "bin").mkdir(parents=True)
+    env = {}
+    launch.add_install_folders(env)
+    folders = env["PATH"].split(os.pathsep)
+    assert folders[:2] == [f for f in os.defpath.split(os.pathsep) if f]
+    assert str(tmp_path / ".opencode" / "bin") in folders
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows gives a program from the Start menu your whole PATH")
+def test_a_folder_already_on_path_keeps_its_place(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".opencode" / "bin").mkdir(parents=True)
+    env = {"PATH": f"{tmp_path / '.opencode' / 'bin'}/{os.pathsep}/usr/bin"}  # spelled with a trailing /
+    assert not any(".opencode" in folder for folder in launch.add_install_folders(env))
+    assert env["PATH"].startswith(f"{tmp_path / '.opencode' / 'bin'}/{os.pathsep}/usr/bin")
+
+
+def test_windows_path_is_left_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(launch, "WINDOWS", True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".opencode" / "bin").mkdir(parents=True)
+    env = {"PATH": "C:\\Windows"}
+    assert launch.add_install_folders(env) == [] and env == {"PATH": "C:\\Windows"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows gives a program from the Start menu your whole PATH")
+def test_ixel_opened_from_the_app_menu_finds_opencode_where_its_installer_put_it(tmp_path):
+    # As the app menu starts Ixel: a bare PATH, OpenCode in ~/.opencode/bin, and a panel with OpenCode on it
+    import subprocess
+    program = tmp_path / ".opencode" / "bin" / "opencode"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\necho 'opencode v2.0.23'\n")
+    program.chmod(0o755)
+    config = tmp_path / ".config" / "ixel-mat" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('[agents.opencode]\npreset = "opencode"\n', encoding="utf-8")
+    (tmp_path / "empty").mkdir()
+    env = {"HOME": str(tmp_path), "PATH": str(tmp_path / "empty"), "IXEL_TEST_KEYCHAIN": "memory",
+           "IXEL_NO_UPDATE_CHECK": "1", "XDG_CONFIG_HOME": str(tmp_path / ".config"), "PYTHONIOENCODING": "utf-8"}
+    out = subprocess.run([sys.executable, "-m", "ixel_mat", "doctor"], env=env, capture_output=True,
+                         encoding="utf-8", timeout=120, cwd=tmp_path).stdout
+    assert "opencode is installed" in " ".join(out.split()) and "isn't installed" not in out

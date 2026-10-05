@@ -148,6 +148,37 @@ def test_cli_agent_model_can_be_chosen(monkeypatch):
     assert cmd[cmd.index("--model") + 1] == "opus" and "q" not in cmd and stdin == b"q"
 
 
+def test_opencode_with_only_its_own_models_is_left_off_unless_you_say(monkeypatch):
+    # Its free models answer only inside OpenCode: every question would come back turned down
+    monkeypatch.setattr(wizard, "find_on_path", lambda cmd: "/usr/bin/opencode" if cmd == "opencode" else None)
+    defaults = []
+    monkeypatch.setattr(wizard.Confirm, "ask", lambda *a, **k: defaults.append(k["default"]) or k["default"])
+    monkeypatch.setattr(wizard.Prompt, "ask", lambda *a, **k: "")
+    monkeypatch.setattr(wizard, "_opencode_only_free", lambda: True)
+    assert wizard._configure_cli_agents(set()) == [] and defaults == [False]
+    monkeypatch.setattr(wizard, "_opencode_only_free", lambda: False)
+    assert [a["id"] for a in wizard._configure_cli_agents(set())] == ["opencode"] and defaults[-1] is True
+
+
+def test_setup_asks_opencode_for_its_models_as_settings_does(monkeypatch):
+    from ixel_mat.gui import model_choices
+    seen = []
+
+    def models(cfg, args):
+        seen.append((cfg.command, args, cfg.env.get("OPENCODE_DISABLE_MODELS_FETCH")))
+        return [{"id": "opencode/big-pickle"}, {"id": "opencode/fledge-alpha-free"}]
+
+    monkeypatch.setattr(model_choices, "program_models", models)
+    assert wizard._opencode_only_free() is True
+    assert seen == [("opencode", ["models"], "1")]  # what it already knows: its catalog isn't fetched
+    for theirs in ("github-copilot/gpt-6-sol", "opencode/claude-opus-5-5"):  # a provider, or Zen credit
+        monkeypatch.setattr(model_choices, "program_models",
+                            lambda cfg, args: [{"id": "opencode/big-pickle"}, {"id": theirs}])
+        assert wizard._opencode_only_free() is False
+    monkeypatch.setattr(model_choices, "program_models", lambda cfg, args: 1 / 0)  # can't say: no warning
+    assert wizard._opencode_only_free() is False
+
+
 def test_small_panels_hear_about_free_members(monkeypatch):
     from rich.console import Console
 

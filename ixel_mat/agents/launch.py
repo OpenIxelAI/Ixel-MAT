@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Callable
 
@@ -148,3 +149,55 @@ def find_on_path(name: str) -> str | None:
             if os.path.isfile(candidate) and (WINDOWS or os.access(candidate, os.X_OK)):
                 return candidate
     return None
+
+
+# Where the model programs' own installers put them. Ixel opened from the app menu (or its plugin, started by
+# Claude Desktop) gets the desktop's PATH, which has nothing your shell's startup file adds, and nothing added since
+# you logged in; the Mac app's login shell reads ~/.zprofile but not ~/.zshrc. OpenCode's installer
+# (curl -fsSL https://opencode.ai/install | bash) puts it in ~/.opencode/bin and adds that to ~/.bashrc or ~/.zshrc
+# only, so the Ixel app couldn't find the OpenCode your terminal runs.
+INSTALL_FOLDERS = (
+    "~/.opencode/bin",                 # OpenCode's install script
+    "~/bin",                           # your own programs, which some install scripts use when it's there
+    "~/.local/bin",                    # Claude Code's own installer, pipx, uv
+    "~/.npm-global/bin",               # npm's advice for global installs without sudo
+    "~/.bun/bin",                      # bun install -g
+    "~/.volta/bin",                    # Volta
+    "/opt/homebrew/bin",               # Homebrew on a Mac with Apple silicon
+    "/usr/local/bin",                  # Homebrew on an Intel Mac (always on PATH on Linux)
+    "/home/linuxbrew/.linuxbrew/bin",  # Homebrew on Linux
+)
+
+
+def add_install_folders(environ=None) -> list[str]:
+    """
+    Puts each of INSTALL_FOLDERS that's there, is yours or the system's, and isn't on PATH at the end of PATH
+    (so whatever PATH already has is found first), and returns the ones it added. Not on Windows, where a
+    program started from the Start menu gets your whole PATH.
+    """
+    environ = os.environ if environ is None else environ
+    if WINDOWS:
+        return []
+    # No PATH at all means the system's default one to a program starting another: kept, not replaced
+    folders = [f for f in (environ.get("PATH") or os.defpath).split(os.pathsep) if f]
+    have = {os.path.normpath(f) for f in folders}
+    added = []
+    for folder in INSTALL_FOLDERS:
+        folder = os.path.normpath(os.path.expanduser(folder))
+        if os.path.isabs(folder) and folder not in have and _trusted_folder(folder):
+            added.append(folder)
+            have.add(folder)
+    if added:
+        environ["PATH"] = os.pathsep.join([*folders, *added])
+    return added
+
+
+def _trusted_folder(folder: str) -> bool:
+    """A folder that's yours or the system's, and that nobody else can write to: on a computer you share, another
+    person's Homebrew folder mustn't be where your claude or codex is found. (Homebrew's own folder may be writable
+    by the admin group, as its Mac installer leaves it.)"""
+    try:
+        info = os.stat(folder)
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.getuid()) and not info.st_mode & stat.S_IWOTH

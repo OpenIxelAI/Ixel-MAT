@@ -24,6 +24,13 @@ from ixel_mat.machines import log as machines_log, ssh as machines_ssh, store as
 
 
 @pytest.fixture(autouse=True)
+def _path_as_it_was(monkeypatch):
+    # A test that runs ixel's main() in-process adds the model programs' install folders to PATH (launch.py):
+    # the next test starts from the PATH the suite started with, never finding your own opencode or claude there
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+
+
+@pytest.fixture(autouse=True)
 def _no_update_checks(monkeypatch):
     # Tests that start the terminal app must not ask GitHub for updates when the suite runs
     # from an installed copy (tests/test_update.py turns the check back on where it's tested).
