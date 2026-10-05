@@ -736,6 +736,63 @@ def test_the_apps_pages_dont_wait_to_open_keys_another_ixel_saved(keychain):
     wait_for(lambda: os.environ.get("OPENAI_API_KEY") == "sk-one")
 
 
+def test_the_apps_pages_dont_wait_while_a_save_asks_a_keychain_that_failed_before(keychain, monkeypatch):
+    """The keychain failed as the app started; unlocked since, a save asks it again. Settings and Health give
+    the answer they had meanwhile, rather than waiting for the save (and its password prompt)."""
+    monkeypatch.setattr(secrets, "KEYCHAIN_TIMEOUT", 5.0)
+    calls, answer = [], threading.Event()
+
+    def find():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("locked")
+        answer.wait(5)
+        return keychain, "your Mac's Keychain"
+    monkeypatch.setattr(secrets, "_keychain", secrets._Keychain(find))
+    assert secrets.where_keys_are().kind == "unavailable"  # as the app does when it starts
+    thread, errors = _saving_in_the_background("OPENAI_API_KEY", "sk-one")
+    wait_for(lambda: len(calls) == 2)
+    store = quickly(lambda: secrets.where_keys_are(wait=False))
+    assert store.kind == "unavailable" and "Unlock it" in store.problem
+    from ixel_mat import health
+    assert quickly(lambda: health.keys_check(wait=False)).state == "warn"
+    answer.set()
+    thread.join(5)
+    assert not errors and secrets.where_keys_are(wait=False).kind == "keychain"
+
+
+def test_the_apps_pages_dont_wait_for_a_keychain_never_asked(keychain):
+    keychain.restart()  # nothing asked it yet, and a save holds the keys meanwhile
+    held, done = threading.Event(), threading.Event()
+
+    def save():
+        with secrets._STORE_LOCK:
+            held.set()
+            done.wait(5)
+    thread = threading.Thread(target=save, daemon=True)
+    thread.start()
+    held.wait(5)
+    store = quickly(lambda: secrets.where_keys_are(wait=False))
+    assert store.kind == "unavailable" and "still waiting" in store.problem
+    done.set()
+    thread.join(5)
+    wait_for(lambda: secrets.where_keys_are(wait=False).kind == "keychain")  # asked on a thread of its own
+
+
+def test_a_key_saved_in_lower_case_is_withheld_on_windows_too(monkeypatch):
+    """Windows keeps variable names in capitals: one saved by hand as my_tool_key is MY_TOOL_KEY there."""
+    monkeypatch.setattr(secrets, "_IGNORE_CASE", True)
+    for name in ("my_tool_key", "MY_TOOL_KEY"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    assert secrets.set_live("my_tool_key", "sk-one") == "saved"
+    os.environ["MY_TOOL_KEY"] = os.environ.pop("my_tool_key")  # as Windows keeps it
+    env = secrets.child_env()
+    assert "MY_TOOL_KEY" not in env and "my_tool_key" not in env
+    assert secrets.child_env(pass_env=["my_tool_key"])["MY_TOOL_KEY"] == "sk-one"
+    assert secrets.key_state("MY_TOOL_KEY") != "system" and secrets.ixels_own("MY_TOOL_KEY") == "sk-one"
+
+
 def test_keys_added_to_env_by_hand_are_used_at_once_and_moved_on_a_thread(keychain, monkeypatch):
     monkeypatch.setattr(secrets, "LOCK_WAIT", 5.0)
     secrets.save_secret("OPENAI_API_KEY", "sk-one")

@@ -37,6 +37,9 @@ _KEYS_FILE = _ENV_DIR / "keys.enc"
 
 # Names load_env() put into os.environ (not ones the user exported themselves)
 _INJECTED: set[str] = set()
+# Windows ignores case in variable names (os.environ keeps them in capitals), and so do comparisons of them
+# there: a key saved by hand as openai_api_key is OPENAI_API_KEY to every program
+_IGNORE_CASE = os.name == "nt"
 # os.environ and _INJECTED change together, and are read together: the app's Settings page saves
 # a key from one thread while programs are started from others, and one of those must never see a
 # key saved in Ixel that it isn't meant to (Claude Code and Codex would bill it).
@@ -266,6 +269,7 @@ class _Keychain:
         self.locked = False             # the last call that failed did because it's locked (or unlocking was
                                         # turned down)
         self._waiting: threading.Event | None = None
+        self.store: KeyStore | None = None  # where_keys_are's last answer, for a page that mustn't wait
         # A key it was asked to keep that ran out of time, and may still be kept: set once that call ends
         self.unsettled: threading.Event | None = None
 
@@ -386,17 +390,26 @@ class KeyStore:
 def where_keys_are(wait: bool = True) -> KeyStore:
     """Where saved keys are kept, and what's wrong if they can't be used. Asks the keychain only what
     this run hasn't asked yet, and not again once it failed. When this run knows already, it answers
-    at once, even while a key is being saved (a page asks then). wait=False is for the app's pages: when
-    keys.enc is there but this run hasn't opened it yet (another Ixel made it since this one started), it's
-    opened on a thread of its own, and meanwhile the answer is that it's kept with this run's keychain."""
+    at once, even while a key is being saved (a page asks then). wait=False is for the app's pages, which
+    never wait for the keychain: when the answer means asking it (keys.enc made by another Ixel since this
+    one asked, or a save asking it again right now), it's asked on a thread of its own, and meanwhile the
+    answer is that keys.enc is kept with this run's keychain, or else this run's last answer."""
     try:
-        return _where(ask=False)
+        store = _where(ask=False)
     except _NotNow:
-        if not wait and _keychain._found is not None and _KEYS_FILE.exists():
+        if not wait:
             _load_later()
-            return KeyStore("keychain", _keychain.label, _KEYS_FILE)
+            if _keychain._found is not None and _KEYS_FILE.exists():
+                return KeyStore("keychain", _keychain.label, _KEYS_FILE)
+            if _keychain.store is not None:
+                return _keychain.store
+            made = _KEYS_FILE.exists()
+            return KeyStore("unavailable", _keychain.label, _KEYS_FILE if made else _ENV_FILE,
+                            f"Ixel is still waiting for {_keychain.label} to answer. Look again in a moment.")
         with _STORE_LOCK:
-            return _where()
+            store = _where()
+    _keychain.store = store
+    return store
 
 
 def _where(ask: bool = True) -> KeyStore:
@@ -748,6 +761,7 @@ def _load_later() -> None:
     def run() -> None:
         try:
             load_env()
+            where_keys_are()  # (for the next page that asks, when the keychain was never asked)
         finally:
             _LATER.release()
 
@@ -865,8 +879,17 @@ def remove_secret(key: str) -> bool:
         return True
 
 
+def _fold(name: str) -> str:
+    return name.upper() if _IGNORE_CASE else name
+
+
+def _injected(key: str) -> bool:
+    """Whether Ixel put this variable in os.environ itself (under _LOCK)."""
+    return key in _INJECTED or _IGNORE_CASE and _fold(key) in {_fold(k) for k in _INJECTED}
+
+
 def _set_outside(key: str) -> bool:
-    return bool(os.environ.get(key)) and key not in _INJECTED
+    return bool(os.environ.get(key)) and not _injected(key)
 
 
 def key_state(key: str) -> str:
@@ -881,7 +904,7 @@ def key_state(key: str) -> str:
 def ixels_own(key: str) -> str:
     """A key's value when it's the one saved in Ixel and in use, else "" (unset, or set outside Ixel)."""
     with _LOCK:
-        return os.environ.get(key, "") if key in _INJECTED else ""
+        return os.environ.get(key, "") if _injected(key) else ""
 
 
 def saved_names() -> set[str]:
@@ -928,12 +951,12 @@ def child_env(pass_env: list[str] | None = None, set_env: dict[str, str] | None 
     settings, such as a CLI's locked-down config. nested=False is for a program the
     person asked for that isn't a panel member (Handoff, from the app's Board).
     """
-    allowed = set(pass_env or ())
-    dropped = set(drop_env or ()) - allowed  # pass_env names a key on purpose: it goes
+    allowed = {_fold(k) for k in pass_env or ()}
+    dropped = {_fold(k) for k in drop_env or ()} - allowed  # pass_env names a key on purpose: it goes
     with _LOCK:
-        current, injected = dict(os.environ), set(_INJECTED)
+        current, injected = dict(os.environ), {_fold(k) for k in _INJECTED}
     env = {k: v for k, v in current.items()
-           if (k not in injected or k in allowed) and k not in dropped}
+           if (_fold(k) not in injected or _fold(k) in allowed) and _fold(k) not in dropped}
     env.update(set_env or {})
     # Marks everything ixel launches, so an ixel started *by* a panel member
     # (e.g. Claude Code with the ixel plugin) refuses to start another panel.

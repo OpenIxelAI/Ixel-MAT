@@ -262,11 +262,13 @@ def test_a_saved_key_is_used_at_once_and_still_kept_from_the_programs_ixel_start
 
 
 def test_the_page_says_where_saved_keys_are(config, keychain):
+    secrets.where_keys_are()  # as the app does when it starts
     store = snapshot()["key_store"]
     assert store == {"kind": "keychain", "problem": "",
                      "where": "Keys saved in Ixel are encrypted, and the key that opens them is kept in your Mac's "
                               "Keychain."}
     keychain.restart(present=False)
+    secrets.where_keys_are()
     store = snapshot()["key_store"]
     assert store["kind"] == "file" and "plain-text file" in store["where"]
     assert "because this computer has no keychain Ixel can use" in store["where"]
@@ -334,18 +336,19 @@ def test_a_key_saved_by_hand_can_be_removed_but_not_set_here(config, monkeypatch
 def test_keys_ixel_uses_itself_arent_offered_to_remove(config, monkeypatch):
     from ixel_mat import connections
     board = connections.token_env("https://github.com")
-    for name in (board, "MY_GATEWAY_PASS", "HOME_LLM_PASS"):  # gone again after the test, whatever it sets
+    used = ("MY_GATEWAY_PASS", "HOME_LLM_PASS", "GH_TOKEN", "GEMINI_API_KEY")
+    for name in (board, *used):  # gone again after the test, whatever it sets
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name)
     config.write_text(config.read_text(encoding="utf-8") + '\n[agents.gateway]\ntype = "websocket"\n'
-                      'url = "ws://127.0.0.1:18789"\ntoken_env = "MY_GATEWAY_PASS"\n'
+                      'url = "ws://127.0.0.1:18789"\ntoken_env = "MY_GATEWAY_PASS"\npass_env = ["GH_TOKEN"]\n'
                       '\n[agents.home]\ntype = "http"\nurl = "http://127.0.0.1:1234/v1"\n'
                       'token = "${HOME_LLM_PASS}"\n', encoding="utf-8")
-    for name in (board, "MY_GATEWAY_PASS", "HOME_LLM_PASS"):
+    for name in (board, *used):
         secrets.set_live(name, "sk-test-0123456789")
     keys = {k["name"]: k for k in snapshot()["keys"]}
     assert board not in keys  # the Board's to change: removing it here would break its pull request list
-    assert not any(keys.get(name, {}).get("remove_only") for name in ("MY_GATEWAY_PASS", "HOME_LLM_PASS"))
+    assert not any(keys.get(name, {}).get("remove_only") for name in used)
     status, _ = key({"name": board, "remove": True})
     assert status == 400 and board in secrets.saved_names()
 

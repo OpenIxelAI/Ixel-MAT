@@ -75,6 +75,7 @@ def known_keys(settings) -> list[dict]:
     from ixel_mat import images
     from ixel_mat.config.setup import PROVIDERS
     from ixel_mat.connections import TOKEN_PREFIX
+    from ixel_mat.gui.model_choices import KEYS
     found: dict[str, dict] = {}
 
     def add(name: str, label: str, user: str = "") -> None:
@@ -101,10 +102,13 @@ def known_keys(settings) -> list[dict]:
             if name in found and use not in found[name]["used_by"]:
                 found[name]["used_by"].append(use)
     saved = secrets.saved_names()
-    used = {settings.triage.token_env}
-    for raw in _raw_agents(settings).values():  # an agent's key, named as token_env or token = "${NAME}"
-        token = raw.get("token")
+    # Not one Ixel uses: Triage's, an agent's (token_env, token = "${NAME}", or given to it with pass_env),
+    # or a Gemini key (Gemini CLI and the model lists use GEMINI_API_KEY too)
+    used = {settings.triage.token_env, *(n for names in KEYS.values() for n in names)}
+    for name, raw in _raw_agents(settings).items():
+        token, cfg = raw.get("token"), settings.agent_configs.get(name)
         used |= {raw.get("token_env"), token[2:-1] if isinstance(token, str) and token[:2] == "${" else None}
+        used |= set(cfg.pass_env or ()) if cfg else set()
     for name in sorted(saved - found.keys() - used):
         if SAVED_NAME.match(name) and not name.startswith(TOKEN_PREFIX):
             found[name] = {"name": name, "label": name, "used_by": [], "remove_only": True}
