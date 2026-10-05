@@ -44,6 +44,7 @@ KNOWN_HOSTS = {"github.com": "github", "gitlab.com": "gitlab", "codeberg.org": "
 TIMEOUT = 20.0
 FETCH_TIMEOUT = 180.0
 MAX_REPLY_BYTES = 4 * 1024 * 1024
+MAX_JSON_DEPTH = 32  # lists and objects inside each other; a pull request listing is a handful deep
 MAX_LISTED = 50
 _TAILSCALE = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
 _PATH_PART = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
@@ -353,10 +354,27 @@ def _get(host: Host, url: str, token: str) -> Any:
     if len(data) > MAX_REPLY_BYTES:
         raise ConnectionError_("unreachable", f"{host.label} sent back more than Ixel reads.")
     try:
-        return json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        reply = json.loads(data.decode("utf-8"))
+        readable = not _too_deep(reply)
+    except (ValueError, RecursionError):  # not UTF-8 or JSON, a number past Python's digit limit, or nested thousands deep
+        readable = False
+    if not readable:
         raise ConnectionError_("unreachable", f"{host.label} sent back something that isn't JSON. Check the web "
-                                              "address set for it.") from None
+                                              "address set for it.")
+    return reply
+
+
+def _too_deep(data: object) -> bool:
+    """Nested past MAX_JSON_DEPTH. Python 3.14 parses thousands deep when the stack has room, where older ones
+    always gave up, and showing or saving a reply like that would then hit the limit instead."""
+    stack = [(data, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, (dict, list)):
+            if depth >= MAX_JSON_DEPTH:
+                return True
+            stack.extend((item, depth + 1) for item in (value.values() if isinstance(value, dict) else value))
+    return False
 
 
 def _redirected(host: Host, url: str, location: str, status: int) -> ConnectionError_:

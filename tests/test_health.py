@@ -197,9 +197,9 @@ def test_keys_in_plain_text_because_the_keychain_refused_say_so(keychain):
     secrets.save_secret("OPENAI_API_KEY", KEY)
     check = checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]
     who = "only you can read" if os.name == "posix" else "in your user folder"
-    assert check["state"] == "warn" and check["detail"] == (
-        f"In {secrets.get_env_file_path()}, a plain-text file {who}, because your Mac's Keychain refused to keep "
-        "the key that would encrypt them. Ixel tries again when you next save a key or start it")
+    said = (f"In {secrets.get_env_file_path()}, a plain-text file {who}, because your Mac's Keychain refused to keep "
+            "the key that would encrypt them. Ixel tries again when you next save a key or start it")
+    assert check["state"] == "warn" and check["detail"] == said[:health.MAX_DETAIL]  # a Mac's temp folder is long
 
 
 def test_the_ixel_checks_run_off_the_event_loop(monkeypatch):
@@ -318,13 +318,22 @@ def test_a_program_that_hangs_is_ended_with_what_it_started(tmp_path):
     assert code is None and why == "no answer in 2 s" and time.monotonic() - started < 10
     pid = int(marker.read_text())
     for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _running(pid):
             break
         time.sleep(0.1)
     else:
         pytest.fail("the program's child is still running")
+
+
+def _running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # ended but not yet collected: in a container whose first process collects nothing, it stays that way
+        return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()[0] != b"Z"
+    except (OSError, IndexError):  # no /proc (a Mac), or it went in between
+        return True
 
 
 def test_check_now_doesnt_wait_for_a_probe_that_never_ends(monkeypatch):
