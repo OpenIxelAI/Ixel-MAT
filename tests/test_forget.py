@@ -157,6 +157,20 @@ def test_ixel_forget_says_what_it_deleted(capsys):
     assert "Nothing to forget" in capsys.readouterr().out
 
 
+def test_ixel_forget_says_where_the_linux_windows_own_storage_is(tmp_path, monkeypatch, capsys):
+    data, cache = forget.gtk_window_folders({}, tmp_path)
+    assert (data, cache) == (tmp_path / ".local" / "share" / "ixel", tmp_path / ".cache" / "ixel")
+    assert forget.gtk_window_folders({"XDG_DATA_HOME": str(tmp_path / "d")}, tmp_path)[0] == tmp_path / "d" / "ixel"
+    monkeypatch.setattr(forget, "gtk_window_folders", lambda: [data, cache])
+    cli.cmd_forget([])
+    assert "Linux window" not in capsys.readouterr().out  # no such window here
+    (data / "localstorage").mkdir(parents=True)
+    cli.cmd_forget([])
+    out = capsys.readouterr().out.replace("\n", "")
+    assert "Linux window keeps its own storage in" in out and str(data) in out and str(cache) not in out
+    assert data.is_dir()  # said, not deleted
+
+
 def test_ixel_forget_says_what_it_couldnt_delete_and_what_to_do(monkeypatch, capsys):
     keep_everything()
 

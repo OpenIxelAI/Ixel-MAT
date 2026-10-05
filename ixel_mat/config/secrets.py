@@ -27,7 +27,7 @@ import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 logger = logging.getLogger("ixel_mat.config.secrets")
 
@@ -219,13 +219,20 @@ def _find_keychain() -> tuple[Any, str]:
         return None, ""
 
 
+# A Mac's keychain that would have to ask for its password and can't show the prompt (over SSH, say):
+# keyring calls it a failure to save, but it's locked, and must never send keys to plain text
+_MAC_CANT_ASK = -25308  # errSecInteractionNotAllowed
+
+
 def _is_locked(error: BaseException) -> bool:
-    """keyring's word for a keychain that's locked, or whose password prompt was turned down (a Mac's too)."""
+    """keyring's word for a keychain that's locked, or whose password prompt was turned down (a Mac's too),
+    and a Mac's that can't show its prompt."""
     try:
         from keyring.errors import KeyringLocked
     except ImportError:
         return False
-    return isinstance(error, KeyringLocked)
+    cause = getattr(error.__cause__, "args", ())
+    return isinstance(error, KeyringLocked) or bool(cause) and cause[0] == _MAC_CANT_ASK
 
 
 def _fernet_key(value: Any) -> bytes | None:
@@ -369,6 +376,9 @@ class KeyStore:
             where = "that only you can read" if os.name == "posix" else "in your user folder"
             again = " Ixel tries again when you next save a key or start it." if self.kind == "refused" else ""
             return f"Keys saved in Ixel are in a plain-text file {where}, because {self.why_plain}.{again}"
+        if self.kind == "unavailable" and self.path.name != _KEYS_FILE.name:  # none encrypted yet
+            return (f"Keys saved in Ixel are encrypted, with the key that opens them kept in {self.keychain}, once "
+                    "Ixel can open it.")
         return f"Keys saved in Ixel are encrypted, and the key that opens them is kept in {self.keychain}."
 
 
@@ -788,13 +798,19 @@ def _in_use() -> dict[str, str]:
 
 
 def _saved() -> dict[str, str]:
-    """Every saved key: from what this run already has when it can, so a page that asks doesn't wait for a
-    key being saved, else read as load_env() reads them."""
+    """Every saved key, from what this run already has, so a page that asks never waits for the keychain or
+    a key being saved. When keys.enc would have to be opened first (made by another Ixel since this one last
+    asked, say), the keys in use and .env's for now: a load_env() on a thread of its own opens it, and the
+    next ask has them."""
     try:
         return _stored(ask=False)[0]
     except _NotNow:
-        with _STORE_LOCK:
-            return _stored()[0]
+        _load_later()
+        try:
+            plain = _env_file()[1]
+        except OSError:
+            plain = {}
+        return {**_in_use(), **plain}
 
 
 def save_secret(key: str, value: str) -> None:
@@ -918,6 +934,19 @@ def child_env(pass_env: list[str] | None = None, set_env: dict[str, str] | None 
     if nested:
         env[PANEL_DEPTH_VAR] = str(panel_depth() + 1)
     return env
+
+
+@contextmanager
+def keys_withheld() -> Iterator[None]:
+    """For starting a program that can't be given an environment of its own (the browser webbrowser.open
+    starts): the keys Ixel saved are out of os.environ meanwhile, then back. Only while nothing else is
+    using them, as the app opens its page."""
+    with _LOCK:
+        taken = {key: os.environ.pop(key) for key in list(_INJECTED) if key in os.environ}
+        try:
+            yield
+        finally:
+            os.environ.update(taken)
 
 
 PANEL_DEPTH_VAR = "IXEL_PANEL_DEPTH"

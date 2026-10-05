@@ -52,7 +52,7 @@ from ixel_mat.agents.base import needs_api_key
 from ixel_mat.modes.review import MAX_EARLIER_TURNS, MAX_PANEL, EarlierTurn, run_review
 from ixel_mat.runtime import (MODE_CHOICES, choose_mode, connect_agents, disconnect_agents, load_settings,
                               local_agent_names)
-from ixel_mat.config.secrets import load_env, where_keys_are
+from ixel_mat.config.secrets import keys_withheld, load_env, where_keys_are
 from ixel_mat.material import Material, MaterialError, code_for_review
 from ixel_mat.sanitize import sanitize_terminal_text
 
@@ -1203,7 +1203,8 @@ async def serve(port: int = 0, open_browser: bool = True, announce: Callable[[st
     if open_browser:
         try:
             launch_page = write_launch_page(gui.url)
-            webbrowser.open(launch_page.as_uri())
+            with keys_withheld():  # the browser it starts gets none of the keys Ixel saved
+                webbrowser.open(launch_page.as_uri())
         except Exception:  # noqa: BLE001 — the printed link still works
             pass
     try:

@@ -870,6 +870,9 @@ function keyRow(k) {
       el("span", { class: `set-state ${k.state}` }, KEY_STATES[k.state] || k.state)),
     k.state === "system" && k.saved
       ? el("small", { class: "set-sub" }, "A copy saved in Ixel isn't used while that one is set.") : null,
+    k.remove_only
+      ? el("small", { class: "set-sub" }, "Saved in Ixel by hand, and kept encrypted with your other keys. Ixel doesn't use it itself.")
+      : null,
     removing
       ? el("div", { class: "set-key-row" },
         el("span", { class: "set-confirm" }, `Remove ${k.label}'s key from Ixel?`),
@@ -883,9 +886,9 @@ function keyRow(k) {
           redrawKey(k, `key:${k.name}:remove`);
         } }, "Keep it"))
       : el("div", { class: "set-key-row" },
-        input,
-        el("button", { type: "button", class: "btn", "data-key": `key:${k.name}:save`, "aria-label": `Save ${k.label}'s key`,
-          onclick: () => saveKey(k, input) }, "Save"),
+        k.remove_only ? null : input,
+        k.remove_only ? null : el("button", { type: "button", class: "btn", "data-key": `key:${k.name}:save`,
+          "aria-label": `Save ${k.label}'s key`, onclick: () => saveKey(k, input) }, "Save"),
         k.saved
           ? el("button", { type: "button", class: "btn danger", "data-key": `key:${k.name}:remove`,
             "aria-label": `Remove ${k.label}'s key`, onclick: () => {

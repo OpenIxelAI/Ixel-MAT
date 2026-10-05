@@ -8,6 +8,7 @@ never a login, a setting, or a session of yours.
 
 - Gemini CLI: the run's folders in ~/.gemini/tmp and ~/.gemini/history (its chat, which has the question and
   the answer), each only if its .project_root names the run's folder, and the run's line in projects.json.
+  The same in ~/.cache/.gemini, where it keeps them when its own sandbox is on, on a Mac.
 - Copilot: Ixel gives the run a session id and a log folder of its own, then removes that session's folder
   in ~/.copilot/session-state, its lock, and its rows in ~/.copilot/session-store.db.
 - OpenCode: the sessions whose folder is the run's folder, in each of its databases
@@ -50,7 +51,7 @@ BLOB_NAME = re.compile(r"\b[0-9a-f]{64}\b")
 @dataclass(frozen=True)
 class Places:
     """Where each CLI keeps what it saves, for the environment it ran with."""
-    gemini: Path                 # Gemini CLI's ~/.gemini
+    gemini: tuple[Path, ...]     # Gemini CLI's ~/.gemini, and ~/.cache/.gemini
     copilot: Path                # Copilot's ~/.copilot
     opencode: tuple[Path, ...]   # OpenCode's databases
 
@@ -60,8 +61,9 @@ def places(env: Mapping[str, str]) -> Places:
     Windows, HOME elsewhere) and the variables that move them."""
     home = Path(env.get("USERPROFILE" if os.name == "nt" else "HOME") or Path.home())
     gemini_home = Path(env.get("GEMINI_CLI_HOME") or home)
-    # Inside macOS's sandbox, Gemini CLI keeps its state in ~/.cache
-    gemini = gemini_home / (".cache/.gemini" if env.get("SANDBOX") == "sandbox-exec" else ".gemini")
+    # With its own sandbox on, on a Mac, Gemini CLI runs again inside it and keeps its state in ~/.cache: it sets
+    # SANDBOX for that copy, not in the environment Ixel gives it, so both are looked in
+    gemini = (gemini_home / ".gemini", gemini_home / ".cache" / ".gemini")
     copilot = Path(env.get("COPILOT_HOME") or home / ".copilot")
     data = Path(env.get("XDG_DATA_HOME") or home / ".local" / "share") / "opencode"
     chosen = env.get("OPENCODE_DB")
@@ -98,10 +100,18 @@ class Run:
     def drop(self) -> None:
         """Remove what Ixel made for the run (Copilot's log folder): all there is when the CLI never started."""
         if self.log_dir:
-            shutil.rmtree(self.log_dir, ignore_errors=True)
+            _remove_folder(Path(self.log_dir))
 
     def same_folder(self, path: object) -> bool:
         return isinstance(path, str) and bool(path) and _normal(path) in self.forms
+
+
+def _remove_folder(path: Path) -> None:
+    """Remove a folder the run left, as much of it as can go. What can't (a file open in another program, on
+    Windows) is said, by its folder's path alone, and stays."""
+    shutil.rmtree(path, ignore_errors=True)
+    if path.exists():
+        logger.warning("Couldn't remove all of %s", path)
 
 
 def _normal(path: str) -> str:
@@ -136,7 +146,13 @@ def _gemini_slug(name: str) -> str:
 
 
 def _clean_gemini(run: Run, where: Places) -> None:
-    registry = where.gemini / "projects.json"
+    for root in where.gemini:
+        if root.is_dir():
+            _clean_gemini_in(run, root)
+
+
+def _clean_gemini_in(run: Run, root: Path) -> None:
+    registry = root / "projects.json"
     slugs = {_gemini_slug(os.path.basename(run.folder))}
     try:
         projects = json.loads(registry.read_text(encoding="utf-8")).get("projects")
@@ -147,14 +163,14 @@ def _clean_gemini(run: Run, where: Places) -> None:
     for slug in slugs:
         if not GEMINI_SLUG.fullmatch(slug):
             continue
-        for base in (where.gemini / "tmp", where.gemini / "history"):
+        for base in (root / "tmp", root / "history"):
             # Gemini CLI marks each project folder with the folder it belongs to: one that isn't this run's stays
             try:
                 owner = (base / slug / ".project_root").read_text(encoding="utf-8").strip()
             except (OSError, ValueError):
                 continue
             if run.same_folder(owner):
-                shutil.rmtree(base / slug, ignore_errors=True)
+                _remove_folder(base / slug)
     _forget_gemini_project(registry, run)
 
 
@@ -197,7 +213,7 @@ def _clean_copilot(run: Run, where: Places) -> None:
     if not run.session_id:
         return
     state = where.copilot / "session-state"
-    shutil.rmtree(state / run.session_id, ignore_errors=True)
+    _remove_folder(state / run.session_id)
     (state / ".session-operation-locks" / f"{run.session_id}.lock").unlink(missing_ok=True)
     database = where.copilot / "session-store.db"
     if database.is_file():

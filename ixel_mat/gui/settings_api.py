@@ -67,7 +67,8 @@ def _kind(cfg) -> str:
 
 def known_keys(settings) -> list[dict]:
     """The keys the page may set: the providers `ixel setup` knows, the picture and sound services, Triage's,
-    and the ones your agents name (only names that look like a key or token)."""
+    and the ones your agents name (only names that look like a key or token). And any other saved in Ixel,
+    one added to .env by hand say, so it can be removed here: it's kept encrypted with the rest now."""
     from ixel_mat import images
     from ixel_mat.config.setup import PROVIDERS
     found: dict[str, dict] = {}
@@ -96,6 +97,9 @@ def known_keys(settings) -> list[dict]:
             if name in found and use not in found[name]["used_by"]:
                 found[name]["used_by"].append(use)
     saved = secrets.saved_names()
+    for name in sorted(saved - found.keys()):
+        if KEY_NAME.match(name):
+            found[name] = {"name": name, "label": name, "used_by": [], "remove_only": True}
     return [{**entry, "state": secrets.key_state(entry["name"]), "saved": entry["name"] in saved}
             for entry in found.values()]
 
@@ -670,6 +674,8 @@ def set_key(settings, body: Any) -> dict:
     if not isinstance(name, str) or name not in allowed:
         raise SettingsError("That isn't a key Ixel uses.")
     label = allowed[name]["label"]
+    if allowed[name].get("remove_only") and body.get("remove") is not True:  # it can go, not be set here
+        raise SettingsError("That isn't a key Ixel uses.")
     if body.get("remove") is True:
         try:
             removed = secrets.remove_live(name)

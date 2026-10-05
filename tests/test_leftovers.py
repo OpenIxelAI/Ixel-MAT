@@ -49,7 +49,8 @@ def _has_fts5() -> bool:
 def test_each_clis_folders_are_found_the_way_the_cli_finds_them(tmp_path):
     home = tmp_path / "home"
     where = leftovers.places(_env(home))
-    assert where.gemini == home / ".gemini" and where.copilot == home / ".copilot" and where.opencode == ()
+    assert where.gemini == (home / ".gemini", home / ".cache" / ".gemini")
+    assert where.copilot == home / ".copilot" and where.opencode == ()
     data = home / ".local" / "share" / "opencode"
     data.mkdir(parents=True)
     for name in ("opencode.db", "opencode-beta.db", "notes.db"):
@@ -57,11 +58,12 @@ def test_each_clis_folders_are_found_the_way_the_cli_finds_them(tmp_path):
     assert leftovers.places(_env(home)).opencode == (data / "opencode-beta.db", data / "opencode.db")
     moved = leftovers.places(_env(home, GEMINI_CLI_HOME=str(tmp_path / "g"), COPILOT_HOME=str(tmp_path / "c"),
                                   XDG_DATA_HOME=str(tmp_path / "x"), OPENCODE_DB="mine.db"))
-    assert moved.gemini == tmp_path / "g" / ".gemini" and moved.copilot == tmp_path / "c"
+    assert moved.gemini[0] == tmp_path / "g" / ".gemini" and moved.copilot == tmp_path / "c"
     assert moved.opencode == (tmp_path / "x" / "opencode" / "mine.db",)
     assert leftovers.places(_env(home, OPENCODE_DB=str(tmp_path / "full.db"))).opencode == (tmp_path / "full.db",)
     assert leftovers.places(_env(home, OPENCODE_DB=":memory:")).opencode == ()  # nothing on disk to clean
-    assert leftovers.places(_env(home, SANDBOX="sandbox-exec")).gemini == home / ".cache" / ".gemini"
+    # Gemini CLI sets SANDBOX for the copy of itself its sandbox runs, not Ixel: both are looked in, whatever it says
+    assert leftovers.places(_env(home, SANDBOX="sandbox-exec")).gemini == where.gemini
 
 
 def test_the_tests_never_look_in_your_own_folders(tmp_path_factory):
@@ -69,7 +71,7 @@ def test_the_tests_never_look_in_your_own_folders(tmp_path_factory):
     base = tmp_path_factory.getbasetemp()
     for env in (dict(os.environ), {}):
         where = leftovers.places(env)
-        assert all(base in place.parents for place in (where.gemini, where.copilot, *where.opencode))
+        assert all(base in place.parents for place in (*where.gemini, where.copilot, *where.opencode))
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "hermes", sys.executable, "/opt/bin/ixel-own-cli"])
@@ -116,8 +118,8 @@ def _gemini_project(root: Path, slug: str, owner: str, chat: str) -> None:
     (chats / "session-2026-10-05T00-27-04216832.jsonl").write_text(json.dumps({"text": chat}), encoding="utf-8")
 
 
-def _gemini_home(tmp_path: Path, folder: str, slug: str = "ixel-agent-ab12cd34") -> Path:
-    root = tmp_path / "home" / ".gemini"
+def _gemini_home(tmp_path: Path, folder: str, slug: str = "ixel-agent-ab12cd34", inside: str = ".gemini") -> Path:
+    root = tmp_path / "home" / inside
     root.mkdir(parents=True)
     (root / "settings.json").write_text('{"security": {"auth": {"selectedType": "gemini-api-key"}}}')
     (root / "installation_id").write_text("5d3c0f9e-0000-4000-8000-000000000000")
@@ -142,6 +144,15 @@ def test_gemini_clis_chat_of_the_run_is_removed_and_nothing_of_yours(tmp_path):
     assert (root / "history" / "your-project" / ".project_root").is_file()
     assert (root / "settings.json").is_file() and (root / "installation_id").is_file()
     assert not (root / "projects.json.lock").exists() and not list(root.glob("projects.json.*.tmp"))
+
+
+def test_gemini_clis_chat_is_removed_from_where_its_own_sandbox_keeps_it_too(tmp_path):
+    folder = _run_folder(tmp_path)
+    root = _gemini_home(tmp_path, folder, inside=".cache/.gemini")  # its sandbox on, on a Mac
+    leftovers.prepare("gemini", [], folder, _env(tmp_path / "home")).clean()
+    assert not (root / "tmp" / "ixel-agent-ab12cd34").exists() and QUESTION.encode() not in _everything(root)
+    assert (root / "tmp" / "your-project" / "chats").is_dir()
+    assert not (tmp_path / "home" / ".gemini").exists()  # nothing made where there was nothing
 
 
 def test_gemini_clis_project_folder_is_found_by_its_list_and_must_name_the_run(tmp_path):
@@ -542,3 +553,12 @@ def test_a_question_asked_in_a_folder_of_yours_leaves_its_sessions_alone(stand_i
     yours.mkdir()
     assert _ask("gemini", workdir=str(yours)) == "391"
     assert (stand_in / ".gemini" / "tmp" / "ixel-agent" / "chats" / "session-1.jsonl").is_file()
+
+
+def test_a_folder_that_cant_be_removed_is_said_by_its_path_alone(tmp_path, monkeypatch, caplog):
+    folder = _run_folder(tmp_path)
+    root = _gemini_home(tmp_path, folder)
+    monkeypatch.setattr(leftovers.shutil, "rmtree", lambda path, ignore_errors=False: None)  # a file in use, on Windows
+    with caplog.at_level("WARNING", logger="ixel_mat.agents.leftovers"):
+        leftovers.prepare("gemini", [], folder, _env(tmp_path / "home")).clean()
+    assert str(root / "tmp" / "ixel-agent-ab12cd34") in caplog.text and QUESTION not in caplog.text

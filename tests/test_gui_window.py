@@ -134,6 +134,24 @@ def test_a_browser_that_fails_at_once_falls_back_to_a_tab(fake_browser, tmp_path
     assert where == "your browser" and missing == ["file:///y.html"]
 
 
+def test_the_window_and_the_browser_get_none_of_the_keys_ixel_saved(fake_browser, tmp_path, monkeypatch):
+    from ixel_mat.config import secrets
+    monkeypatch.setenv("XAI_API_KEY", "xai-saved-in-ixel")
+    monkeypatch.setattr(secrets, "_INJECTED", {"XAI_API_KEY"})  # loaded from what's saved
+    monkeypatch.setenv("IXEL_SHELL_SETTING", "yours")
+    browser = tmp_path / "env-browser"
+    browser.write_text(f'#!/bin/sh\nenv > "{tmp_path / "env.txt"}"\nexit 0\n')
+    browser.chmod(0o755)
+    assert asyncio.run(window.open_window("file:///x.html", str(browser), tmp_path / "p")) == "its own window"
+    seen = (tmp_path / "env.txt").read_text()
+    assert "xai-saved-in-ixel" not in seen and "IXEL_SHELL_SETTING=yours" in seen
+    tab = []
+    where = asyncio.run(window.open_window("file:///x.html", fake_browser("exit 3"), tmp_path / "p",
+                                           fallback=lambda url: tab.append(os.environ.get("XAI_API_KEY")) or True))
+    assert where == "your browser" and tab == [None]  # webbrowser.open's browser takes Ixel's own environment
+    assert os.environ["XAI_API_KEY"] == "xai-saved-in-ixel"  # and they're back for Ixel
+
+
 def test_no_browser_at_all_is_not_called_open(fake_browser, tmp_path):
     where = asyncio.run(window.open_window("file:///x.html", fake_browser("exit 3"), tmp_path / "p",
                                            fallback=lambda url: False))

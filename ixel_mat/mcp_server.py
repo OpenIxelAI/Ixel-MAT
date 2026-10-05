@@ -62,7 +62,8 @@ PanelFactory = Callable[[ReviewMode | None], "AsyncIterator[tuple[Settings, list
 
 @asynccontextmanager
 async def _default_panel(mode: ReviewMode | None = None) -> AsyncIterator[tuple[Settings, list, list[str]]]:
-    settings = load_settings()
+    # In a thread: the first load can wait on the keychain, and the server answers other calls meanwhile
+    settings = await asyncio.to_thread(load_settings)
     mode = mode or settings.review.mode
     problems: list[str] = []
 
@@ -274,7 +275,7 @@ def build_server(panel: PanelFactory = _default_panel) -> MCPServer:
                                     idempotent_hint=True, open_world_hint=False),
     )
     async def ixel_panel() -> str:
-        settings = load_settings()
+        settings = await asyncio.to_thread(load_settings)
         configs = settings.panel_configs()
         if not configs:
             return "\n".join([*settings_warnings(settings.warnings),

@@ -312,6 +312,25 @@ def test_a_key_set_outside_ixel_wins_and_the_page_says_so(config, monkeypatch):
     assert data["state"] == "system" and "still used" in data["message"]
 
 
+def test_a_key_saved_by_hand_can_be_removed_but_not_set_here(config, monkeypatch):
+    for name in ("MY_SERVICE_SECRET", "lower_case"):  # gone again after the test, whatever it sets
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    secrets.get_env_file_path().write_text(f'MY_SERVICE_SECRET="{SECRET}"\nlower_case="x-0123456789"\n',
+                                           encoding="utf-8")
+    secrets.load_env()  # moved into keys.enc with the rest
+    assert {"MY_SERVICE_SECRET", "lower_case"} <= secrets.saved_names()
+    keys = {k["name"]: k for k in snapshot()["keys"]}
+    assert keys["MY_SERVICE_SECRET"]["remove_only"] and keys["MY_SERVICE_SECRET"]["saved"]
+    assert "lower_case" not in keys and SECRET not in json.dumps(keys)
+    status, data = key({"name": "MY_SERVICE_SECRET", "value": "sk-other-0123456789"})
+    assert status == 400 and os.environ["MY_SERVICE_SECRET"] == SECRET
+    status, data = key({"name": "MY_SERVICE_SECRET", "remove": True})
+    assert status == 200 and "MY_SERVICE_SECRET" not in secrets.saved_names()
+    assert "MY_SERVICE_SECRET" not in os.environ
+    assert "MY_SERVICE_SECRET" not in {k["name"] for k in data["settings"]["keys"]}
+
+
 @pytest.mark.parametrize("body", [
     {"name": "PATH", "value": "/tmp/evil"},
     {"name": "NODE_OPTIONS", "value": "--require=/tmp/x.js"},

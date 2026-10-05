@@ -277,6 +277,8 @@ def test_before_the_first_save_a_failing_keychain_still_keeps_keys_out_of_plain_
     assert store.kind == "unavailable"
     assert store.problem == ("Ixel couldn't open your Mac's Keychain, so it can't save keys right now. Unlock it, "
                              f"then try again. Until then, the keys in {env_file()} stay there as plain text.")
+    assert store.summary == ("Keys saved in Ixel are encrypted, with the key that opens them kept in your Mac's "
+                             "Keychain, once Ixel can open it.")  # none are yet
 
 
 def test_a_keychain_that_refuses_to_keep_a_key_leaves_keys_in_plain_text(keychain):
@@ -317,6 +319,31 @@ def test_a_keychain_locked_when_asked_to_keep_a_key_is_not_a_refusal(keychain):
     keychain.refuse = None  # unlocked
     secrets.save_secret("OPENAI_API_KEY", "sk-one")
     assert keys_file().exists() and secrets.where_keys_are().kind == "keychain"
+
+
+def test_a_mac_keychain_that_cant_show_its_prompt_is_locked_not_a_refusal(keychain):
+    """Over SSH, a Mac's keychain can't ask for its password: keyring calls that a failure to save, with the
+    Security framework's errSecInteractionNotAllowed behind it."""
+    from keyring.errors import PasswordSetError
+
+    def refused(status):
+        try:
+            raise Exception(status, "User interaction is not allowed.")  # keyring's macOS api.Error
+        except Exception as cause:
+            try:
+                raise PasswordSetError("Can't store password on keychain") from cause
+            except PasswordSetError as error:
+                return error
+
+    keychain.refuse = refused(-25308)
+    with pytest.raises(secrets.KeyStoreError) as failed:
+        secrets.save_secret("OPENAI_API_KEY", "sk-one")
+    assert "Unlock it and try again" in str(failed.value)
+    assert not env_file().exists() and not keys_file().exists()
+    keychain.refuse = refused(-61)  # any other failure to save is a refusal: plain text, as before
+    keychain.restart()
+    secrets.save_secret("OPENAI_API_KEY", "sk-one")
+    assert env_file().exists() and secrets.where_keys_are().kind == "refused"
 
 
 def test_a_refusal_never_means_plain_text_beside_keys_enc(keychain):
@@ -682,9 +709,12 @@ def test_keys_saved_elsewhere_meanwhile_are_read_on_a_thread_of_their_own(keycha
     assert quickly(lambda: secrets.load_env(wait=False)) == {}
     wait_for(lambda: keychain.calls >= 1)  # asked, on a thread of its own
     assert "OPENAI_API_KEY" not in os.environ
+    assert quickly(secrets.saved_names) == set()  # Settings, meanwhile: what's in use so far
+    assert quickly(lambda: secrets.key_state("OPENAI_API_KEY")) == "none"
     keychain.hold.set()
     wait_for(lambda: os.environ.get("OPENAI_API_KEY") == "sk-one")
     assert secrets.load_env(wait=False) == {"OPENAI_API_KEY": "sk-one"}
+    assert quickly(secrets.saved_names) == {"OPENAI_API_KEY"}
 
 
 def test_keys_added_to_env_by_hand_are_used_at_once_and_moved_on_a_thread(keychain, monkeypatch):

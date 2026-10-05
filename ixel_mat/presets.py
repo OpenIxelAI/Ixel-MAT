@@ -177,8 +177,14 @@ OPENCODE_OLD_COPY = ("This OpenCode is older than the data a newer one left: put
 # it from fetching
 OPENCODE_UNKNOWN_MODEL = ("OpenCode can't use this model: sign in to its provider in OpenCode, or pick one from its "
                           "list in Settings (Ixel keeps OpenCode from fetching new ones).")
+# A Copilot from before the settings Ixel runs it with, which keep its sessions and logs where Ixel removes them
+# (--session-id) and off GitHub (--no-remote-export)
+COPILOT_TOO_OLD = ("This Copilot is older than Ixel needs (1.0.52, May 2026): run npm install -g @github/copilot, "
+                   "or take Copilot off the panel.")
 # What a preset's CLI says on stderr when it can't start on a question at all, and what to tell you instead
 PLAIN_ERRORS = {"gemini_cli": {"Please set an Auth method": GEMINI_SIGN_IN},
+                "copilot": {"unknown option '--no-remote-export'": COPILOT_TOO_OLD,
+                            "unknown option '--session-id'": COPILOT_TOO_OLD},
                 "opencode": {"free tier can only be used from within OpenCode": OPENCODE_FREE_TIER,
                              "Database is not empty and has no session table": OPENCODE_OLD_COPY,
                              "Model unavailable:": OPENCODE_UNKNOWN_MODEL}}

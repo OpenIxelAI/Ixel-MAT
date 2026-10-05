@@ -60,6 +60,11 @@ anyway: from your keychain, which gives them to programs you run (below), or fro
   app's pages never wait for the keychain, except to save or remove a key: the app asks it once as it
   starts, and after that on a thread of its own (for keys another Ixel saved meanwhile, or ones to move out
   of `.env`).
+- **Where the keychain can't be asked.** A run that can't reach your keychain, such as `ixel` over SSH or
+  from cron, can't open `keys.enc`, so it uses none of its keys and says why (a Mac's keychain that can't show
+  its password prompt there counts as locked, never as a reason to write keys in plain text). Give such a run
+  its keys in its environment (they win over saved ones), or unlock the keychain first (on a Mac,
+  `security unlock-keychain`).
 - **A keychain that won't keep the key.** If your keychain opens but refuses to keep Ixel's item (a company
   policy against saved passwords, say, or a Linux keyring with nowhere to keep it), and there's no
   `keys.enc` yet, keys go in `.env` in plain text, readable only by you, as on a computer with no keychain,
@@ -140,14 +145,14 @@ files. Ixel uses them only to answer, and for each preset:
 
   | CLI | What it saves of a question, and Ixel removes |
   |---|---|
-  | Gemini CLI | The chat, with the question and answer (`~/.gemini/tmp/<folder>/chats/session-<date>-<id>.jsonl`), and `~/.gemini/history/<folder>`, each only if its `.project_root` names the run's folder; the temp folder's line in `~/.gemini/projects.json`, changed under Gemini CLI's own lock (if that's held for 2 seconds, the line, which has only the folder's path, stays) |
-  | Copilot | Ixel gives each run its own `--session-id`, and `--log-dir` in a temp folder it removes. Afterwards: `~/.copilot/session-state/<id>/` (its `events.jsonl` and `workspace.yaml` have the question), the session's lock, and its rows in `~/.copilot/session-store.db` (its turns, summary and search index, which is then rebuilt so the question's words leave it too). `--no-remote-export` keeps Copilot from copying the session to GitHub's cloud session storage, which it does where GitHub has turned that on for your account |
+  | Gemini CLI | The chat, with the question and answer (`~/.gemini/tmp/<folder>/chats/session-<date>-<id>.jsonl`), and `~/.gemini/history/<folder>`, each only if its `.project_root` names the run's folder; the temp folder's line in `~/.gemini/projects.json`, changed under Gemini CLI's own lock (if that's held for 2 seconds, the line, which has only the folder's path, stays). The same in `~/.cache/.gemini`, where Gemini CLI keeps them when you've turned its own sandbox on, on a Mac. With that sandbox on, Gemini CLI starts a second copy of itself inside it with the question on its command line, where other users of the computer can read it while it runs: Ixel can't change that |
+  | Copilot | Ixel gives each run its own `--session-id`, and `--log-dir` in a temp folder it removes. Afterwards: `~/.copilot/session-state/<id>/` (its `events.jsonl` and `workspace.yaml` have the question), the session's lock, and its rows in `~/.copilot/session-store.db` (its turns, summary and search index, which is then rebuilt so the question's words leave it too). `--no-remote-export` keeps Copilot from copying the session to GitHub's cloud session storage, which it does where GitHub has turned that on for your account. Both need Copilot 1.0.52 (May 2026) or later: an older one refuses them, and Ixel says to update it |
   | OpenCode | The sessions whose folder is the run's (and any they started), with every row kept for them, in `~/.local/share/opencode/opencode*.db` (or the one `OPENCODE_DB` names); for OpenCode 2 also the project it made of the folder and the instructions it saved for that run (the folder's path and the date) |
 
   Rows are deleted with SQLite's `secure_delete` on and the database's write-ahead log emptied afterwards, so
   the text doesn't stay in the file's free space. If a CLI of yours is using a database at that moment, Ixel
-  waits up to 2 seconds; when it can't remove something, it says so in its log (never the text), and the
-  answer isn't affected. What still stays:
+  waits up to 2 seconds; when it can't remove something, it says so in its log (the folder's path or the
+  error, never the text), and the answer isn't affected. What still stays:
   - Gemini CLI: `~/.gemini/installation_id` (a random id made once), and `projects.json` itself.
   - Copilot: `~/.copilot/config.json` (when it was first started), `~/.cache/Microsoft/DeveloperTools/deviceid`
     (a random id), and Node's compile cache in the temp folder.
@@ -274,7 +279,10 @@ its catalog setting.
   go first, then the one unused longest), and forgets them all when Ixel stops. The page also clears the copy
   an earlier Ixel kept in that tab's `sessionStorage` (`ixel-conversations`). Restored text is rendered the
   same way as live text. The browser's storage keeps the Board's recent folders and the last /handoff project
-  (`localStorage`), never a question or answer.
+  (`localStorage`), never a question or answer. On Linux, Ixel's own window (GTK with WebKit) keeps that
+  storage, and WebKit's cache, where WebKitGTK puts them for a program named `ixel` (usually
+  `~/.local/share/ixel` and `~/.cache/ixel`). `ixel forget` doesn't delete those: it says where they are, to
+  delete with Ixel closed.
 - Spell check, writing suggestions and autofill are off in every box you type into (`spellcheck`,
   `writingsuggestions`, `autocomplete`): in Edge, enhanced spell check and text predictions send what's typed
   to Microsoft, and autofill keeps it in the browser profile.

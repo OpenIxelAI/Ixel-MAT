@@ -510,10 +510,15 @@ def test_browser_is_opened_through_a_private_page_not_a_url_with_the_key(monkeyp
     from urllib.parse import urlparse
     from urllib.request import url2pathname
 
+    from ixel_mat.config import secrets
     from ixel_mat.gui import server as gui_server
 
-    opened, announced = [], []
-    monkeypatch.setattr(gui_server.webbrowser, "open", lambda target: opened.append(target))
+    opened, announced, keys = [], [], []
+    monkeypatch.setenv("XAI_API_KEY", "xai-saved-in-ixel")
+    monkeypatch.setattr(secrets, "_INJECTED", {"XAI_API_KEY"})  # loaded from what's saved
+    monkeypatch.setattr(gui_server, "load_env", lambda: {"XAI_API_KEY": "xai-saved-in-ixel"})
+    monkeypatch.setattr(gui_server.webbrowser, "open",
+                        lambda target: keys.append(os.environ.get("XAI_API_KEY")) or opened.append(target))
 
     async def go():
         task = asyncio.create_task(gui_server.serve(announce=announced.append))
@@ -532,6 +537,7 @@ def test_browser_is_opened_through_a_private_page_not_a_url_with_the_key(monkeyp
     page, content, mode = asyncio.run(go())
     token = announced[0].split("#token=")[1]
     assert opened[0].startswith("file:") and token not in opened[0]
+    assert keys == [None] and os.environ["XAI_API_KEY"] == "xai-saved-in-ixel"  # the browser gets none of them
     assert f"#token={token}" in content and 'http-equiv="refresh"' in content
     if os.name == "posix":
         assert mode == 0o600

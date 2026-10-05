@@ -10,6 +10,9 @@ What Ixel keeps of what you asked and ran, and forgetting it.
 tidy() runs as every ixel command starts and deletes what's past its time. forget() deletes the files at
 once (`ixel forget`, and the Forget button on the app's Settings page, which leaves the window's storage
 alone since it's in use). Your keys, settings, machines and usage stats (stats.json) are never touched.
+
+Not the storage of Ixel's own window on Linux (linux_window.py, GTK with WebKit): WebKitGTK keeps it in
+folders named after the program (gtk_window_folders), and `ixel forget` only says where.
 """
 from __future__ import annotations
 
@@ -64,6 +67,14 @@ def window_folders(system: str = sys.platform, env: Mapping[str, str] = os.envir
     if system == "darwin":
         folders.append(home / "Library" / "WebKit" / MAC_APP_ID)
     return folders
+
+
+def gtk_window_folders(env: Mapping[str, str] = os.environ, home: Path | None = None) -> list[Path]:
+    """Where WebKitGTK keeps the storage of Ixel's Linux window, a program it knows as "ixel": its data and
+    its cache. Said by `ixel forget`, not deleted."""
+    home = home or Path.home()
+    return [Path(env.get("XDG_DATA_HOME") or home / ".local" / "share", "ixel"),
+            Path(env.get("XDG_CACHE_HOME") or home / ".cache", "ixel")]
 
 
 def forget(window: bool = True) -> list[Forgotten]:

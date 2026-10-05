@@ -58,6 +58,7 @@ let project = "";      // the folder the person picked (Handoff's root for it on
 let board = null;      // the board last read for `project`: { exists, revision, project, counts, tasks }
 let failure = null;    // what went wrong with the last look: { message, code }
 let notice = "";       // what went wrong starting a board: kept until it's dismissed or tried again
+let deleteLeft = "";   // what a delete left (results it couldn't remove, the agent's worktree): kept until dismissed
 let looking = null;    // the look under way
 let openRef = "";      // the task in the panel
 let detail = null;     // its data, from /api/board/task
@@ -213,6 +214,7 @@ function choose(value) {
   board = null;
   failure = null;
   notice = "";
+  deleteLeft = "";
   hint = "";
   agents = null;
   prs = null;
@@ -293,6 +295,11 @@ function mainView() {
     const dismiss = el("button", { type: "button", class: "icon-btn", "aria-label": "Dismiss", title: "Dismiss" }, icon("x"));
     dismiss.addEventListener("click", () => { notice = ""; render(); });
     nodes.push(el("div", { class: "board-notice error", role: "alert" }, icon("alert"), el("span", {}, notice), dismiss));
+  }
+  if (deleteLeft) {
+    const dismiss = el("button", { type: "button", class: "icon-btn", "aria-label": "Dismiss", title: "Dismiss" }, icon("x"));
+    dismiss.addEventListener("click", () => { deleteLeft = ""; render(); });
+    nodes.push(el("div", { class: "board-notice", role: "status" }, icon("alert"), el("span", {}, deleteLeft), dismiss));
   }
   if (!board && failure && failure.code === "no_project") {
     nodes.push(pickProject());
@@ -1082,7 +1089,9 @@ function confirmWords(a, t, args) {
     return { title: `Run ${t.ref} now?`, text: `${agent} ${kindHint(kind, of)} Its result comes back to this board.`,
       yes: "Run it now" };
   }
-  if (a.op === "delete") return { title: `Delete ${t.ref}?`, text: "Its history goes too. This can't be undone.", yes: "Delete" };
+  if (a.op === "delete") {
+    return { title: `Delete ${t.ref}?`, text: "Its history and results go too. This can't be undone.", yes: "Delete" };
+  }
   if (isDanger(a)) return { title: `Cancel ${t.ref}?`, text: "It moves to Done as cancelled. You can reopen it later.", yes: "Cancel the task" };
   return { title: `${a.label}?`, text: t.title, yes: a.label };
 }
@@ -1106,7 +1115,10 @@ async function act(a, t, args) {
   const seen = a.op === "approve" && detail && detail.task && detail.task.ref === t.ref && detail.task.content
     ? { shown: detail.task.content } : {};
   try {
-    await postJSON("/api/board/action", { project: where, op: a.op, args: { ...args, ...seen, task: t.ref } });
+    const reply = await postJSON("/api/board/action", { project: where, op: a.op, args: { ...args, ...seen, task: t.ref } });
+    // As a rule nothing's left; when something is (the agent's worktree and branch), Handoff says what, and how
+    // to remove it
+    if (a.op === "delete") deleteLeft = Array.isArray(reply && reply.left) ? reply.left.join(" ") : "";
     // "Run it now" approves the run, then starts it (as `handoff run T-N` would). Once approved, the
     // form is done with even if the start fails: the panel then offers Run it now on its own.
     if (a.op === "approve") {

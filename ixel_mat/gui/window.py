@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator, Mapping
 
 from ixel_mat.agents.launch import find_on_path
+from ixel_mat.config.secrets import child_env, keys_withheld
 
 WINDOW_SIZE = "1280,840"
 # A browser that fails this soon (a profile it can't use, a missing library) never opened a window
@@ -194,8 +195,10 @@ async def open_window(url: str, browser: str | None = None, profile: Path | None
         detach = {"start_new_session": True} if os.name == "posix" else {}
         try:
             profile.mkdir(parents=True, exist_ok=True)
+            # Without the keys Ixel saved, as for every program it starts: the app has them loaded by now
             proc = subprocess.Popen(window_command(browser, url, profile), stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detach)
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    env=child_env(nested=False), **detach)
         except OSError:
             proc = None
         if proc is not None:
@@ -207,7 +210,9 @@ async def open_window(url: str, browser: str | None = None, profile: Path | None
                 code = 0
             if code == 0:
                 return "its own window"
-    return "your browser" if fallback(url) else ""
+    with keys_withheld():
+        opened = fallback(url)
+    return "your browser" if opened else ""
 
 
 def alert(message: str) -> None:

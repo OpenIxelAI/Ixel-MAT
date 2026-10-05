@@ -722,7 +722,10 @@ class FakeBoard:
                 return reply({"task": self.tasks[f"T-{n}"]})
             if body["op"] == "delete":
                 self.tasks.pop(args["task"])
-                return reply({"deleted": args["task"]})
+                return reply({"deleted": args["task"], "left": [
+                    f"{args['task']}'s worktree and branch are still there, with the agent's work. If you don't need "
+                    f"them any more: git worktree remove .handoff/worktrees/{args['task']}, then git branch -D "
+                    f"handoff/{args['task']}"]})
             if body["op"] == "approve":
                 self.tasks[args["task"]]["run"] = {"state": "approved", "agent": args["agent"], "kind": args["kind"]}
             if body["op"] == "run.start":
@@ -820,13 +823,18 @@ def test_board_actions_ask_first_and_go_to_handoff(gui_url, browser):
     count = len(fake.actions)
     page.click("#task-panel .actions button:has-text('Delete')")
     page.wait_for_selector("#board-dialog[open]")
-    assert "can't be undone" in page.inner_text("#board-dialog")
+    assert "results go too" in page.inner_text("#board-dialog") and "can't be undone" in page.inner_text("#board-dialog")
     page.keyboard.press("Escape")
     assert len(fake.actions) == count and page.is_visible("#task-panel")
     page.click("#task-panel .actions button:has-text('Delete')")
     page.click("#board-dialog button[value=yes]")
     page.wait_for_selector(".task-card[data-ref=T-1]", state="detached")
     assert fake.actions[-1] == ("delete", {"task": "T-1"}) and page.is_hidden("#task-panel")
+    # What it left is said, until it's dismissed
+    left = page.wait_for_selector(".board-notice[role=status]")
+    assert "git branch -D handoff/T-1" in left.inner_text()
+    left.query_selector("button[aria-label=Dismiss]").click()
+    page.wait_for_selector(".board-notice[role=status]", state="detached")
 
     # A new task, with its checks one per line, for an agent the roster names
     page.click("#board-new")
@@ -1617,7 +1625,10 @@ def test_settings_a_refused_change_drops_only_file_changes_and_shows_the_file(se
     assert "Not saved, since the file changed" in page.inner_text("[data-note=review]")
     assert setting(page, "agent:gpt:model").input_value() == "m-gpt-2"   # the file, not what was typed over it
     assert name.count() == 0
-    assert "sk-proj-QueuedBehindARefusal" in (path.parent / ".env").read_text(encoding="utf-8")
+    keys_file = path.parent / "keys.enc"  # saved, encrypted
+    assert keys_file.exists() and b"sk-proj-QueuedBehindARefusal" not in keys_file.read_bytes()
+    row = page.locator(".set-key", has=page.locator("code", has_text="OPENAI_API_KEY"))
+    assert row.locator(".set-state").inner_text() == "Saved in Ixel"
     assert "timeout = 120" in path.read_text(encoding="utf-8")
 
     # Remove asks at once, even while a save is under way, and focus follows

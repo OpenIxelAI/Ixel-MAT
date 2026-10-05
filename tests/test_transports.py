@@ -548,6 +548,18 @@ def test_what_stops_opencode_is_said_plainly(monkeypatch, says, tell):
     assert str(failure.value) == getattr(presets, tell) and len(str(failure.value)) <= 160
 
 
+@pytest.mark.parametrize("option", ["--no-remote-export", "--session-id"])
+def test_a_copilot_too_old_for_ixels_settings_is_said_plainly(monkeypatch, option):
+    from ixel_mat import presets
+    from ixel_mat.agents import oneshot
+    copilot = {k: v for k, v in presets.PRESETS_BY_ID["copilot"].items() if k != "required_args"}  # Python's args
+    monkeypatch.setattr(oneshot, "preset_for", lambda command: copilot)
+    script = f"import sys; sys.stderr.write(\"error: unknown option '{option}'\\n\"); sys.exit(1)"
+    with pytest.raises(RuntimeError) as failure:
+        _run(_ask_cli(_cli(script, prompt_via="stdin")))
+    assert str(failure.value) == presets.COPILOT_TOO_OLD and len(str(failure.value)) <= 160
+
+
 def test_questions_reach_the_subscription_clis_on_stdin_not_on_their_command_line():
     # Another person on this computer can read any program's command line (`ps`)
     from ixel_mat.presets import CLI_PRESETS
