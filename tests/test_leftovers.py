@@ -438,14 +438,14 @@ def test_sqlite_opens_a_path_that_starts_with_two_slashes(tmp_path):
 
 
 def test_a_home_folder_with_marks_uris_use_is_cleaned_all_the_same(tmp_path):
-    # #, ?, % and spaces mean something in a URI: in a folder's name they're only letters
-    home = tmp_path / "José #1 100%? home"
+    # #, ?, % and spaces mean something in a URI: in a folder's name they're only letters (Windows allows no ?)
+    home = tmp_path / ("José #1 100% home" if os.name == "nt" else "José #1 100%? home")
     folder = _run_folder(tmp_path)
     db = home / ".local" / "share" / "opencode" / "opencode.db"
     _opencode_db(db, 2, folder, str(tmp_path / "your-repo"))
     leftovers.prepare("opencode", [], folder, _env(home)).clean()
     assert _rows(db, "SELECT id FROM session_v2") == [("ses_yours",)]
-    assert not (home / "José #1 100%").exists()  # no database made beside it
+    assert not (tmp_path / "José #1 100%").exists() and not (tmp_path / "José ").exists()  # none made beside it
 
 
 def test_a_database_with_nothing_of_the_run_isnt_written_to(tmp_path):
