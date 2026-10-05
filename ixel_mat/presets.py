@@ -97,9 +97,12 @@ CLI_PRESETS = [
         "id": "copilot", "label": "GitHub Copilot", "command": "copilot",
         "why": "uses your GitHub Copilot subscription",
         "install": "npm install -g @github/copilot",
-        # --available-tools with a name that doesn't exist leaves the model no tools.
+        # --available-tools with a name that doesn't exist leaves the model no tools. --no-remote-export: where
+        # GitHub has turned session indexing on for your account (and your organization allows it), Copilot
+        # otherwise copies the session, question and answer, to GitHub's cloud session storage. Ixel adds
+        # --session-id and --log-dir to each run, to remove what it keeps afterwards (agents/leftovers.py).
         "args": ["-s", "--no-custom-instructions", "--disable-builtin-mcps", "--no-auto-update",
-                 "--stream", "off", "--available-tools=ixel_none"],
+                 "--stream", "off", "--available-tools=ixel_none", "--no-remote-export"],
         "prompt_via": "stdin", "timeout": 300,
         "drop_env": [*OTHER_KEYS, "COPILOT_ALLOW_ALL"],  # COPILOT_ALLOW_ALL: auto-approve tools, trust the folder
         "effort_args": ["--reasoning-effort", "{effort}"],

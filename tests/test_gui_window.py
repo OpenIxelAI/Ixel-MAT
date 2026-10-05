@@ -70,6 +70,24 @@ def test_window_command_is_an_app_window_with_a_private_profile():
     assert "--disable-sync" in cmd  # Edge would sign the profile in to your Microsoft account and sync it
 
 
+def test_the_window_turns_off_the_browsers_background_services():
+    cmd = window.window_command("msedge", "file:///tmp/ixel-gui-1.html", Path("/p/window"), "win32")
+    for switch in ("--disable-background-networking", "--disable-component-update", "--disable-domain-reliability",
+                   "--disable-breakpad", "--metrics-recording-only", "--no-pings", "--disable-default-apps",
+                   "--disable-component-extensions-with-background-pages", "--disable-field-trial-config"):
+        assert switch in cmd
+    # One --disable-features: a browser reads only the last one it's given
+    features = [arg for arg in cmd if arg.startswith("--disable-features=")]
+    assert len(features) == 1
+    off = features[0].split("=", 1)[1].split(",")
+    assert {"AutofillServerCommunication", "PreconnectToSearch", "AimServerRequestOnStartupEnabled",
+            "NetworkTimeServiceQuerying", "OptimizationHints", "Translate"} <= set(off)
+    assert all(name.isalnum() for name in off)  # no spaces or stray commas, which would end the list early
+    assert cmd[-1] == f"--window-size={window.WINDOW_SIZE}"
+    assert "--class=Ixel" not in cmd  # Linux only
+    assert window.window_command("chrome", "u", Path("/p"), "linux")[-1] == "--class=Ixel"
+
+
 # ── Opening it ────────────────────────────────────────────────────────────────
 
 @pytest.fixture

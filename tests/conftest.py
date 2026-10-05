@@ -16,7 +16,7 @@ secrets._ENV_DIR, secrets._ENV_FILE, secrets._KEYS_FILE = _NOWHERE, _NOWHERE / "
 import pytest  # noqa: E402
 
 from ixel_mat import conversation, forget, stats, update  # noqa: E402
-from ixel_mat.agents import websocket  # noqa: E402
+from ixel_mat.agents import leftovers, websocket  # noqa: E402
 from ixel_mat.config import loader  # noqa: E402
 from ixel_mat.config import setup as wizard  # noqa: E402
 from ixel_mat.gui import appearance  # noqa: E402
@@ -138,3 +138,33 @@ def gemini_home(tmp_path, monkeypatch):
                  "GEMINI_CLI_TRUST_WORKSPACE"):
         monkeypatch.delenv(name, raising=False)
     return home
+
+
+# The environment the suite started with, before any test changes it
+SUITE_ENV = dict(os.environ)
+# What tells Ixel where Gemini CLI, Copilot and OpenCode keep their sessions (agents/leftovers.py)
+CLI_PLACES = ("HOME", "USERPROFILE", "GEMINI_CLI_HOME", "COPILOT_HOME", "XDG_DATA_HOME", "OPENCODE_DB")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_cli_sessions(tmp_path_factory, monkeypatch):
+    # After a run in its temp folder, Ixel removes what those CLIs kept of it, in the folders their environment
+    # names. A test that runs a stand-in CLI with the suite's environment would have it look in yours: whatever
+    # of yours the environment still names is swapped for a folder of the test's own. A home a test gives the
+    # CLI itself (the live checks, the stand-ins in test_leftovers.py) is kept.
+    real = leftovers.places
+    stand_in = []
+
+    def places(env):
+        yours = {name for name in CLI_PLACES if env.get(name) and env.get(name) == SUITE_ENV.get(name)}
+        if not (env.get("HOME") or env.get("USERPROFILE")):
+            yours |= {"HOME", "USERPROFILE"}  # it would be your home folder
+        if not yours:
+            return real(env)
+        if not stand_in:
+            stand_in.append(str(tmp_path_factory.mktemp("cli-home")))
+        env = {name: value for name, value in env.items() if name not in yours}
+        if yours & {"HOME", "USERPROFILE"}:
+            env.update(HOME=stand_in[0], USERPROFILE=stand_in[0])
+        return real(env)
+    monkeypatch.setattr(leftovers, "places", places)

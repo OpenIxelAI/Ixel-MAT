@@ -151,7 +151,9 @@ preset = "opencode"
 # stdout_format = "text"      # or "claude-stream-json"
 # output_flag = "-o"          # if it writes its answer to a file you name
 # workdir = "temp"            # a fresh empty folder (the default) | "inherit" |
-#                             # a path
+#                             # a path. Gemini CLI, Copilot and OpenCode save
+#                             # each question; Ixel removes that only after a
+#                             # run in its own temp folder
 # pass_env = ["MYCLI_KEY"]    # keys saved in Ixel it may see
 # drop_env = ["OPENAI_API_KEY"]   # removed from its environment
 # env = { MYCLI_COLOR = "never" } # fixed settings (not secrets)

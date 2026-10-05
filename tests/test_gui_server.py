@@ -620,3 +620,199 @@ def test_the_launch_page_goes_as_soon_as_the_page_has_loaded(monkeypatch):
 
     gone, running = asyncio.run(go())
     assert gone and running
+
+
+# ── Ask's conversations, kept for a reload ────────────────────────────────────
+
+TAB = "a-tab-of-its-own-123456"
+KEPT = json.dumps([{"title": "What is 17 x 23?", "turns": [{"question": "What is 17 x 23?", "mode": "quick"}]}])
+
+
+def test_a_reload_gets_its_conversations_back_from_ixel_not_the_browser():
+    gui, _ = make_gui()
+
+    async def scenario(client):
+        before = await client.get(f"/api/conversations?tab={TAB}", headers=AUTH)
+        put = await client.put(f"/api/conversations?tab={TAB}", data=KEPT, headers=JSON_AUTH)
+        after = await client.get(f"/api/conversations?tab={TAB}", headers=AUTH)
+        other = await client.get("/api/conversations?tab=another-tab-entirely-7890", headers=AUTH)
+        cleared = await client.put(f"/api/conversations?tab={TAB}", data="[]", headers=JSON_AUTH)
+        gone = await client.get(f"/api/conversations?tab={TAB}", headers=AUTH)
+        return (await before.json(), put.status, await put.json(), await after.text(), await other.json(),
+                cleared.status, await gone.json(), dict(after.headers))
+
+    before, put, said, after, other, cleared, gone, headers = run_with_client(gui, scenario)
+    assert before == [] and put == 200 and said == {"kept": 1}
+    assert json.loads(after) == json.loads(KEPT) and other == []  # each tab has only its own
+    assert headers["Cache-Control"] == "no-store"
+    assert cleared == 200 and gone == [] and len(gui.conversations) == 0
+
+
+def test_conversations_need_the_token_and_a_same_origin_json_put():
+    gui, _ = make_gui()
+
+    async def scenario(client):
+        url = f"/api/conversations?tab={TAB}"
+        no_token = await client.get(url)
+        put_no_token = await client.put(url, data=KEPT, headers={"Content-Type": "application/json"})
+        foreign = await client.put(url, data=KEPT, headers={**JSON_AUTH, "Origin": "https://evil.example"})
+        form = await client.put(url, data="a=b", headers={**AUTH, "Content-Type": "application/x-www-form-urlencoded"})
+        return no_token.status, put_no_token.status, foreign.status, form.status
+
+    assert run_with_client(gui, scenario) == (401, 401, 403, 415)
+    assert len(gui.conversations) == 0
+
+
+@pytest.mark.parametrize("tab, body, status", [
+    ("short", KEPT, 400),
+    ("../../etc/passwd-and-more", KEPT, 400),
+    ("", KEPT, 400),
+    (TAB, "not json", 400),
+    (TAB, json.dumps({"title": "x"}), 400),
+], ids=["tab-too-short", "tab-not-an-id", "no-tab", "not-json", "not-a-list"])
+def test_conversations_are_checked(tab, body, status):
+    gui, _ = make_gui()
+
+    async def scenario(client):
+        resp = await client.put(f"/api/conversations?tab={tab}", data=body, headers=JSON_AUTH)
+        got = await client.get(f"/api/conversations?tab={tab}", headers=AUTH)
+        return resp.status, got.status
+
+    put, get = run_with_client(gui, scenario)
+    assert put == status and len(gui.conversations) == 0
+    assert get == (200 if gui_server.TAB_ID.fullmatch(tab) else 400)
+
+
+def test_conversations_over_the_limit_are_refused_while_read(monkeypatch):
+    # They take more than the 512 KB other requests may (a long conversation), but not without limit
+    monkeypatch.setattr(gui_server, "MAX_CONVERSATION_BYTES", 600 * 1024)
+    gui, _ = make_gui()
+    big = json.dumps([{"title": "t", "turns": [{"question": "x" * (550 * 1024)}]}])
+    too_big = json.dumps([{"title": "t", "turns": [{"question": "x" * (700 * 1024)}]}])
+
+    async def scenario(client):
+        ok = await client.put(f"/api/conversations?tab={TAB}", data=big, headers=JSON_AUTH)
+        refused = await client.put(f"/api/conversations?tab={TAB}", data=too_big, headers=JSON_AUTH)
+        return ok.status, refused.status, (await refused.json())["error"], gui.conversations.get(TAB)
+
+    ok, refused, error, kept = run_with_client(gui, scenario)
+    assert ok == 200 and refused == 413 and "MB" in error
+    assert kept == big.encode()  # the last one that fitted
+
+
+def test_only_so_many_tabs_are_kept_the_one_unused_longest_goes():
+    kept = gui_server.Conversations(max_tabs=2)
+    kept.put("tab-one", b"[1]")
+    kept.put("tab-two", b"[2]")
+    assert kept.get("tab-one") == b"[1]"  # used: now tab-two is the one unused longest
+    kept.put("tab-three", b"[3]")
+    assert (kept.get("tab-one"), kept.get("tab-two"), kept.get("tab-three")) == (b"[1]", None, b"[3]")
+    assert gui_server.MAX_TABS * gui_server.MAX_CONVERSATION_BYTES <= 64 * 1024 * 1024  # at most 64 MB in all
+
+
+def test_the_id_a_page_moved_away_from_goes_first_but_isnt_forgotten():
+    kept = gui_server.Conversations(max_tabs=3)
+    kept.put("another-tab", b"[0]")
+    kept.put("before-reload", b"[1]")
+    kept.put("after-reload", b"[1]", moved_from="before-reload")
+    assert len(kept) == 3  # a duplicated tab may still be using its original's id
+    kept.put("one-more-tab", b"[2]")
+    assert kept.get("before-reload") is None  # it went before the tab unused longest
+    assert (kept.get("another-tab"), kept.get("after-reload")) == (b"[0]", b"[1]")
+    # The original of a duplicated tab saves again under its id: that makes it the newest again
+    kept.put("duplicate", b"[3]", moved_from="original")  # an id that's gone already changes nothing
+    kept.put("original", b"[4]")
+    kept.put("duplicate-2", b"[4]", moved_from="original")
+    kept.put("original", b"[5]")
+    kept.put("last-tab", b"[6]")
+    assert kept.get("original") == b"[5]" and kept.get("duplicate-2") == b"[4]"
+    kept.put("same", b"[7]", moved_from="same")
+    assert kept.get("same") == b"[7]"
+
+
+def test_a_page_moving_its_conversations_names_the_id_it_had():
+    gui, _ = make_gui()
+    before, after = "id-before-the-reload-1", "id-after-the-reload-22"
+
+    async def scenario(client):
+        await client.put(f"/api/conversations?tab={before}", data=KEPT, headers=JSON_AUTH)
+        bad = await client.put(f"/api/conversations?tab={after}&was=../x", data=KEPT, headers=JSON_AUTH)
+        empty = await client.put(f"/api/conversations?tab={after}&was=", data=KEPT, headers=JSON_AUTH)
+        moved = await client.put(f"/api/conversations?tab={after}&was={before}", data=KEPT, headers=JSON_AUTH)
+        old = await client.get(f"/api/conversations?tab={before}", headers=AUTH)
+        return bad.status, empty.status, moved.status, await old.json(), len(gui.conversations)
+
+    bad, empty, moved, old, ids = run_with_client(gui, scenario)
+    assert (bad, empty, moved) == (400, 400, 200)
+    assert old == json.loads(KEPT) and ids == 2  # kept until it's the one to go
+
+
+def test_conversations_are_gone_when_ixel_stops():
+    gui, _ = make_gui()
+
+    async def go():
+        server = TestServer(gui.app(), host="127.0.0.1")
+        async with TestClient(server) as client:
+            gui.port = server.port
+            await client.put(f"/api/conversations?tab={TAB}", data=KEPT, headers=JSON_AUTH)
+            assert len(gui.conversations) == 1
+    asyncio.run(go())
+    assert len(gui.conversations) == 0
+
+
+STATIC = Path(gui_server.__file__).parent / "static"
+
+
+def test_the_page_keeps_no_question_or_answer_in_browser_storage():
+    """Edge and Chrome may write a page's storage into a profile folder (in `ixel gui`, your own browser's): only
+    the session key, this tab's id and the Board's folders may go there. Conversations live in Ixel's memory."""
+    allowed = {"TOKEN_KEY", "TAB_KEY", "OLD_STORE_KEY", "RECENT_KEY", "HANDOFF_PROJECT_KEY"}
+    for script in sorted(STATIC.glob("*.js")):
+        code = script.read_text(encoding="utf-8")
+        for api in ("indexedDB", "caches.", "document.cookie", "serviceWorker", "openDatabase"):
+            assert api not in code, (script.name, api)
+        for store, call, key in re.findall(r"\b(sessionStorage|localStorage)\.(\w+)\(([^,)]*)", code):
+            assert key.strip() in allowed, (script.name, store, call, key)
+            if store == "sessionStorage" and call == "setItem":
+                assert key.strip() in ("TOKEN_KEY", "TAB_KEY"), (script.name, key)
+    ask = (STATIC / "ask.js").read_text(encoding="utf-8")
+    assert 'const OLD_STORE_KEY = "ixel-conversations"' in ask and "sessionStorage.removeItem(OLD_STORE_KEY)" in ask
+    assert f"const MAX_KEPT_BYTES = {gui_server.MAX_CONVERSATION_BYTES // (1024 * 1024)} * 1024 * 1024;" in ask
+
+
+def _attributes(source: str, start: int) -> str:
+    """The attributes object of an el(...) call whose "{" is at or after start."""
+    depth, i = 0, source.index("{", start)
+    for j in range(i, len(source)):
+        depth += {"{": 1, "}": -1}.get(source[j], 0)
+        if depth == 0:
+            return source[i:j + 1]
+    raise AssertionError("unbalanced attributes")
+
+
+def test_nothing_typed_is_spellchecked_suggested_or_remembered_by_the_browser():
+    """In Edge, enhanced spell check and text predictions send what's typed to Microsoft, and autofill keeps it in the
+    profile: every box that can hold a question, a key or a note says no to all three."""
+    page = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert '<body spellcheck="false" writingsuggestions="false">' in page  # and everything in it
+    # Not on <html>: the server puts the saved Light or Dark there, by finding exactly this
+    assert '<html lang="en">' in page
+    boxes = re.findall(r"<(?:textarea|input)\b[^>]*>", page)
+    typed = [b for b in boxes if 'type="file"' not in b]
+    assert len(typed) >= 3
+    for box in typed:
+        assert 'spellcheck="false"' in box and 'autocomplete="off"' in box, box
+    common = (STATIC / "common.js").read_text(encoding="utf-8")
+    assert 'PRIVATE_TYPING = { spellcheck: "false", autocomplete: "off", writingsuggestions: "false" }' in common
+    found = 0
+    for script in sorted(STATIC.glob("*.js")):
+        code = script.read_text(encoding="utf-8")
+        for match in re.finditer(r'\bel\("(textarea|input)",', code):
+            attrs = _attributes(code, match.end())
+            kind = re.search(r'type: "(\w+)"', attrs)
+            if match.group(1) == "input" and kind and kind.group(1) in ("checkbox", "radio", "file"):
+                continue
+            found += 1
+            private = "...PRIVATE_TYPING" in attrs or ('spellcheck: "false"' in attrs and 'autocomplete: "off"' in attrs)
+            assert private, (script.name, attrs)
+    assert found >= 12

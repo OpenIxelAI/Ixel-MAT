@@ -18,7 +18,7 @@ the repository is public, so if you don't see it, email us.
 | Your subscription logins | Each CLI's own storage (`~/.claude`, `~/.codex`, `~/.gemini`…). Ixel never reads these |
 | Your files | Anything your user account can read |
 | Your code | Only the diff or files you name for a review (`--diff`, `--file`…) are read, once, and sent to the models on your panel (below) |
-| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`, each with the time it was saved. Each one is deleted once it's 24 hours old, by the next `ixel` command after that (continuing the conversation doesn't keep its earlier questions longer), and all of them at once by `ixel forget` (or Forget in the app's Settings); the terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and the browser app in that tab's `sessionStorage`, which the browser clears when you close the tab. `ixel forget` also deletes the app window's browser storage (`ixel app`'s Edge or Chrome profile, and on a Mac Ixel.app's WebKit storage) |
+| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`, each with the time it was saved. Each one is deleted once it's 24 hours old, by the next `ixel` command after that (continuing the conversation doesn't keep its earlier questions longer), and all of them at once by `ixel forget` (or Forget in the app's Settings). The terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and so does the browser app: Ixel's own server keeps each tab's conversations so a reload brings them back, never the browser's storage, and they're gone when Ixel stops. `ixel forget` also deletes the app window's browser storage (`ixel app`'s Edge or Chrome profile, and on a Mac Ixel.app's WebKit storage). Gemini CLI, Copilot and OpenCode save every question they're asked in their own folders; Ixel removes what each run saved (below) |
 | Your usage and money | Every model call is billed to you |
 
 ## Who we assume might be hostile
@@ -132,6 +132,44 @@ files. Ixel uses them only to answer, and for each preset:
   a script of yours), OpenCode you run yourself (it still fetches unless you set that variable too), and
   OpenCode 1's attempt to install its plugin package from npm the first time it runs with a new config folder.
 - **A fresh empty folder** for every run, deleted afterwards (`workdir = "temp"`).
+- **Nothing of the question left in the CLI's own folders**, as far as each allows. Claude Code and Codex are
+  told not to save the session (`--no-session-persistence`, `--ephemeral`). Gemini CLI, Copilot and OpenCode
+  have no such switch, so after a run in Ixel's temp folder, once the CLI has exited, Ixel removes what that run
+  saved and nothing else: never a login, a setting, or a session of yours (`ixel_mat/agents/leftovers.py`).
+  Checked against Gemini CLI 0.62.0, Copilot 1.0.91, OpenCode 1.18.34 and 2.0.22:
+
+  | CLI | What it saves of a question, and Ixel removes |
+  |---|---|
+  | Gemini CLI | The chat, with the question and answer (`~/.gemini/tmp/<folder>/chats/session-<date>-<id>.jsonl`), and `~/.gemini/history/<folder>`, each only if its `.project_root` names the run's folder; the temp folder's line in `~/.gemini/projects.json`, changed under Gemini CLI's own lock (if that's held for 2 seconds, the line, which has only the folder's path, stays) |
+  | Copilot | Ixel gives each run its own `--session-id`, and `--log-dir` in a temp folder it removes. Afterwards: `~/.copilot/session-state/<id>/` (its `events.jsonl` and `workspace.yaml` have the question), the session's lock, and its rows in `~/.copilot/session-store.db` (its turns, summary and search index, which is then rebuilt so the question's words leave it too). `--no-remote-export` keeps Copilot from copying the session to GitHub's cloud session storage, which it does where GitHub has turned that on for your account |
+  | OpenCode | The sessions whose folder is the run's (and any they started), with every row kept for them, in `~/.local/share/opencode/opencode*.db` (or the one `OPENCODE_DB` names); for OpenCode 2 also the project it made of the folder and the instructions it saved for that run (the folder's path and the date) |
+
+  Rows are deleted with SQLite's `secure_delete` on and the database's write-ahead log emptied afterwards, so
+  the text doesn't stay in the file's free space. If a CLI of yours is using a database at that moment, Ixel
+  waits up to 2 seconds; when it can't remove something, it says so in its log (never the text), and the
+  answer isn't affected. What still stays:
+  - Gemini CLI: `~/.gemini/installation_id` (a random id made once), and `projects.json` itself.
+  - Copilot: `~/.copilot/config.json` (when it was first started), `~/.cache/Microsoft/DeveloperTools/deviceid`
+    (a random id), and Node's compile cache in the temp folder.
+  - OpenCode: `~/.local/share/opencode/log/opencode.log`, which grows by about 11 KB a question (3.5 KB for
+    OpenCode 1) with the folder's path, the session id and timings, never the question. OpenCode 2 deletes
+    the question's place in its queue itself, without overwriting it, so its text can stay in the database
+    file's free space until later use writes over it: nothing reads it there, but someone reading the file's
+    bytes could. OpenCode 1 also adds `$schema` to your `~/.config/opencode/opencode.json`, writes a
+    `.gitignore` beside it, leaves a lock folder in `~/.local/state/opencode/locks/`, and leaves a 5.5 MB
+    library file in the temp folder each time it runs. OpenCode 2 leaves three library files of its own in
+    the temp folder (on Linux `.bun-0-*.so` and `.bun-0-*.node`, 19.7 MB in all) and an empty `opencode`
+    folder; they're named after what's in them, so later runs use them again rather than add more, and none
+    has anything of the question.
+  - A run in a folder you gave the agent as its `workdir`: nothing is removed, since your own sessions are
+    kept there too.
+- **Usage statistics.** Gemini CLI sends Google usage statistics (`play.googleapis.com`): how long the prompt
+  was, the model, which tools were called, the system and version, with your Google account's email or the
+  random id, never the prompt's text. Only `"privacy": {"usageStatisticsEnabled": false}` in your
+  `~/.gemini/settings.json` turns them off; there's no switch for one run. Copilot's help says it sends
+  telemetry and that only `COPILOT_OFFLINE` turns it off, along with its GitHub sign-in, so Ixel can't; what it
+  sends wasn't checked, since that needs a GitHub login. OpenCode 2 contacted nothing but the model; OpenCode 1
+  contacts `registry.npmjs.org` (see above).
 - **No terminal:** stdin is closed or carries only the question, so a CLI can't stop and ask for approval.
 - **The question can't become a flag.** Every preset, and every command-line agent of your own whose
   config doesn't say otherwise, gets it on stdin, so it never shows on a command line that other programs
@@ -227,17 +265,41 @@ its catalog setting.
   fields it doesn't use are ignored.
 - When the page goes away (tab closed, Stop pressed), the running review is cancelled, so model calls
   stop (a call already under way may still be billed for what it used). Stopping Ixel cancels it too.
-- The page keeps this tab's conversations (questions, answers, verdicts; never keys) in `sessionStorage`
-  so a reload doesn't lose them. It belongs to that one tab and this server's random port, and the
-  browser deletes it when the tab closes. Restored text is rendered the same way as live text.
-- `ixel app` serves the same page, under the same rules, to an Edge or Chrome app window. The window gets
-  the same redirect file (deleted as soon as the page has loaded), so the key isn't on the browser's
-  command line either, and it runs with a browser profile of its own (`%LOCALAPPDATA%\IxelMAT\window` on
-  Windows): your normal browser's extensions, cookies and history aren't in it. It never syncs
-  (`--disable-sync`): Edge may still sign it in to the Microsoft account you use Windows with, but doesn't
-  sync its history, Ixel's addresses included, to that account. A window opened by an earlier Ixel may have
-  synced already; this stops it from now on. Each open page holds one request to `/api/presence` open (token
-  required, like every API call); the server stops a few seconds after the last one closes.
+- A reload brings this tab's conversations (questions, answers, verdicts; never keys) back from Ixel's server,
+  which keeps them in memory only (`/api/conversations`, token and origin checked like every API call), under
+  a random id the page makes up each time it loads and moves them to (so a duplicated tab starts with a copy
+  and keeps its own). The browser's storage holds only that id and the session key: Edge and Chrome may write
+  a page's storage into a profile folder (in `ixel gui`, your own browser's). The server keeps at most 4 MB
+  under each of 16 ids (the page drops its oldest conversations to fit; past 16, the ids pages moved away from
+  go first, then the one unused longest), and forgets them all when Ixel stops. The page also clears the copy
+  an earlier Ixel kept in that tab's `sessionStorage` (`ixel-conversations`). Restored text is rendered the
+  same way as live text. The browser's storage keeps the Board's recent folders and the last /handoff project
+  (`localStorage`), never a question or answer.
+- Spell check, writing suggestions and autofill are off in every box you type into (`spellcheck`,
+  `writingsuggestions`, `autocomplete`): in Edge, enhanced spell check and text predictions send what's typed
+  to Microsoft, and autofill keeps it in the browser profile.
+- `ixel app` serves the same page, under the same rules, to an Edge or Chrome app window. The window gets the
+  same redirect file (deleted as soon as the page has loaded), so the key isn't on the browser's command line
+  either, and it runs with a browser profile of its own (`%LOCALAPPDATA%\IxelMAT\window` on Windows): your
+  normal browser's extensions, cookies and history aren't in it. It never syncs (`--disable-sync`): Edge may
+  still sign it in to the Microsoft account you use Windows with, but doesn't sync its history, Ixel's
+  addresses included, to that account. A window opened by an earlier Ixel may have synced already; this stops
+  it from now on. The window's browser also runs with its background services off (`WINDOW_SWITCHES` in
+  `ixel_mat/gui/window.py`: `--disable-background-networking`, `--disable-component-update`,
+  `--metrics-recording-only`, `--no-pings`, and features such as `AutofillServerCommunication` and
+  `PreconnectToSearch` turned off). Checked with a Chromium 141 window (not headless) and its network log,
+  over 100 seconds: without them, the window asked Google's autofill server about Ixel's page five times, and
+  contacted the update, time and search servers. With them, two requests are left, and no switch we found
+  turns them off. The browser's push-message service checks in (`android.clients.google.com/checkin`, a few
+  seconds after start and again until it gets through), with the browser's version, system and language. And
+  its sign-in service asks Google which Google accounts the window's profile is signed in to
+  (`accounts.google.com/ListAccounts`, about a second after start and again until it gets an answer); the
+  profile has no Google cookies to send unless you signed in to Google in that window. Neither has anything
+  from Ixel's page. If your computer's DNS server is a public one that has a secure version, such as Google's
+  8.8.8.8 or Cloudflare's 1.1.1.1, the browser also checks that server over HTTPS (it looks up
+  `www.gstatic.com`) and looks names up there instead: the same company your computer already asks. Edge's own
+  Microsoft services weren't part of that check. Each open page holds one request to `/api/presence` open
+  (token required, like every API call); the server stops a few seconds after the last one closes.
 - The Mac app and the Linux window start `ixel app --host` themselves, which prints the address with its
   key on a pipe only they read, and stops when they close its stdin. Both accept only an `http://127.0.0.1`
   address from it. The Linux window keeps only that server's pages inside (the address is parsed, so

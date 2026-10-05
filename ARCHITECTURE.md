@@ -39,7 +39,7 @@ MCP plugin. The engine doesn't know which one is calling.
 | `ixel_mat/gui/` | `ixel gui`: an aiohttp server on 127.0.0.1 and a dependency-free HTML/JS/CSS app; `window.py` is `ixel app`, which shows it in an Edge or Chrome app window, or the native windows: `macos/` (Ixel.app, Swift) and `linux_window.py` (GTK), which run `ixel app --host` |
 | `ixel_mat/machines/` | Machines (SSH): `store.py` (`machines.json`, and imports from `~/.ssh/config` and Ixel Console), `ssh.py` (pinned host keys, learned with ssh into a temporary file; the ssh lines, with the destination after `--`), `terminal.py` (Connect's terminal window, given the argv unjoined, held open by a Python helper until Enter), `runs.py` ("Run on machines": 8 at a time, time and output limits), `log.py` (`machines.log`: never a command's text, lines kept 30 days, one file of at most 1 MB), `cli.py` (`ixel machines`) |
 | `ixel_mat/mcp_server.py` | `ixel mcp`: the MCP server (tools `ixel_review`, `ixel_panel`) and host setup snippets |
-| `ixel_mat/agents/` | Transports, one per kind of model (below); `launch.py` finds the program to run for a CLI (PATH only, and npm `.cmd` shims resolved on Windows) |
+| `ixel_mat/agents/` | Transports, one per kind of model (below); `launch.py` finds the program to run for a CLI (PATH only, and npm `.cmd` shims resolved on Windows); `leftovers.py` removes what Gemini CLI, Copilot and OpenCode save of a question |
 | `ixel_mat/config/` | `loader.py` (TOML → `AgentConfig`, `set_agent_model`), `secrets.py` (saved keys: `keys.enc` and its key in the system keychain, or `.env` without one; child environments, file I/O), `setup.py` (the wizard) |
 | `ixel_mat/presets.py` | The locked-down subscription CLI presets; configs refer to them by name (`preset = "codex"`) |
 | `ixel_mat/models.py` | `latest` / `latest-fast`: which model id each means, from a provider's live list |
@@ -91,7 +91,10 @@ the `.exe`) instead of the `.cmd`, and refuses to pass cmd.exe syntax to any oth
 agents start the same way; the updater (`git`, PowerShell, pipx/uv) uses the same PATH-only lookup (`find_on_path`). That environment drops the keys Ixel
 loaded (unless `pass_env` names them) and anything in `drop_env`, adds `env`, and increments
 `IXEL_PANEL_DEPTH`. `agents/process_tree.py` ends a CLI and everything it started (a process group on
-POSIX, a job object on Windows). See [SECURITY.md](SECURITY.md).
+POSIX, a job object on Windows). Then, for a run in Ixel's temp folder, `agents/leftovers.py` removes what Gemini
+CLI, Copilot and OpenCode saved of it in their own folders (`leftovers.prepare` gives Copilot its own
+`--session-id` and `--log-dir` first; `Run.clean` runs in a thread once the CLI has exited). See
+[SECURITY.md](SECURITY.md).
 
 ## The review engine (`modes/review.py`)
 
@@ -189,7 +192,8 @@ skipped),
 `saver_saving` estimates the answer it didn't write. `ReviewResult.to_dict()` carries both, with the
 one-line summaries the front ends show, and `stats.record_run` adds every review's API spend (and saver's
 saving) to the month's totals. The terminal keeps its conversation
-in memory (`/new` clears it), the browser page sends it with each request, and `ixel review --continue`
+in memory (`/new` clears it), the browser page sends it with each request (and gets it back from the
+server's memory after a reload), and `ixel review --continue`
 loads it from `conversation.py`.
 
 All text a model wrote is fenced with a random per-run marker before it reaches another model, and
@@ -204,8 +208,10 @@ sanitized so the marker can't be forged. Runs refuse to start inside another pan
   `report()` prints the verdict, scoreboard, concessions and flagged issues. `ixel review --json` prints
   `ReviewResult.to_dict()`, with progress on stderr.
 - **Browser** (`gui/server.py`): `GET /api/panel`, `GET /api/saves`, `POST /api/review` (a streamed NDJSON
-  event log, ending with the result and any saves update), and `GET /api/presence`, which each open page
-  holds open so `ixel app` (`serve_window`) can stop once its window is closed. The Board's pull requests
+  event log, ending with the result and any saves update), `GET`/`PUT /api/conversations?tab=<id>` (Ask's
+  conversations for a reload, kept in the server's memory by a random id each page load makes up and moves
+  them to, `&was=<id>`; never in browser storage), and `GET /api/presence`, which each open page holds open so
+  `ixel app` (`serve_window`) can stop once its window is closed. The Board's pull requests
   are `GET /api/connections` and `POST /api/connections/{host,token,review,fix}` (`gui/connections_api.py`,
   over `connections.py`, which reads the host's API without following redirects and fetches a pull request
   into `refs/ixel/pr/N/` with git's prompts off); a review is a Handoff task approved for the fetched base

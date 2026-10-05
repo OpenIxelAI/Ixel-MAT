@@ -4,6 +4,7 @@
 
 import {
   $, $$, el, icon, fillIcons, secs, plural, copyButton, api, rememberedProject, rememberProject, postJSON,
+  PRIVATE_TYPING,
 } from "./common.js";
 import { inline, renderMarkdown } from "./markdown.js";
 import * as pics from "./pictures.js";
@@ -320,7 +321,31 @@ async function loadSaves(bump = false) {
 
 // ── Conversations ─────────────────────────────────────────────────────────
 
-const STORE_KEY = "ixel-conversations";
+// This tab's conversations come back after a reload from Ixel's memory, under a random id (the id is all the
+// browser keeps). They're never put in the browser's storage, which Edge and Chrome may write into a profile folder,
+// and they're gone when Ixel stops. Each time the page loads it takes a new id and moves its conversations to it:
+// a duplicated tab starts with a copy of the original's storage, id and all, and the two mustn't overwrite each
+// other's conversations.
+const TAB_KEY = "ixel-tab";
+const OLD_STORE_KEY = "ixel-conversations";  // where an earlier Ixel kept them in the browser: cleared
+const MAX_KEPT_BYTES = 4 * 1024 * 1024;      // the server's MAX_CONVERSATION_BYTES
+const was = storedTab();                     // the id this tab had before the reload (or the duplicated tab's)
+const tab = newTab();                        // this page's own
+
+function storedTab() {
+  let id = "";
+  try { id = sessionStorage.getItem(TAB_KEY) || ""; } catch (e) { /* storage is off */ }
+  return /^[A-Za-z0-9_-]{16,64}$/.test(id) ? id : "";
+}
+
+function newTab() {
+  const bytes = crypto.getRandomValues(new Uint8Array(18));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+function rememberTab() {
+  try { sessionStorage.setItem(TAB_KEY, tab); } catch (e) { /* storage is off: a reload starts afresh */ }
+}
 
 function newTopic(question) {
   const title = question.split("\n").find((l) => l.trim()) || question;
@@ -397,31 +422,44 @@ function renderFollowup() {
     : "Ask the panel anything. Paste code, an error, or a decision you're weighing.";
 }
 
-// This tab keeps its conversations across a reload (sessionStorage is per tab
-// and dies with it). Only finished turns are kept; they render as text like
-// everything else.
-function save() {
+// Only finished turns are kept; they render as text like everything else. Saves go one after another, so an
+// older one never lands last. Resolves to whether Ixel has them. moved: the id they were under before this page
+// loaded, which Ixel then lets go first.
+let saving = Promise.resolve(true);
+
+function save(moved = "") {
   const data = topics.map((t) => ({
     title: t.title, turns: t.turns.filter((turn) => turn.finished).map((turn) => turn.snapshot()),
   })).filter((t) => t.turns.length);
-  while (data.length) {
-    try {
-      sessionStorage.setItem(STORE_KEY, JSON.stringify(data));
-      return;
-    } catch (e) {
-      data.shift();  // over the quota (or storage is off): drop the oldest conversation
-    }
+  let body = JSON.stringify(data);
+  const encoder = new TextEncoder();
+  while (data.length && encoder.encode(body).length > MAX_KEPT_BYTES) {
+    data.shift();  // over what Ixel keeps for a tab: the oldest conversation goes
+    body = JSON.stringify(data);
   }
-  try { sessionStorage.removeItem(STORE_KEY); } catch (e) { /* storage is off */ }
+  const query = moved ? `tab=${tab}&was=${moved}` : `tab=${tab}`;
+  saving = saving.then(() => api(`/api/conversations?${query}`, { method: "PUT", body }))
+    .then((res) => res.ok)
+    .catch(() => false);  // Ixel stopped: there's nothing to come back to
+  return saving;
 }
 
-function restore() {
-  let data;
-  try { data = JSON.parse(sessionStorage.getItem(STORE_KEY) || "[]"); } catch (e) { return; }
-  if (!Array.isArray(data)) return;
-  for (const saved of data) {
+// The conversations this tab had before a reload. A question asked meanwhile stays the newest.
+async function restore() {
+  try { sessionStorage.removeItem(OLD_STORE_KEY); } catch (e) { /* storage is off */ }
+  let data = [];
+  if (was) {
+    try {
+      const res = await api(`/api/conversations?tab=${was}`);
+      if (res.ok) data = await res.json();
+    } catch (e) { /* Ixel stopped */ }
+  }
+  const restored = [];
+  for (const saved of Array.isArray(data) ? data : []) {
     if (!saved || typeof saved.title !== "string" || !Array.isArray(saved.turns)) continue;
     const topic = newTopic(saved.title);
+    topics.splice(topics.indexOf(topic), 1);
+    topic.thread.hidden = true;  // until it's the one shown
     try {
       for (const snap of saved.turns) {
         const turn = Turn.restore(topic, snap);
@@ -429,11 +467,17 @@ function restore() {
         topic.thread.append(turn.el);
       }
     } catch (e) { /* a damaged entry keeps what came back before it */ }
-    if (!topic.turns.length) {
-      topics.splice(topics.indexOf(topic), 1);
-      topic.thread.remove();
-    }
+    if (topic.turns.length) restored.push(topic);
+    else topic.thread.remove();
   }
+  if (restored.length) {
+    topics.unshift(...restored);
+    if (!active && !current) show(restored[restored.length - 1]);
+    else renderConvos();
+    // The browser learns the new id only once Ixel has them under it, so a reload meanwhile still finds them
+    if (!(await save(was))) return;
+  }
+  rememberTab();
 }
 
 // ── A question and the panel's reply ──────────────────────────────────────
@@ -1050,7 +1094,7 @@ class HandoffCard {
   constructor(topic, request) {
     this.topic = topic;
     this.request = request;
-    this.project = el("input", { type: "text", class: "handoff-project", spellcheck: "false",
+    this.project = el("input", { type: "text", class: "handoff-project", ...PRIVATE_TYPING,
       placeholder: "The project's folder, like C:\\Users\\you\\code\\shop", "aria-label": "Project folder" });
     this.planButton = el("button", { type: "button", class: "handoff-btn" }, "Plan");
     this.status = el("span", { class: "status", "aria-live": "polite" });
@@ -1987,8 +2031,8 @@ for (const button of modeButtons) {
     next.focus();
   });
 }
+show(null);
 restore();
-show(topics.length ? topics[topics.length - 1] : null);
 renderModes();
 grow();
 loadPanel();

@@ -4,7 +4,7 @@
 // page builds from the server's bytes.
 
 import {
-  $, el, icon, ago, plural, copyButton, api, getJSON, postJSON, rememberedProject, rememberProject,
+  $, el, icon, ago, plural, copyButton, api, getJSON, postJSON, rememberedProject, rememberProject, PRIVATE_TYPING,
 } from "./common.js";
 import { renderMarkdown } from "./markdown.js";
 
@@ -710,7 +710,7 @@ async function fixPr(pr, host) {
   const select = el("select", { id: "pr-fixer" }, list.map((a) =>
     el("option", { value: a.name }, a.label && a.label !== a.name ? `${a.label} (${a.name})` : a.name)));
   select.value = list.some((a) => a.name === "claude") ? "claude" : list[0].name;
-  const text = el("textarea", { id: "pr-fix-text", rows: "8", maxlength: String(MAX_FIX_CHARS),
+  const text = el("textarea", { id: "pr-fix-text", rows: "8", maxlength: String(MAX_FIX_CHARS), ...PRIVATE_TYPING,
     placeholder: "What should change? For example: handle a declined card." });
   const from = el("small", {}, "Looking for a review of it on the board…");
   const problem = el("div", { class: "dialog-problem", role: "alert" });
@@ -1036,7 +1036,7 @@ function needsForm(asked, t) {
   let read;
   if (a.needs === "text") {
     const box = el("textarea", { rows: "3", maxlength: "4000", "data-first": true, id: "needs-text", "data-key": "needs-text",
-      required: TEXT_NEEDED[a.op] || false });
+      required: TEXT_NEEDED[a.op] || false, ...PRIVATE_TYPING });
     box.value = asked.draft || "";
     box.addEventListener("input", () => { asked.draft = box.value; });
     form.append(el("label", { for: "needs-text" }, TEXT_LABEL[a.op] || "Note"), box);
@@ -1202,9 +1202,9 @@ async function newTask() {
     }
     return;
   }
-  const title = el("input", { type: "text", id: "new-title", maxlength: "200", required: true, autocomplete: "off" });
-  const body = el("textarea", { id: "new-body", rows: "4", maxlength: "20000" });
-  const checks = el("textarea", { id: "new-checks", rows: "3", placeholder: "One check per line" });
+  const title = el("input", { type: "text", id: "new-title", maxlength: "200", required: true, ...PRIVATE_TYPING });
+  const body = el("textarea", { id: "new-body", rows: "4", maxlength: "20000", ...PRIVATE_TYPING });
+  const checks = el("textarea", { id: "new-checks", rows: "3", placeholder: "One check per line", ...PRIVATE_TYPING });
   const assignee = agentSelect("", "new-assignee");
   const field = (id, label, input, hint) => el("div", { class: "field" }, el("label", { for: id }, label), input,
     hint ? el("small", {}, hint) : null);

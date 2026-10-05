@@ -12,7 +12,7 @@ import tempfile
 from typing import Awaitable, Callable
 
 from ixel_mat.agents.base import AgentConfig, BaseAgent, in_folder, prepare_workdir, remove_workdir
-from ixel_mat.agents import launch
+from ixel_mat.agents import launch, leftovers
 from ixel_mat.agents.launch import LaunchError, find_on_path, resolve_argv
 from ixel_mat.agents.process_tree import SPAWN_OPTIONS, create_process_tree
 from ixel_mat.config.secrets import child_env, ixels_own
@@ -335,6 +335,11 @@ class OneShotAgent(BaseAgent):
         env = cli_env(self.config)
         args = await self._args(env)
         cwd, remove_cwd = prepare_workdir(self.config.workdir)
+        # Gemini CLI, Copilot and OpenCode save the question and answer under your home folder: what a run in
+        # Ixel's own temp folder left is taken away after it (leftovers.py)
+        run = leftovers.prepare(self.config.command, args, cwd if remove_cwd else None, env)
+        if run:
+            args = args + run.args
         output_file = None
         if self.config.output_flag:
             output_dir = cwd if remove_cwd else tempfile.mkdtemp(prefix="ixel-out-")
@@ -346,6 +351,8 @@ class OneShotAgent(BaseAgent):
             except FileNotFoundError:
                 raise RuntimeError(f"Command not found: {self.config.command}") from None
         except (LaunchError, RuntimeError, ValueError):
+            if run:
+                run.drop()
             remove_workdir(cwd, remove_cwd)
             if output_file and not remove_cwd:
                 remove_workdir(os.path.dirname(output_file), True)
@@ -420,3 +427,10 @@ class OneShotAgent(BaseAgent):
             remove_workdir(cwd, remove_cwd)
             if output_file and not remove_cwd:
                 remove_workdir(os.path.dirname(output_file), True)
+            if run and tree is not None:
+                # Once the CLI and everything it started have exited, so nothing is still writing. In a thread: a
+                # database a CLI of yours is using at that moment can take a moment to be free (and if this call
+                # is cancelled meanwhile, the thread still finishes)
+                await asyncio.to_thread(run.clean)
+            elif run:
+                run.drop()

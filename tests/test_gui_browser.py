@@ -148,10 +148,14 @@ def test_full_review_in_the_browser(gui_url, browser):
     assert page.locator(".answers pre code").first.inner_text() == "window.__pwned = 4"
     assert page.locator(".answers strong").count() >= 1
 
-    # This tab keeps the conversation across a reload, and it's still only text
+    # This tab keeps the conversation across a reload, and it's still only text. Ixel keeps it, in memory: the
+    # browser's storage, which Edge and Chrome may write into a profile folder, has only the key and the tab's id
     page.reload()
     page.wait_for_selector(".verdict")
     assert "17 × 23 = 391" in page.inner_text(".verdict")
+    stored = page.evaluate("JSON.stringify([Object.entries(sessionStorage), Object.entries(localStorage)])")
+    assert "17 × 23" not in stored and "ixel-conversations" not in stored
+    assert sorted(page.evaluate("Object.keys(sessionStorage)")) == ["ixel-session", "ixel-tab"]
     assert page.locator(f"{LAST} th.step.done").count() == 3
     page.click(f"{LAST} .tab[data-tab=answers]")
     assert "<script>window.__pwned=2</script>" in page.inner_text(".answers")
@@ -163,6 +167,52 @@ def test_full_review_in_the_browser(gui_url, browser):
     shots = os.environ.get("IXEL_SCREENSHOT_DIR")
     if shots:
         page.screenshot(path=os.path.join(shots, "ixel-gui-review.png"), full_page=True)
+
+
+def test_a_duplicated_tab_keeps_its_own_conversations(gui_url, browser):
+    """Duplicate tab copies the tab's sessionStorage, and with it the id Ixel keeps its conversations under: each
+    page takes a new id when it loads, so the two start the same and then don't overwrite each other's."""
+    errors = []
+
+    def open_page(url, copied=None):
+        page = browser.new_page(viewport={"width": 1100, "height": 900})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        if copied:  # what Duplicate does, once: a reload of the copy keeps its own storage
+            page.add_init_script(f'if (window.name !== "duplicate") {{ window.name = "duplicate"; '
+                                 f'for (const [k, v] of {copied}) sessionStorage.setItem(k, v); }}')
+        open_app(page, url)
+        return page
+
+    def ask(page, question):
+        asked = page.locator(".thread:not([hidden]) .turn").count()
+        page.fill("#question", question)
+        page.click("#ask")
+        page.locator(".thread:not([hidden]) .turn").nth(asked).locator(".verdict").wait_for(timeout=30_000)
+        page.wait_for_timeout(300)  # the save after it
+
+    def after_a_reload(page):
+        page.reload()
+        page.locator(".thread:not([hidden]) .turn .verdict").first.wait_for(timeout=10_000)
+        page.wait_for_timeout(300)
+        return page.inner_text(".thread:not([hidden])")
+
+    first = open_page(gui_url)
+    first.click('.modes button[data-mode="quick"]')
+    ask(first, "What is 17 × 23? Asked in the first tab")
+    copied = json.dumps(first.evaluate("Object.entries(sessionStorage)"))
+    second = open_page(gui_url.split("#")[0], copied)
+    second.locator(".thread:not([hidden]) .turn .verdict").first.wait_for(timeout=10_000)  # a copy of the first's
+    second.click('.modes button[data-mode="quick"]')
+    ask(first, "Asked in the first tab again")
+    ask(second, "Asked in the duplicate")
+
+    shown = after_a_reload(first)
+    assert "Asked in the first tab again" in shown and "Asked in the duplicate" not in shown
+    shown = after_a_reload(second)
+    assert "What is 17 × 23? Asked in the first tab" in shown and "Asked in the duplicate" in shown
+    assert "Asked in the first tab again" not in shown
+    assert "Asked in the duplicate" in after_a_reload(second)  # and again, under the id it took last time
+    assert not errors, errors
 
 
 def test_follow_up_questions_in_the_browser(gui_url, browser):
