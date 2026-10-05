@@ -18,7 +18,7 @@ the repository is public, so if you don't see it, email us.
 | Your subscription logins | Each CLI's own storage (`~/.claude`, `~/.codex`, `~/.gemini`…). Ixel never reads these |
 | Your files | Anything your user account can read |
 | Your code | Only the diff or files you name for a review (`--diff`, `--file`…) are read, once, and sent to the models on your panel (below) |
-| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`; the terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and the browser app in that tab's `sessionStorage`, which the browser clears when you close the tab |
+| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`, each with the time it was saved. Each one is deleted once it's 24 hours old, by the next `ixel` command after that (continuing the conversation doesn't keep its earlier questions longer), and all of them at once by `ixel forget` (or Forget in the app's Settings); the terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and the browser app in that tab's `sessionStorage`, which the browser clears when you close the tab. `ixel forget` also deletes the app window's browser storage (`ixel app`'s Edge or Chrome profile, and on a Mac Ixel.app's WebKit storage) |
 | Your usage and money | Every model call is billed to you |
 
 ## Who we assume might be hostile
@@ -133,10 +133,12 @@ files. Ixel uses them only to answer, and for each preset:
   OpenCode 1's attempt to install its plugin package from npm the first time it runs with a new config folder.
 - **A fresh empty folder** for every run, deleted afterwards (`workdir = "temp"`).
 - **No terminal:** stdin is closed or carries only the question, so a CLI can't stop and ask for approval.
-- **The question can't become a flag.** Every preset sends it on stdin, so it never shows on a command
-  line that other users of the computer can read with `ps`. An agent you set up with `prompt_via = "auto"`
-  or `"arg"` gets it after `--`, never as a bare argument, so a question that starts with
-  `--dangerously-…` stays a question.
+- **The question can't become a flag.** Every preset, and every command-line agent of your own whose
+  config doesn't say otherwise, gets it on stdin, so it never shows on a command line that other programs
+  and other users of the computer can read (`ps`, Task Manager). An agent you set up with
+  `prompt_via = "auto"` or `"arg"` gets it after `--`, never as a bare argument, so a question that starts
+  with `--dangerously-…` stays a question; `"flag"` puts it after `-q`. Those three show it on the command
+  line. A chat-style (`"subprocess"`) agent always gets it on stdin.
 - **None of Ixel's keys:** keys saved in Ixel are withheld unless an agent lists them in
   `pass_env`. The Claude Code, Codex, Gemini CLI and Copilot presets also drop every AI vendor's key from
   your environment with `drop_env` (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`…): their own
@@ -405,7 +407,13 @@ scripted panels. End-to-end runs check that only the question and the anonymous 
   connection, which ends most commands, but one that writes nothing may keep running on the server. On
   Linux and macOS, if Ixel is killed outright, an ssh it started can carry on until its command ends.
 - **Nothing leaves your computer but ssh itself.** The log (`machines.log`, 0600) records each connection,
-  run (with the command), import, new key and key pinned, forgotten or changed, and stays on your computer.
+  run, import, new key and key pinned, forgotten or changed: which machine, its address, how it went and the
+  key fingerprints, never a command's text. It stays on your computer, in one file of at most 1 MB (the
+  oldest lines go first), and a line older than 30 days goes the next time Ixel starts or writes to the
+  log. A log an earlier Ixel wrote loses its commands, and its `machines.log.1`, the first time this
+  version starts. An app window opened before the update still runs the earlier Ixel and can add a command
+  until you close it; Ixel takes that out the next time it starts or writes to the log.
+  `ixel forget` deletes it.
   A new key is made with no passphrase so runs need no prompt, and the page says how to add one
   (`ssh-keygen -p`); it becomes a machine's key only when you save. Copy my key sends the public key's own
   characters only.

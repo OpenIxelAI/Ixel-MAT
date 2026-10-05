@@ -93,7 +93,8 @@ function render() {
   parts.push(...groups());
   parts.push(el("p", { class: "fine machines-foot" }, icon("lock"),
     el("span", {}, "Each server's key is pinned in Ixel's own file the first time, and ssh refuses a server whose "
-      + "key has changed. Every connection and run is logged on this computer (machines.log, next to your settings).")));
+      + "key has changed. Every connection and run is logged on this computer for 30 days (machines.log, next to your "
+      + "settings), but never the command itself.")));
   body.replaceChildren(...parts);
 }
 

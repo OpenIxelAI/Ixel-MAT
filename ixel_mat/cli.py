@@ -648,7 +648,8 @@ def cmd_review(argv: list[str]) -> int:
                         help="seconds per model call, for models with no timeout of their own "
                              "(default: [review] timeout, else 180)")
     parser.add_argument("-c", "--continue", dest="follow_up", action="store_true",
-                        help="a follow-up: the panel also sees your last few questions and its answers to them")
+                        help="a follow-up: the panel also sees your last few questions and its answers to them "
+                             "(each kept for a day)")
     code = parser.add_argument_group("code to review (read-only: nothing runs, nothing changes)")
     diff = code.add_mutually_exclusive_group()
     diff.add_argument("--diff", action="store_true", help="your changes since the last commit (git diff HEAD)")
@@ -707,7 +708,8 @@ def cmd_review(argv: list[str]) -> int:
         out.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]The last conversation was asked with Private on, so it stays "
                   "with your own models. This is a new question.[/]")
     elif args.follow_up and not earlier:
-        out.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]Nothing to continue yet, so this is a new question.[/]")
+        out.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]Nothing to continue (Ixel keeps each question for a day), "
+                  "so this is a new question.[/]")
     # Auto mode asks Triage first (well under a second); the decision is reported with the run
     mode, decision = asyncio.run(choose_mode(settings, args.mode, question, earlier))
     problem = settings.private_problem(mode)
@@ -1243,6 +1245,41 @@ def cmd_docs(argv: list[str]) -> int:
     return 0
 
 
+def cmd_forget(argv: list[str]) -> int:
+    """`ixel forget`: deletes what Ixel keeps of what you asked and ran."""
+    import argparse
+
+    from ixel_mat.forget import WINDOW, forget
+
+    parser = argparse.ArgumentParser(
+        prog="ixel forget",
+        description="Delete what Ixel keeps of what you asked and ran: your last ixel review conversation, "
+                    "the Machines log, and the app window's storage. Your keys, settings, machines and "
+                    "usage stats stay.")
+    parser.parse_args(argv)
+    found = forget()
+    console.print()
+    for item in found:
+        where = safe_markup(str(item.path))
+        if not item.error:
+            console.print(f"  [{C['green']}]✓[/] Deleted {safe_markup(item.what)} [{C['dim']}]({where})[/]")
+            continue
+        console.print(f"  [{C['red']}]✗[/] Couldn't delete {safe_markup(item.what)} [{C['dim']}]({where}): "
+                      f"{safe_markup(item.error)}[/]")
+        if item.what == WINDOW and os.path.lexists(item.path):  # on Windows, an open window holds it
+            console.print(f"    [{C['dim']}]If an Ixel window is open, close it, then run[/] "
+                          f"[{C['blue']}]ixel forget[/] [{C['dim']}]again.[/]")
+    if not found:
+        console.print(f"  [{C['dim']}]Nothing to forget: Ixel isn't keeping any of what you asked or ran.[/]")
+    elif os.name == "posix" and any(item.what == WINDOW and not item.error for item in found):
+        # On a Mac or Linux the folder goes even while a window has it open, and that window can write
+        # what it holds back as it closes
+        console.print(f"  [{C['dim']}]If an Ixel window was open, close it and run[/] [{C['blue']}]ixel forget[/] "
+                      f"[{C['dim']}]again: a window can save what it holds as it closes.[/]")
+    console.print(f"  [{C['dim']}]Your keys, settings, machines and usage stats are kept.[/]\n")
+    return 1 if any(item.error for item in found) else 0
+
+
 def cmd_update(argv: list[str]) -> int:
     from ixel_mat.update import run_update
     return run_update(argv, say=lambda line: console.print(f"  {safe_markup(line)}"))
@@ -1301,6 +1338,10 @@ STOP_LIKE_CTRL_C = ("review", "ask", "image", "mcp", "gui", "app")
 
 def main():
     _tolerate_unencodable_output()
+    # Whatever the command: each review question and answer goes once it's a day old, Machines log lines
+    # once they're 30 days old (a stat or two, and a rewrite or a delete only when something's due)
+    from ixel_mat.forget import tidy
+    tidy()
     try:
         _main()
     except KeyboardInterrupt:  # Ctrl+C, kill or a closed terminal: stopped, no traceback
@@ -1349,6 +1390,8 @@ def _main():
         sys.exit(cmd_update(args[1:]))
     if resolved == 'docs':
         sys.exit(cmd_docs(args[1:]))
+    if resolved == 'forget':
+        sys.exit(cmd_forget(args[1:]))
     if resolved == 'triage':
         sys.exit(cmd_triage(args[1:]))
     if resolved == 'machines':

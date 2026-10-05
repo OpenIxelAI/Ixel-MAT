@@ -15,7 +15,7 @@ secrets._ENV_DIR, secrets._ENV_FILE, secrets._KEYS_FILE = _NOWHERE, _NOWHERE / "
 
 import pytest  # noqa: E402
 
-from ixel_mat import conversation, stats, update  # noqa: E402
+from ixel_mat import conversation, forget, stats, update  # noqa: E402
 from ixel_mat.agents import websocket  # noqa: E402
 from ixel_mat.config import loader  # noqa: E402
 from ixel_mat.config import setup as wizard  # noqa: E402
@@ -72,6 +72,9 @@ def _no_real_user_files(tmp_path, tmp_path_factory, monkeypatch):
     monkeypatch.setattr(machines_ssh, "CONFIG_FILE", ssh_dir / "config")
     monkeypatch.setattr(machines_store, "CONSOLE_PROFILES", tmp_path / "ixel-console" / "profiles.json")
     monkeypatch.setattr(machines_ssh, "CONSOLE_PINS", tmp_path / "ixel-console" / "ssh_known_hosts")
+    # `ixel forget` deletes the app window's browser storage: a folder in the test's own, not your window's
+    # (a test of where those folders are imports window_folders itself, before this runs)
+    monkeypatch.setattr(forget, "window_folders", lambda: [tmp_path / "ixel-window" / "window"])
     yield
     # A load the app left to a thread of its own (secrets._load_later) finishes before the next test's files
     if secrets._LATER.acquire(timeout=10):

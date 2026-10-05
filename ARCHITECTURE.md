@@ -19,7 +19,7 @@ MCP plugin. The engine doesn't know which one is calling.
 
 | Path | What it does |
 |---|---|
-| `ixel_mat/cli.py` | `ixel …` commands: setup, review, gui, mcp, saves, status, model, config, agents, doctor, update, machines |
+| `ixel_mat/cli.py` | `ixel …` commands: setup, review, gui, mcp, saves, status, model, config, agents, doctor, update, docs, forget, machines. Each one starts with `forget.tidy()` |
 | `ixel_mat/mat.py` | The interactive terminal: a plain question (`[review] plain_questions`), `/review`, `/saver`, `/answers`, `/saves`, `/compare`; ctrl+c cancels a running review (`_interruptible`) |
 | `ixel_mat/prompt_ui.py` | The prompt: history, completion, multi-line input, big pastes folded into a placeholder, the status rule above it (`prompt_toolkit`, imported only when there's a terminal; otherwise `mat.py` reads plain lines) |
 | `ixel_mat/asking.py` | Questions asked in the terminal (`ixel setup`, and `mat.py`'s plain lines): Rich's `Prompt` and `Confirm`, with the answer typed into `prompt_toolkit`, which draws the same prompt and keeps backspace and the arrow keys inside the answer (pipes, hidden answers and Windows go Rich's own way) |
@@ -37,14 +37,15 @@ MCP plugin. The engine doesn't know which one is calling.
 | `ixel_mat/sound.py` | Sound recorded or attached in the app, written out by OpenAI or Groq (`pick_provider`, `transcribe`); never kept |
 | `ixel_mat/triage.py` | Optional triage (your own model or TypeSafe's decision API): auto mode, skipping agreed reviews, saver's gate |
 | `ixel_mat/gui/` | `ixel gui`: an aiohttp server on 127.0.0.1 and a dependency-free HTML/JS/CSS app; `window.py` is `ixel app`, which shows it in an Edge or Chrome app window, or the native windows: `macos/` (Ixel.app, Swift) and `linux_window.py` (GTK), which run `ixel app --host` |
-| `ixel_mat/machines/` | Machines (SSH): `store.py` (`machines.json`, and imports from `~/.ssh/config` and Ixel Console), `ssh.py` (pinned host keys, learned with ssh into a temporary file; the ssh lines, with the destination after `--`), `terminal.py` (Connect's terminal window, given the argv unjoined, held open by a Python helper until Enter), `runs.py` ("Run on machines": 8 at a time, time and output limits), `log.py` (`machines.log`), `cli.py` (`ixel machines`) |
+| `ixel_mat/machines/` | Machines (SSH): `store.py` (`machines.json`, and imports from `~/.ssh/config` and Ixel Console), `ssh.py` (pinned host keys, learned with ssh into a temporary file; the ssh lines, with the destination after `--`), `terminal.py` (Connect's terminal window, given the argv unjoined, held open by a Python helper until Enter), `runs.py` ("Run on machines": 8 at a time, time and output limits), `log.py` (`machines.log`: never a command's text, lines kept 30 days, one file of at most 1 MB), `cli.py` (`ixel machines`) |
 | `ixel_mat/mcp_server.py` | `ixel mcp`: the MCP server (tools `ixel_review`, `ixel_panel`) and host setup snippets |
 | `ixel_mat/agents/` | Transports, one per kind of model (below); `launch.py` finds the program to run for a CLI (PATH only, and npm `.cmd` shims resolved on Windows) |
 | `ixel_mat/config/` | `loader.py` (TOML → `AgentConfig`, `set_agent_model`), `secrets.py` (saved keys: `keys.enc` and its key in the system keychain, or `.env` without one; child environments, file I/O), `setup.py` (the wizard) |
 | `ixel_mat/presets.py` | The locked-down subscription CLI presets; configs refer to them by name (`preset = "codex"`) |
 | `ixel_mat/models.py` | `latest` / `latest-fast`: which model id each means, from a provider's live list |
 | `ixel_mat/sanitize.py` | Strips terminal control sequences; escapes Rich markup |
-| `ixel_mat/conversation.py` | The saved conversation `ixel review --continue` picks up (last three exchanges, 0600) |
+| `ixel_mat/conversation.py` | The saved conversation `ixel review --continue` picks up (last three exchanges, 0600, each with the time it was saved, in UTC); each exchange is dropped once it's 24 hours old, and the file deleted when none is left (`expire` as each command starts: a stat, since the file's time is set to its oldest exchange's; `load_conversation` and `save_conversation`) |
+| `ixel_mat/forget.py` | What Ixel keeps of what you asked and ran: `tidy()` deletes what's past its time as each `ixel` command starts (a stat or two); `forget()` is `ixel forget` and Settings' Forget button (the conversation, the Machines log, and for `ixel forget` the app window's browser storage) |
 | `ixel_mat/update.py` | `ixel update` and the once-a-day update notice. Installer copies record where they came from in `install.json`, and, as the installer's last step, the commit installed (git pull, then the installer again whenever the checkout isn't that commit, unless install.ps1 is still running in its window: it holds `install.lock` open until it's done). pipx and uv copies are recognized from pip's `direct_url.json` plus `pipx_metadata.json` / `uv-receipt.toml`, compared with `git ls-remote`, and updated by that tool |
 
 ## Agents
@@ -77,9 +78,13 @@ stream (Anthropic `messages.stream`, OpenAI-style server-sent events), and CLI a
 `stdout_format = "claude-stream-json"` read Claude Code's `stream-json` events. Everything else ignores it
 and the whole reply arrives at the end.
 
-CLI agents run in a fresh temporary folder, with stdin closed (or carrying the prompt), the prompt after
-`--` or on stdin (`prompt_via = "auto"`: on stdin once it's too long for a command line, `ARG_LIMIT`),
-and an environment from `secrets.child_env()`. On Windows, `launch.resolve_argv` looks the command up on
+CLI agents run in a fresh temporary folder, with stdin closed (or carrying the prompt), the prompt on
+stdin (`prompt_via = "stdin"`, the default, since other programs on the computer can read a command line),
+after `--` (`"arg"`), after `-q` (`"flag"`), or after `--` unless it's too long for a command line, then
+on stdin (`"auto"`, `ARG_LIMIT`). An agent whose config leaves `prompt_via` out
+(`AgentConfig.prompt_via_default`) says so when it fails, since that once meant `"flag"`. Subprocess agents
+always get each prompt on their stdin (a pipe, or a PTY), never in their arguments. All of them get an
+environment from `secrets.child_env()`. On Windows, `launch.resolve_argv` looks the command up on
 PATH only (PATHEXT, limited to what CreateProcess can start), refuses a command that isn't there (a bare
 name would be looked for in the current folder), runs a plain npm shim's target (`node.exe script.js` or
 the `.exe`) instead of the `.cmd`, and refuses to pass cmd.exe syntax to any other batch file. Subprocess

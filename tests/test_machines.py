@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -591,11 +592,25 @@ def test_with_no_desktop_on_linux_no_window_is_opened(monkeypatch):
 
 # ── the log ───────────────────────────────────────────────────────────────
 
+def entries() -> list[str]:
+    """The log's lines, after its first (which says what the file is)."""
+    lines = log.LOG_FILE.read_text(encoding="utf-8").splitlines()
+    assert lines[0] + "\n" == log.HEADER
+    return lines[1:]
+
+
+DAY = 24 * 60 * 60
+
+
+def stamp(when: float) -> str:
+    return log._stamp(when)
+
+
 def test_the_log_is_private_one_line_each_and_cant_be_forged():
-    log.write("RUN", machine='web" result="ok', command="ls\nFAKE LINE", path="/home/a/.ssh/id")
-    text = log.LOG_FILE.read_text()
-    assert text.count("\n") == 1 and 'machine="web\\" result=\\"ok"' in text and "\\x0a" in text
-    assert 'path="/home/a/.ssh/id"' in text
+    log.write("RUN", machine='web" result="ok', reason="no_key\nFAKE LINE", path="/home/a/.ssh/id")
+    [line] = entries()
+    assert 'machine="web\\" result=\\"ok"' in line and "\\x0a" in line and 'path="/home/a/.ssh/id"' in line
+    assert b"\r" not in log.LOG_FILE.read_bytes()  # \n alone, on Windows too
     if POSIX:
         assert stat.S_IMODE(log.LOG_FILE.stat().st_mode) == 0o600
 
@@ -606,11 +621,166 @@ def test_a_long_value_is_cut_before_it_is_escaped():
     assert log._quote("a" * 1999 + "\n") == '"' + "a" * 1999 + '\\x0a"'
 
 
-def test_a_big_log_moves_aside(monkeypatch):
-    monkeypatch.setattr(log, "MAX_BYTES", 10)
-    log.write("ONE")
-    log.write("TWO")
-    assert "ONE" in log.LOG_FILE.with_name("machines.log.1").read_text() and "ONE" not in log.LOG_FILE.read_text()
+def test_nothing_writes_a_command_into_the_log():
+    # A command can hold a password or a file's contents: the log says which machines and how it went
+    import ast
+    package = Path(log.__file__).resolve().parent.parent
+    calls = [(path.name, node) for path in package.rglob("*.py")
+             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "write"
+             and isinstance(node.func.value, ast.Name) and node.func.value.id == "log"]
+    assert len(calls) >= 10  # the check sees them
+    assert not [(name, node.lineno) for name, node in calls if any(k.arg == "command" for k in node.keywords)]
+
+
+def test_a_full_log_drops_its_oldest_lines_and_stays_one_file(monkeypatch):
+    monkeypatch.setattr(log, "MAX_BYTES", 1000)
+    for n in range(40):
+        log.write("RUN", machine=f"web{n:02}", result="ok")
+    lines = entries()
+    assert log.LOG_FILE.stat().st_size <= 1000 and not log.LOG_FILE.with_name("machines.log.1").exists()
+    assert 'machine="web39"' in lines[-1] and not any('machine="web00"' in line for line in lines)
+    names = [line.split('machine="')[1][:5] for line in lines]
+    assert names == sorted(names)  # in order, the newest last
+
+
+def test_lines_go_once_they_are_30_days_old():
+    now = 1_790_000_000
+    old, young = stamp(now - 31 * DAY), stamp(now - 2 * DAY)
+    log.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log.LOG_FILE.write_text(f'{log.HEADER}{old} CONNECT machine="old"\n{young} CONNECT machine="young"\n',
+                            encoding="utf-8")
+    log.tidy(now)
+    assert [line.split()[2] for line in entries()] == ['machine="young"']
+
+
+def test_the_check_reads_each_end_and_rewrites_only_when_something_is_due(monkeypatch):
+    now = 1_790_000_000
+    text = f'{log.HEADER}{stamp(now - 29.5 * DAY)} CONNECT machine="a"\n{stamp(now - DAY)} RUN machine="b"\n'
+    log.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log.LOG_FILE.write_text(text, encoding="utf-8")
+    rewrites = []
+    real = log._rewrite
+    monkeypatch.setattr(log, "_rewrite", lambda path, when: rewrites.append(when) or real(path, when))
+    log.tidy(now)
+    assert not rewrites and log.LOG_FILE.read_text(encoding="utf-8") == text
+    # Once the oldest is over 30 days old, a rewrite keeps the last 29 days, so the next is a day away
+    log.tidy(now + DAY)
+    assert rewrites == [now + DAY] and [line.split()[2] for line in entries()] == ['machine="b"']
+
+
+def test_an_older_ixels_log_loses_its_commands_and_its_second_file_the_first_time():
+    now = time.time()
+    recent = stamp(now - 3600)
+    older_ixel = (
+        f'{stamp(now - 40 * DAY)} RUN_START command="cat secrets.txt" machines="web" timeout="60"\n'
+        f'{recent} RUN_START command="echo \\"hunter2\\" | sudo -S ls" machines="web, db" timeout="60"\n'
+        f'{recent} RUN machine="web" address="10.0.0.5" command="echo \\"hunter2\\" | sudo -S ls" result="ok" '
+        f'code="0" reason="" seconds="0.4"\n'
+        f'{recent} CONNECT machine="web" host="10.0.0.5" command="openclaw tui" terminal="here"\n'
+        f'{recent} HOSTKEY_PINNED machine="web" name="10.0.0.5" fingerprint="SHA256:abc"\n')
+    log.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log.LOG_FILE.write_text(older_ixel, encoding="utf-8")
+    log.LOG_FILE.with_name("machines.log.1").write_text(f'{recent} RUN command="rm -rf /tmp/x"\n', encoding="utf-8")
+    log.write("CONNECT", machine="db", host="10.0.0.6", terminal="here")
+    text = log.LOG_FILE.read_text(encoding="utf-8")
+    assert "command=" not in text and "hunter2" not in text and "secrets" not in text and "openclaw" not in text
+    assert not log.LOG_FILE.with_name("machines.log.1").exists()
+    *kept, written = entries()
+    assert kept == [  # the rest of each line as it was; the 40-day-old one is gone
+        f'{recent} RUN_START machines="web, db" timeout="60"',
+        f'{recent} RUN machine="web" address="10.0.0.5" result="ok" code="0" reason="" seconds="0.4"',
+        f'{recent} CONNECT machine="web" host="10.0.0.5" terminal="here"',
+        f'{recent} HOSTKEY_PINNED machine="web" name="10.0.0.5" fingerprint="SHA256:abc"']
+    assert written.endswith('CONNECT machine="db" host="10.0.0.6" terminal="here"')
+
+
+@pytest.mark.parametrize("ending", ["\r\n", "\r\r\n"])
+def test_an_older_ixels_log_from_windows_comes_out_with_plain_line_ends(ending):
+    # The older Ixel appended in text mode, which on Windows turned each \n into \r\n (or \r\r\n)
+    recent = stamp(time.time())
+    log.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log.LOG_FILE.write_bytes(f'{recent} CONNECT machine="web" command="ls"{ending}{recent} RUN machine="db"{ending}'
+                             .encode("utf-8"))
+    log.tidy()
+    assert log.LOG_FILE.read_bytes() == (f'{log.HEADER}{recent} CONNECT machine="web"\n'
+                                         f'{recent} RUN machine="db"\n').encode("utf-8")
+
+
+def test_the_startup_check_also_cleans_an_older_ixels_log():
+    log.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log.LOG_FILE.with_name("machines.log.1").write_text("old", encoding="utf-8")
+    log.tidy()  # with no machines.log, its machines.log.1 still goes
+    assert not log.LOG_FILE.with_name("machines.log.1").exists() and not log.LOG_FILE.exists()
+    recent = stamp(time.time())
+    log.LOG_FILE.write_text(f'{recent} RUN_START command="ls" machines="web"\n', encoding="utf-8")
+    log.tidy()
+    assert entries() == [f'{recent} RUN_START machines="web"']
+
+
+def counting_rewrites(monkeypatch) -> list[float]:
+    rewrites: list[float] = []
+    real = log._rewrite
+    monkeypatch.setattr(log, "_rewrite", lambda path, when: rewrites.append(when) or real(path, when))
+    return rewrites
+
+
+def test_a_line_from_a_clock_that_was_ahead_doesnt_keep_old_lines_after_it():
+    now = 1_790_000_000
+    log.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log.LOG_FILE.write_text(f'{log.HEADER}{stamp(now + 365 * DAY)} CONNECT machine="ahead"\n'
+                            f'{stamp(now - 200 * DAY)} RUN machine="old" address="10.0.0.5"\n'
+                            f'{stamp(now - DAY)} RUN machine="young"\n'
+                            f'{stamp(now + DAY / 2)} RUN machine="a-little-ahead"\n', encoding="utf-8")
+    log.tidy(now)
+    assert [line.split()[2] for line in entries()] == ['machine="young"', 'machine="a-little-ahead"']
+
+
+def test_commands_an_older_ixel_still_running_adds_go_too(monkeypatch):
+    # An app window opened before an update runs the older Ixel until it's closed, and appends its lines
+    # (with the command) to the log the new one tidied
+    recent = stamp(time.time())
+    log.write("CONNECT", machine="web", host="10.0.0.5", terminal="here")
+    with open(log.LOG_FILE, "a", encoding="utf-8") as fh:
+        fh.write(f'{recent} RUN_START command="echo hunter2 | sudo -S ls" machines="web" timeout="60"\n')
+    rewrites = counting_rewrites(monkeypatch)
+    log.tidy()
+    assert "hunter2" not in log.LOG_FILE.read_text(encoding="utf-8") and len(rewrites) == 1
+    assert entries()[-1] == f'{recent} RUN_START machines="web" timeout="60"'
+    with open(log.LOG_FILE, "a", encoding="utf-8") as fh:
+        fh.write(f'{recent} RUN machine="web" command="cat ~/.netrc" result="ok"\n')
+    log.write("CONNECT", machine="db", terminal="here")
+    text = log.LOG_FILE.read_text(encoding="utf-8")
+    assert "netrc" not in text and 'machine="db"' in text and len(rewrites) == 2
+    log.write("CONNECT", machine="db", terminal="here")
+    assert len(rewrites) == 2  # once it's clean, a line is only added
+
+
+def test_a_second_file_that_wont_go_doesnt_make_every_line_rewrite_the_log(monkeypatch):
+    log.write("CONNECT", machine="web")
+    older = log.LOG_FILE.with_name("machines.log.1")
+    (older / "inside").mkdir(parents=True)  # a folder, say, which unlink won't delete
+    rewrites = counting_rewrites(monkeypatch)
+    for n in range(5):
+        log.write("CONNECT", machine=f"web{n}")
+    log.tidy()
+    assert not rewrites and len(entries()) == 6 and older.is_dir()
+
+
+def test_writing_never_raises(monkeypatch, tmp_path):
+    blocked = tmp_path / "a-file"
+    blocked.write_text("", encoding="utf-8")
+    monkeypatch.setattr(log, "LOG_FILE", blocked / "machines.log")  # its folder is a file
+    log.write("CONNECT", machine="web")
+    log.tidy()
+    assert log.delete() == []
+
+
+def test_forget_deletes_the_log_and_an_older_ixels_second_file():
+    log.write("CONNECT", machine="web")
+    log.LOG_FILE.with_name("machines.log.1").write_text("old", encoding="utf-8")
+    assert log.delete() == [(log.LOG_FILE, ""), (log.LOG_FILE.with_name("machines.log.1"), "")]
+    assert not log.LOG_FILE.exists() and log.delete() == []
 
 
 # ── runs (a stand-in for ssh) ────────────────────────────────────────────────
@@ -650,8 +820,9 @@ def test_each_machine_ends_its_own_way():
     assert run.to_dict()["counts"] == {"ok": 1, "failed": 1, "error": 2}
     assert "output" not in run.to_dict()["results"][0]
     assert "output" in run.to_dict({run.results[0].machine.id})["results"][0]
-    lines = log.LOG_FILE.read_text().splitlines()
+    lines = entries()
     assert lines[0].split()[1] == "RUN_START" and sum(" RUN " in line for line in lines) == 4
+    assert "the command" not in log.LOG_FILE.read_text(encoding="utf-8")  # which machines, never what ran
 
 
 def test_output_past_the_limit_is_counted_not_kept(monkeypatch):

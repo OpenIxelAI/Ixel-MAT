@@ -277,6 +277,7 @@ class GuiServer:
         app.router.add_get("/api/appearance", self._appearance)
         app.router.add_post("/api/appearance", self._appearance_change)
         app.router.add_post("/api/docs", self._docs)
+        app.router.add_post("/api/forget", self._forget)
         return app
 
     def _allowed_hosts(self) -> set[str]:
@@ -572,6 +573,13 @@ class GuiServer:
         open the website in the window itself (the Mac app's) or in its private browser profile (Windows')."""
         from ixel_mat import docs
         return web.json_response({"opened": await asyncio.to_thread(docs.open_docs), "url": docs.DOCS_URL})
+
+    async def _forget(self, request: web.Request) -> web.Response:
+        """Settings' Forget button: deletes the review conversation and the Machines log. Not the window's
+        storage, which this window is using (`ixel forget` does that, with Ixel closed)."""
+        from ixel_mat.forget import forget
+        found = await asyncio.to_thread(forget, window=False)
+        return web.json_response(_clean({"forgotten": [item.to_dict() for item in found]}))
 
     # /handoff: one request split across agents, through Handoff (see handoff.py)
 

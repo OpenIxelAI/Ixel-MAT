@@ -317,7 +317,7 @@ def test_the_status_line_counts_the_round_and_says_how_to_stop():
 
 
 def test_the_prompt_moon_grows_with_the_conversation_and_is_gold_when_full():
-    from ixel_mat.conversation import MAX_EARLIER_TURNS
+    from ixel_mat.modes.review import MAX_EARLIER_TURNS
     phases = [theme.moon(n) for n in range(MAX_EARLIER_TURNS + 1)]
     assert [g for g, _ in phases] == list(theme.MOON_PHASES) and len(set(g for g, _ in phases)) == 4
     assert [c for _, c in phases] == [theme.C["violet"]] * 3 + [theme.C["gold"]]

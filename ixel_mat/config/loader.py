@@ -141,10 +141,11 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout < 0:
             warnings.append(f"Agent '{name}': ignoring invalid timeout {timeout!r}")
             timeout = 0
-        prompt_via = data.get("prompt_via", "flag")
+        # Left out, it's stdin: other programs on the computer can read a command line, but not that
+        prompt_via = data.get("prompt_via", "stdin")
         if prompt_via not in PROMPT_MODES:
             warnings.append(f"Agent '{name}': ignoring unknown prompt_via {prompt_via!r}")
-            prompt_via = "flag"
+            prompt_via = "stdin"
         stdout_format = data.get("stdout_format", "text")
         if stdout_format not in STDOUT_FORMATS:
             warnings.append(f"Agent '{name}': ignoring unknown stdout_format {stdout_format!r}")
@@ -214,6 +215,7 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
             auto_resume=data.get("auto_resume", True),
             timeout=float(timeout),
             prompt_via=prompt_via,
+            prompt_via_default=agent_type == "oneshot" and data.get("prompt_via") not in PROMPT_MODES,
             workdir=workdir,
             pass_env=pass_env,
             output_flag=data.get("output_flag", "") if isinstance(data.get("output_flag", ""), str) else "",
@@ -343,7 +345,7 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             command = data.get("command", "")
             if not command:
                 issues.append(f"Agent '{name}': missing command")
-            if data.get("prompt_via", "flag") not in PROMPT_MODES:
+            if data.get("prompt_via", "stdin") not in PROMPT_MODES:
                 issues.append(f"Agent '{name}': prompt_via must be one of {', '.join(PROMPT_MODES)}")
 
         if not data.get("label"):

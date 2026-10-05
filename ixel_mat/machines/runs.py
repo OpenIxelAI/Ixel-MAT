@@ -1,9 +1,9 @@
 """
 One command you typed, run on several machines at once ("Run on machines"): eight at a time, each with a
 time limit and an output limit. Nothing is asked along the way (a key, or ssh-agent, signs in), each
-machine's key must already be pinned, and every run is logged (log.py). Runs still going stop when Ixel
-closes. On Linux and macOS, if Ixel is killed outright, an ssh it started can go on until its command ends
-on the server.
+machine's key must already be pinned, and every run is logged, without the command (log.py). Runs still
+going stop when Ixel closes. On Linux and macOS, if Ixel is killed outright, an ssh it started can go on
+until its command ends on the server.
 """
 from __future__ import annotations
 
@@ -117,8 +117,8 @@ class Runs:
         if any(run.running for run in self._runs.values()):
             raise RunError("A run is still going. Stop it, or wait for it to finish.", 409)
         run = Run(command, timeout, targets)
-        log.write("RUN_START", command=command, machines=", ".join(t.machine.name for t in targets),
-                  timeout=timeout)
+        # Which machines and how it went, never the command: it can hold a password or a file's contents
+        log.write("RUN_START", machines=", ".join(t.machine.name for t in targets), timeout=timeout)
         run.task = asyncio.get_running_loop().create_task(self._all(run))
         self._runs[run.id] = run
         for old in list(self._runs)[:-KEEP_RUNS]:
@@ -205,7 +205,7 @@ class Runs:
                 tree.close()
             if result.started is not None:
                 result.ended = time.monotonic()
-                log.write("RUN", machine=result.machine.name, address=result.address, command=run.command,
+                log.write("RUN", machine=result.machine.name, address=result.address,
                           result=result.state, code="" if result.code is None else result.code,
                           reason=result.hint_code, seconds=round(result.ended - result.started, 1))
 

@@ -158,7 +158,11 @@ class AgentConfig:
     effort: str = ""
 
     # Command-line agents
-    prompt_via: str = "flag"         # "flag" (-q PROMPT), "arg" (-- PROMPT), "stdin", or "auto"
+    # How the question reaches it: "stdin" (the default: other programs can read a command line, but not
+    # this), "arg" (-- PROMPT), "flag" (-q PROMPT), or "auto" (arg, or stdin when it's too long)
+    prompt_via: str = "stdin"
+    prompt_via_default: bool = False  # its config left prompt_via out, which used to mean "flag" (a failure
+                                      # says what changed)
     output_flag: str = ""            # e.g. "-o": the CLI writes its final answer to a file we name
     stdout_format: str = "text"      # one of STDOUT_FORMATS
     workdir: str = "temp"            # "temp" (fresh empty dir), "inherit", or a path

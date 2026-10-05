@@ -244,8 +244,9 @@ def _own_error(stderr: str, *prompts: str | bytes | None) -> str:
 
 class OneShotAgent(BaseAgent):
     """
-    Runs a fresh subprocess per message (e.g. hermes chat -q "prompt").
-    
+    Runs a fresh subprocess per message, with the question on its stdin unless its config's prompt_via
+    says otherwise (e.g. "flag" for hermes chat -q "prompt").
+
     No persistent process, no PTY, no TUI rendering issues.
     Each send() spawns a new process, captures stdout, returns the result.
     """
@@ -284,6 +285,14 @@ class OneShotAgent(BaseAgent):
         self._listen_callback = callback
         while self._connected:
             await asyncio.sleep(0.2)
+
+    def _stdin_hint(self) -> str:
+        """For an agent whose config doesn't say how it takes the question: that used to be -q PROMPT, and
+        a program that still wants it there fails now. It goes right after the agent's name, before what
+        the program said: `ixel review` shows only an error's first 160 or 200 characters."""
+        if not self.config.prompt_via_default:
+            return ""
+        return ' (it got the question on stdin; if it takes it as an argument, set prompt_via = "arg" or "flag")'
 
     async def _args(self, env: dict[str, str]) -> list[str]:
         return await version_args(self.config, env)
@@ -368,7 +377,7 @@ class OneShotAgent(BaseAgent):
                     reading = proc.communicate(stdin_data)
                 stdout, stderr = await asyncio.wait_for(reading, timeout=self.timeout)
             except asyncio.TimeoutError:
-                raise TimeoutError(f"'{self.name}' timed out after {self.timeout:g}s") from None
+                raise TimeoutError(f"'{self.name}' timed out after {self.timeout:g}s{self._stdin_hint()}") from None
 
             if output_file and os.path.isfile(output_file):
                 with open(output_file, "rb") as handle:
@@ -396,7 +405,8 @@ class OneShotAgent(BaseAgent):
                 # Masked before it's cut, so a key's start isn't cut off and the rest left showing
                 detail = mask_secrets(said or result)[-500:]
                 failed = UsageLimit if out_of_usage(_own_error(said, message, stdin_data)) else RuntimeError
-                raise failed(f"'{self.name}' exited with code {proc.returncode}: {detail or 'no output'}")
+                raise failed(f"'{self.name}' exited with code {proc.returncode}{self._stdin_hint()}: "
+                             f"{detail or 'no output'}")
 
             return result
         finally:

@@ -11,6 +11,7 @@ class CommandDef:
     usage: str
     aliases: tuple[str, ...] = ()
     group: str = ''  # the heading /help lists it under
+    exact: bool = False  # runs only when typed in full (it deletes something), never from a prefix
 
 
 ASK, LOOK_BACK, SESSION = 'Ask the panel', 'Look back', 'This session'
@@ -40,6 +41,8 @@ COMMANDS = [
     CommandDef('update', 'Get the latest Ixel (`--check` only says whether one is out)', 'cli', 'ixel update [--check]',
                aliases=('upgrade',)),
     CommandDef('docs', "Open Ixel's docs in your browser (ixelai.com/docs)", 'cli', 'ixel docs [--no-browser]'),
+    CommandDef('forget', "Delete the saved review conversation, the Machines log and the app window's storage",
+               'cli', 'ixel forget', exact=True),
     CommandDef('version', 'Show version', 'cli', 'ixel version', aliases=('v',)),
     CommandDef('help', 'Show this help', 'cli', 'ixel help', aliases=('h',)),
     CommandDef('full', 'Every agent answers, side by side (no review)', 'mat', '/compare <prompt>',
@@ -94,7 +97,7 @@ def resolve_command_name(name: str, mode: str):
         names = (cmd.name, *cmd.aliases)
         if raw in names:
             exact.append(cmd.name)
-        if any(n.startswith(raw) for n in names if n):
+        if not cmd.exact and any(n.startswith(raw) for n in names if n):
             candidates.append(cmd.name)
 
     if exact:

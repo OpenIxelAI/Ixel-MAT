@@ -144,8 +144,10 @@ preset = "opencode"
 #                             # running, for chat-style programs)
 # command = "mycli"           # looked up on PATH only
 # args = ["--quiet"]
-# prompt_via = "stdin"        # stdin | arg (after --) | auto (arg, or stdin when
-#                             # too long) | flag (-q PROMPT, the default)
+# prompt_via = "stdin"        # stdin (the default: other programs on this
+#                             # computer can read a command line, but not
+#                             # this) | arg (after --) | auto (arg, or stdin
+#                             # when too long) | flag (-q PROMPT)
 # stdout_format = "text"      # or "claude-stream-json"
 # output_flag = "-o"          # if it writes its answer to a file you name
 # workdir = "temp"            # a fresh empty folder (the default) | "inherit" |
