@@ -34,6 +34,8 @@ from ixel_mat.runtime import PLAIN_CHOICES as PLAIN
 
 TRIAGE_PROVIDERS = ("typesafe", "model")
 KEY_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+# Any name a key can be saved under by hand in .env (what's listed to remove)
+SAVED_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 KEY_ENDINGS = ("_KEY", "_TOKEN")
 MAX_KEY_CHARS = 400
 MIN_TIMEOUT, MAX_TIMEOUT = 10, 3600
@@ -67,10 +69,12 @@ def _kind(cfg) -> str:
 
 def known_keys(settings) -> list[dict]:
     """The keys the page may set: the providers `ixel setup` knows, the picture and sound services, Triage's,
-    and the ones your agents name (only names that look like a key or token). And any other saved in Ixel,
-    one added to .env by hand say, so it can be removed here: it's kept encrypted with the rest now."""
+    and the ones your agents name (only names that look like a key or token). And any other saved in Ixel
+    that nothing in Ixel uses, one added to .env by hand say, so it can be removed here (remove_only). Not a
+    git host's token the Board saved: that's the Board's to change."""
     from ixel_mat import images
     from ixel_mat.config.setup import PROVIDERS
+    from ixel_mat.connections import TOKEN_PREFIX
     found: dict[str, dict] = {}
 
     def add(name: str, label: str, user: str = "") -> None:
@@ -97,8 +101,12 @@ def known_keys(settings) -> list[dict]:
             if name in found and use not in found[name]["used_by"]:
                 found[name]["used_by"].append(use)
     saved = secrets.saved_names()
-    for name in sorted(saved - found.keys()):
-        if KEY_NAME.match(name):
+    used = {settings.triage.token_env}
+    for raw in _raw_agents(settings).values():  # an agent's key, named as token_env or token = "${NAME}"
+        token = raw.get("token")
+        used |= {raw.get("token_env"), token[2:-1] if isinstance(token, str) and token[:2] == "${" else None}
+    for name in sorted(saved - found.keys() - used):
+        if SAVED_NAME.match(name) and not name.startswith(TOKEN_PREFIX):
             found[name] = {"name": name, "label": name, "used_by": [], "remove_only": True}
     return [{**entry, "state": secrets.key_state(entry["name"]), "saved": entry["name"] in saved}
             for entry in found.values()]
@@ -106,7 +114,7 @@ def known_keys(settings) -> list[dict]:
 
 def key_store() -> dict:
     """Where saved keys are kept, in words, and what's wrong when they can't be used ("" when nothing is)."""
-    store = secrets.where_keys_are()
+    store = secrets.where_keys_are(wait=False)
     return {"kind": store.kind, "where": store.summary, "problem": store.problem}
 
 

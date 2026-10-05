@@ -1204,8 +1204,11 @@ def cmd_app(argv: list[str]) -> int:
             console.print(f"\n  [{C['dim']}]{safe_markup(app.name)} didn't open, so Ixel opens in a browser window "
                           f"instead.[/]")
         if sys.platform.startswith("linux") and (command := linux_window_command()) is not None:
+            from ixel_mat.config.secrets import child_env
             try:
-                return subprocess.call(command)
+                # Without the keys Ixel saved: its `ixel app --host` loads them itself, and a link the window
+                # opens starts your browser with this environment
+                return subprocess.call(command, env=child_env(nested=False))
             except KeyboardInterrupt:
                 return 0
 

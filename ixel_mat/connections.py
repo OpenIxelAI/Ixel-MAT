@@ -162,6 +162,10 @@ class Host:
         return KINDS[self.kind]
 
 
+# The start of every name a host's token is saved under (token_env)
+TOKEN_PREFIX = "IXEL_CONN_"
+
+
 def token_env(web: str) -> str:
     """Where a host's token is kept: named for its host and port, so it's never sent anywhere else. The
     readable part can be the same for two hosts (git.example.com, git-example.com); the hash of the exact
@@ -171,7 +175,7 @@ def token_env(web: str) -> str:
     host = ascii_host(parsed.hostname or "") or ""
     readable = re.sub(r"[^A-Z0-9]", "_", f"{host}_{port}".upper())[:30]
     check = hashlib.sha256(f"{host}:{port}".encode("ascii")).hexdigest()[:16].upper()
-    return f"IXEL_CONN_{readable}_{check}_TOKEN"
+    return f"{TOKEN_PREFIX}{readable}_{check}_TOKEN"
 
 
 def check_web(url: str) -> str:

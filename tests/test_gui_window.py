@@ -576,14 +576,18 @@ def test_chrome_windows_on_linux_carry_ixels_window_class():
 
 def test_ixel_app_opens_the_native_window_unless_told_not_to(monkeypatch, tmp_path):
     from ixel_mat import cli
-    calls = []
-    monkeypatch.setattr("subprocess.call", lambda cmd: calls.append(cmd) or 0)
+    from ixel_mat.config import secrets
+    calls, envs = [], []
+    monkeypatch.setattr("subprocess.call", lambda cmd, env=None: calls.append(cmd) or envs.append(env) or 0)
     monkeypatch.setattr(window, "mac_app", lambda: tmp_path / "Ixel.app")
     monkeypatch.setattr(window, "linux_window_command", lambda: ["/usr/bin/python3", "linux_window.py", "py"])
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     assert cli.cmd_app([]) == 0 and calls == [["/usr/bin/open", str(tmp_path / "Ixel.app")]]
     monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setenv("XAI_API_KEY", "xai-saved-in-ixel")
+    monkeypatch.setattr(secrets, "_INJECTED", {"XAI_API_KEY"})  # loaded from what's saved
     assert cli.cmd_app([]) == 0 and calls[-1] == ["/usr/bin/python3", "linux_window.py", "py"]
+    assert "XAI_API_KEY" not in envs[-1] and envs[-1]["PATH"] == os.environ["PATH"]  # the browser a link starts
 
     async def no_window(open_window, announce, port):
         calls.append("browser window")

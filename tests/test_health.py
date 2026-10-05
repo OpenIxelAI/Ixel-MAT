@@ -237,7 +237,7 @@ def test_saved_keys_that_cant_be_used_say_what_to_do(keychain):
 def test_saved_keys_that_cant_be_read_are_one_failed_check(monkeypatch):
     from ixel_mat.config import secrets
 
-    def unreadable():
+    def unreadable(wait=True):
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(secrets, "where_keys_are", unreadable)

@@ -99,7 +99,7 @@ async def off_the_loop(fn, *args):
 
 # ── Ixel MAT itself ───────────────────────────────────────────────────────────
 
-def ixel_checks(settings, which: Callable[[str], str | None] | None = None) -> list[Check]:
+def ixel_checks(settings, which: Callable[[str], str | None] | None = None, keychain_wait: bool = True) -> list[Check]:
     from ixel_mat.config.loader import find_config, validate_config
     which = which or find_on_path
 
@@ -125,7 +125,7 @@ def ixel_checks(settings, which: Callable[[str], str | None] | None = None) -> l
                             "; ".join(dict.fromkeys(problems)) if problems else f"Read from {path}",
                             "ixel config" if problems else ""))
 
-    checks.append(keys_check())
+    checks.append(keys_check(keychain_wait))
 
     git = which("git")
     if git:
@@ -137,18 +137,18 @@ def ixel_checks(settings, which: Callable[[str], str | None] | None = None) -> l
     return checks
 
 
-def keys_check() -> Check:
+def keys_check(wait: bool = True) -> Check:
     """Where the keys saved in Ixel are: encrypted with a key in the system's keychain, or in a plain-text
     file where there's none (or it refused to keep that key), and what to do when they can't be opened."""
     try:
-        return _keys_check()
+        return _keys_check(wait)
     except OSError as exc:  # a file Ixel can't read is one failed check, not a report that won't load
         return Check("keys-file", "Saved keys", "fail", f"Ixel can't read the keys saved in it: {exc}")
 
 
-def _keys_check() -> Check:
+def _keys_check(wait: bool = True) -> Check:
     from ixel_mat.config import secrets
-    store = secrets.where_keys_are()
+    store = secrets.where_keys_are(wait)
     plain = secrets.get_env_file_path()
     if plain.exists() and os.name == "posix":  # a .env left with keys, or the only place there is
         mode = stat.S_IMODE(plain.stat().st_mode)
@@ -401,8 +401,10 @@ def _machine_checks(probe: bool, which=None, system: str | None = None) -> list[
 # ── All of it ─────────────────────────────────────────────────────────────────
 
 async def report(probe: bool = False, settings_loader: Callable | None = None, which=None, run=None,
-                 probe_agent: ProbeAgent | None = None, system: str | None = None) -> dict:
-    """The Health page's JSON: {schema, checked_at, probed, groups: [{id, title, checks: [...]}]}."""
+                 probe_agent: ProbeAgent | None = None, system: str | None = None,
+                 keychain_wait: bool = True) -> dict:
+    """The Health page's JSON: {schema, checked_at, probed, groups: [{id, title, checks: [...]}]}.
+    keychain_wait=False: the app's page, which doesn't wait for the keychain (secrets.where_keys_are)."""
     if settings_loader is None:
         from ixel_mat.runtime import load_settings as settings_loader
     settings = settings_loader()
@@ -426,7 +428,7 @@ async def report(probe: bool = False, settings_loader: Callable | None = None, w
 
     groups = await asyncio.gather(
         # Off the loop: where the saved keys are may mean asking the keychain, which can wait for a password
-        bounded(off_the_loop(ixel_checks, settings, which), "ixel", "Ixel"),
+        bounded(off_the_loop(ixel_checks, settings, which, keychain_wait), "ixel", "Ixel"),
         bounded(models(), "models", "Models"),
         bounded(handoff_checks(probe, which, run, system), "handoff", "Handoff"),
         bounded(off_the_loop(window_checks, probe, system), "window", "Window"),

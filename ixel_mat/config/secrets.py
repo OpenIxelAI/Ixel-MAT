@@ -231,7 +231,8 @@ def _is_locked(error: BaseException) -> bool:
         from keyring.errors import KeyringLocked
     except ImportError:
         return False
-    cause = getattr(error.__cause__, "args", ())
+    # keyring 25 raises "from" the Security framework's error; 24 raises in its except block, so it's the context
+    cause = getattr(error.__cause__ or error.__context__, "args", ())
     return isinstance(error, KeyringLocked) or bool(cause) and cause[0] == _MAC_CANT_ASK
 
 
@@ -382,13 +383,18 @@ class KeyStore:
         return f"Keys saved in Ixel are encrypted, and the key that opens them is kept in {self.keychain}."
 
 
-def where_keys_are() -> KeyStore:
+def where_keys_are(wait: bool = True) -> KeyStore:
     """Where saved keys are kept, and what's wrong if they can't be used. Asks the keychain only what
     this run hasn't asked yet, and not again once it failed. When this run knows already, it answers
-    at once, even while a key is being saved (a page asks then)."""
+    at once, even while a key is being saved (a page asks then). wait=False is for the app's pages: when
+    keys.enc is there but this run hasn't opened it yet (another Ixel made it since this one started), it's
+    opened on a thread of its own, and meanwhile the answer is that it's kept with this run's keychain."""
     try:
         return _where(ask=False)
     except _NotNow:
+        if not wait and _keychain._found is not None and _KEYS_FILE.exists():
+            _load_later()
+            return KeyStore("keychain", _keychain.label, _KEYS_FILE)
         with _STORE_LOCK:
             return _where()
 

@@ -52,6 +52,7 @@ anyway: from your keychain, which gives them to programs you run (below), or fro
   it stops asking, protects nothing.
 - **Moved out of `.env`.** Keys an earlier Ixel kept in `~/.config/ixel-mat/.env` move into `keys.enc` the
   first time Ixel runs with a keychain it can use, and so does a line you add to `.env` by hand later.
+  Settings lists a key saved that way that Ixel doesn't use itself, so you can remove it there.
   `.env` is deleted once nothing but comments is left in it.
 - **A keychain that doesn't answer.** Ixel gives the keychain 30 seconds (time to type your password when a
   Mac asks, or to unlock a Linux keyring). If it doesn't answer in time, or fails, the keys in `keys.enc`
@@ -93,7 +94,9 @@ anyway: from your keychain, which gives them to programs you run (below), or fro
 - **What the keychain doesn't stop.** A program running as you can usually ask the keychain too: Windows
   gives it to any program you run, an unlocked Linux keyring to any program in your session, and a Mac
   asks first, except for the Python that saved it (a script run with that same Python counts as it). While
-  Ixel runs, your keys are in its memory and environment, as before.
+  Ixel runs, your keys are in its memory and environment, as before. The other programs Ixel starts don't
+  get them: your browser (from the app, `ixel gui` and `ixel docs`), the app's window, and Handoff from the
+  Board start without the keys saved in Ixel, and CLI agents get only what they list (below).
 - Never written to `config.toml` (it holds only the *name* of the variable), the browser app, the
   plugin's output, or `ixel config` output. `ixel_panel` reports "missing API key", never a key.
 - Sent only over HTTPS/WSS, or over plain `http://` and `ws://` to this machine, and refused for any

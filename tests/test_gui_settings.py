@@ -322,13 +322,32 @@ def test_a_key_saved_by_hand_can_be_removed_but_not_set_here(config, monkeypatch
     assert {"MY_SERVICE_SECRET", "lower_case"} <= secrets.saved_names()
     keys = {k["name"]: k for k in snapshot()["keys"]}
     assert keys["MY_SERVICE_SECRET"]["remove_only"] and keys["MY_SERVICE_SECRET"]["saved"]
-    assert "lower_case" not in keys and SECRET not in json.dumps(keys)
+    assert keys["lower_case"]["remove_only"] and SECRET not in json.dumps(keys)
     status, data = key({"name": "MY_SERVICE_SECRET", "value": "sk-other-0123456789"})
     assert status == 400 and os.environ["MY_SERVICE_SECRET"] == SECRET
     status, data = key({"name": "MY_SERVICE_SECRET", "remove": True})
     assert status == 200 and "MY_SERVICE_SECRET" not in secrets.saved_names()
     assert "MY_SERVICE_SECRET" not in os.environ
     assert "MY_SERVICE_SECRET" not in {k["name"] for k in data["settings"]["keys"]}
+
+
+def test_keys_ixel_uses_itself_arent_offered_to_remove(config, monkeypatch):
+    from ixel_mat import connections
+    board = connections.token_env("https://github.com")
+    for name in (board, "MY_GATEWAY_PASS", "HOME_LLM_PASS"):  # gone again after the test, whatever it sets
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    config.write_text(config.read_text(encoding="utf-8") + '\n[agents.gateway]\ntype = "websocket"\n'
+                      'url = "ws://127.0.0.1:18789"\ntoken_env = "MY_GATEWAY_PASS"\n'
+                      '\n[agents.home]\ntype = "http"\nurl = "http://127.0.0.1:1234/v1"\n'
+                      'token = "${HOME_LLM_PASS}"\n', encoding="utf-8")
+    for name in (board, "MY_GATEWAY_PASS", "HOME_LLM_PASS"):
+        secrets.set_live(name, "sk-test-0123456789")
+    keys = {k["name"]: k for k in snapshot()["keys"]}
+    assert board not in keys  # the Board's to change: removing it here would break its pull request list
+    assert not any(keys.get(name, {}).get("remove_only") for name in ("MY_GATEWAY_PASS", "HOME_LLM_PASS"))
+    status, _ = key({"name": board, "remove": True})
+    assert status == 400 and board in secrets.saved_names()
 
 
 @pytest.mark.parametrize("body", [

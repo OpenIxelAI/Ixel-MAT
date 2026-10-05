@@ -871,7 +871,7 @@ function keyRow(k) {
     k.state === "system" && k.saved
       ? el("small", { class: "set-sub" }, "A copy saved in Ixel isn't used while that one is set.") : null,
     k.remove_only
-      ? el("small", { class: "set-sub" }, "Saved in Ixel by hand, and kept encrypted with your other keys. Ixel doesn't use it itself.")
+      ? el("small", { class: "set-sub" }, "Saved in Ixel by hand, and kept with your other keys. Ixel doesn't use it itself.")
       : null,
     removing
       ? el("div", { class: "set-key-row" },

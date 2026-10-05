@@ -326,20 +326,24 @@ def test_a_mac_keychain_that_cant_show_its_prompt_is_locked_not_a_refusal(keycha
     Security framework's errSecInteractionNotAllowed behind it."""
     from keyring.errors import PasswordSetError
 
-    def refused(status):
+    def refused(status, chained=True):
         try:
             raise Exception(status, "User interaction is not allowed.")  # keyring's macOS api.Error
         except Exception as cause:
             try:
-                raise PasswordSetError("Can't store password on keychain") from cause
+                if chained:  # keyring 25: raise ... from e
+                    raise PasswordSetError("Can't store password on keychain") from cause
+                raise PasswordSetError("Can't store password on keychain")  # keyring 24: only the context
             except PasswordSetError as error:
                 return error
 
-    keychain.refuse = refused(-25308)
-    with pytest.raises(secrets.KeyStoreError) as failed:
-        secrets.save_secret("OPENAI_API_KEY", "sk-one")
-    assert "Unlock it and try again" in str(failed.value)
-    assert not env_file().exists() and not keys_file().exists()
+    for chained in (True, False):
+        keychain.refuse = refused(-25308, chained)
+        with pytest.raises(secrets.KeyStoreError) as failed:
+            secrets.save_secret("OPENAI_API_KEY", "sk-one")
+        assert "Unlock it and try again" in str(failed.value)
+        assert not env_file().exists() and not keys_file().exists()
+        keychain.restart()
     keychain.refuse = refused(-61)  # any other failure to save is a refusal: plain text, as before
     keychain.restart()
     secrets.save_secret("OPENAI_API_KEY", "sk-one")
@@ -715,6 +719,21 @@ def test_keys_saved_elsewhere_meanwhile_are_read_on_a_thread_of_their_own(keycha
     wait_for(lambda: os.environ.get("OPENAI_API_KEY") == "sk-one")
     assert secrets.load_env(wait=False) == {"OPENAI_API_KEY": "sk-one"}
     assert quickly(secrets.saved_names) == {"OPENAI_API_KEY"}
+
+
+def test_the_apps_pages_dont_wait_to_open_keys_another_ixel_saved(keychain):
+    """The app asked the keychain as it started, when there was no keys.enc; ixel setup in a terminal made one
+    since. Settings and Health say where keys are at once, and keys.enc is opened on a thread of its own."""
+    assert secrets.where_keys_are().kind == "keychain"  # as the app does when it starts
+    secrets.save_secret("OPENAI_API_KEY", "sk-one")
+    secrets._keychain.key = None  # (this run never opened keys.enc: the other Ixel did)
+    keychain.hold = threading.Event()  # and the keychain waits for a password
+    store = quickly(lambda: secrets.where_keys_are(wait=False))
+    assert store.kind == "keychain" and store.path == keys_file()
+    from ixel_mat import health
+    assert quickly(lambda: health.keys_check(wait=False)).state == "ok"
+    keychain.hold.set()
+    wait_for(lambda: os.environ.get("OPENAI_API_KEY") == "sk-one")
 
 
 def test_keys_added_to_env_by_hand_are_used_at_once_and_moved_on_a_thread(keychain, monkeypatch):

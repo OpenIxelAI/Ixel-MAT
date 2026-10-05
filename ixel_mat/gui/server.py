@@ -464,7 +464,7 @@ class GuiServer:
 
     async def _default_health(self, probe: bool) -> dict:
         from ixel_mat import health
-        return await health.report(probe, settings_loader=self._load_settings)
+        return await health.report(probe, settings_loader=self._load_settings, keychain_wait=False)
 
     async def _health(self, request: web.Request) -> web.Response:
         """The Health page: probe=1 also asks each model and program whether it answers."""
