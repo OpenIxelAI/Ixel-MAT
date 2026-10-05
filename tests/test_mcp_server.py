@@ -360,10 +360,12 @@ def test_other_systems_set_up_the_ixel_command(tmp_path, monkeypatch):
     shell = lambda path: f'"{path}"' if " " in str(path) else str(path)  # noqa: E731
     assert f'claude mcp add --scope user ixel -- {shell(folder / "ixel")} mcp' in host_snippets()
     (folder / "ixel").unlink()
-    # No ixel script beside Python (pip install --user): python, kept from importing the current folder,
-    # except on 3.10 outside a virtualenv, which has no flag for that alone (see _safe_path_flags)
+    # No ixel script beside Python (pip install --user): python, kept from importing the current folder
     flags = mcp_server._safe_path_flags()
-    assert flags in (["-I"], ["-P"]) or (sys.version_info < (3, 11) and flags == [])
+    if sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE:  # a virtualenv that leaves user site out
+        assert flags == ["-I"]
+    else:  # -P does just the folder part, from 3.11; 3.10 has no flag for it
+        assert flags == (["-P"] if sys.version_info >= (3, 11) else [])
     command = " ".join([shell(folder / "python"), *flags, "-m", "ixel_mat", "mcp"])
     assert f"claude mcp add --scope user ixel -- {command}" in host_snippets()
 

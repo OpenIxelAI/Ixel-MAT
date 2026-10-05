@@ -246,8 +246,9 @@ cleanly and matching the CLI presets.
   `test_machines_ssh.py` and `test_gui_machines_browser.py` (skipped where there's no `sshd`).
 - `test_mcp_server.py`: the plugin over real stdio, as a host app runs it.
 
-CI (`.github/workflows/tests.yml`) runs only when started by hand (`workflow_dispatch`), not on pushes or
-pull requests. It is Windows-first: a run covers pytest on Windows, `install.ps1` in Windows PowerShell 5.1
+CI has two workflows. `checks.yml` runs the fast suite on every pull request and push to main: pytest on
+Linux (Python 3.10) and Windows. The full run, `tests.yml`, starts only by hand (`workflow_dispatch`).
+It is Windows-first: a run covers pytest on Windows, `install.ps1` in Windows PowerShell 5.1
 and PowerShell 7, the browser tests on Windows, and the live CLI preset job against the latest CLI
 releases. It also runs pytest on Linux (Python 3.10, 3.13, 3.14), a macOS job with the installer, and `install.sh` in Debian, Fedora (plus
 the suite on Fedora's Python) and Arch containers.
