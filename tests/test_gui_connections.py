@@ -186,6 +186,24 @@ def test_no_token_is_saved_for_a_plain_http_server_on_your_network(hosted, monke
     assert status == 409 and "won't send one" in refused["error"] and env not in secrets._saved()
 
 
+def test_a_token_isnt_saved_while_the_keychain_cant_be_opened(hosted, monkeypatch, keychain):
+    host, mine, _ = hosted
+    loader._GLOBAL_CONFIG.write_text(loader._GLOBAL_CONFIG.read_text(encoding="utf-8") +
+                                     f'\n[connections."127.0.0.1:{host.server.server_port}"]\nkind = "gitea"\n',
+                                     encoding="utf-8")
+    env = connections.token_env(host.web)
+    monkeypatch.delenv(env, raising=False)
+    keychain.error = RuntimeError("locked")
+
+    async def scenario(client):
+        return await post(client, "/api/connections/token", project=str(mine), value="gitea-secret-123")
+
+    status, refused = run_with_client(gui(), scenario)
+    assert status == 503 and refused["error"] == ("Ixel couldn't open your Mac's Keychain, so nothing was saved. "
+                                                  "Unlock it and try again.")
+    assert env not in os.environ and not secrets.get_env_file_path().exists()
+
+
 def test_review_fetches_it_and_approves_a_review_of_exactly_its_commits(hosted, fake):  # noqa: F811
     host, mine, bare = hosted
     loader._GLOBAL_CONFIG.write_text(loader._GLOBAL_CONFIG.read_text(encoding="utf-8") +

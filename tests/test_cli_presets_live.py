@@ -11,6 +11,8 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -278,3 +280,75 @@ def test_opencode_never_asks_for_its_model_catalog(tmp_path, monkeypatch):
     assert asked == [], f"OpenCode asked for its catalog: {asked}"
     assert detector, "OpenCode didn't ask the stand-in catalog even without Ixel's setting: this test can't see it"
     assert not list(home.rglob("service.json")), "OpenCode 2's background service was started"
+
+
+# A word of the question to look for afterwards (OpenCode 2's own queue rows can keep it in free space, below)
+MARK = "Quetzalmarker"
+# Where a CLI's own deletes leave the question's text: in the free space of OpenCode 2's database, in rows it took
+# out itself without overwriting them (its queue of incoming messages), until later use overwrites them
+FREE_SPACE = {"opencode": "opencode*.db"}
+
+
+def _rows_with(path, text: str) -> list[str]:
+    """The tables of the SQLite database at path that have text in a row."""
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        found = []
+        for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+            try:
+                columns = [row[1] for row in db.execute(f'PRAGMA table_info("{table}")')]
+                if any(db.execute(f'SELECT 1 FROM "{table}" WHERE instr(CAST("{c}" AS TEXT), ?) > 0 LIMIT 1',
+                                  (text,)).fetchone() for c in columns):
+                    found.append(table)
+            except sqlite3.DatabaseError:
+                continue
+        return found
+    finally:
+        db.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="like the others here")
+@pytest.mark.parametrize("preset_id", ["copilot", "gemini_cli", "opencode"])
+def test_nothing_of_the_question_is_left_behind(preset_id, tmp_path, monkeypatch):
+    # Gemini CLI, Copilot and OpenCode save each question and answer under your home folder, and Ixel takes away
+    # what a run in its temp folder left (agents/leftovers.py). Afterwards the question's text must be in no file
+    # under the CLI's home or the temp folder, and Ixel's own folders for the run must be gone.
+    preset = PRESETS[preset_id]
+    if not shutil.which(preset["command"]):
+        if os.environ.get("IXEL_REQUIRE_CLIS") == "1":
+            pytest.fail(f"{preset['command']} is not installed")
+        pytest.skip(f"{preset['command']} is not installed")
+    home, temp = tmp_path / "home", tmp_path / "temp"
+    temp.mkdir()
+    for name in list(os.environ):
+        if name not in KEEP_ENV:
+            monkeypatch.delenv(name)
+    for name, value in {"HOME": str(home), "USERPROFILE": str(home), "NO_PROXY": "127.0.0.1,localhost",
+                        "no_proxy": "127.0.0.1,localhost", "TMPDIR": str(temp)}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))  # Ixel's own temp folders too
+    with CaptureServer() as fake:
+        _, extra_args, _ = SETUPS[preset_id](home, tmp_path, fake.url, monkeypatch)
+        fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
+        fields["args"] = list(preset["args"]) + extra_args
+        agent = OneShotAgent(AgentConfig(name=preset_id, type="oneshot", workdir="temp", **fields))
+
+        async def ask():
+            await agent.connect()
+            try:
+                return await agent.send_and_receive(f"What is 17 x 23? Answer for {MARK}.")
+            finally:
+                await agent.disconnect()
+
+        answer = asyncio.run(ask())
+    assert ANSWER in answer
+    assert any(MARK in r["raw"] for r in fake.requests), "the question never reached the model"
+    assert not list(temp.glob("ixel-*")), "Ixel's folders for the run are left"
+    left = []
+    for path in sorted(p for root in (home, temp) for p in root.rglob("*") if p.is_file() and not p.is_symlink()):
+        if MARK.encode() not in path.read_bytes():
+            continue
+        if path.match(FREE_SPACE.get(preset_id, "-")) and not _rows_with(path, MARK):
+            continue  # only in free space (see FREE_SPACE)
+        left.append(str(path.relative_to(tmp_path)))
+    assert not left, f"the question is still in {left}"

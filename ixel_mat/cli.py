@@ -408,7 +408,7 @@ def cmd_status():
     """Single-screen status dashboard for providers, agents, secrets, and config."""
     from rich.table import Table
     from rich import box as rbox
-    from ixel_mat.config.secrets import load_env, get_env_file_path
+    from ixel_mat.config.secrets import get_env_file_path, load_env, where_keys_are
     from ixel_mat.config.loader import load_config, build_agent_configs, validate_config, find_config
     from ixel_mat.config.setup import PROVIDERS, _mask_key
 
@@ -417,8 +417,10 @@ def cmd_status():
     configs, warnings = build_agent_configs(config)
     issues = validate_config(config)
     config_path = find_config() or config.get("_source", "defaults")
-    secret_path = get_env_file_path()
-    secret_status = get_secret_file_status(secret_path)
+    store = where_keys_are()
+    secret_paths = [store.path]
+    if get_env_file_path() != store.path and get_env_file_path().exists():
+        secret_paths.append(get_env_file_path())  # still holding keys in plain text, beside keys.enc
 
     print_banner()
     console.print(f"  [{C['gold']}]Status Dashboard[/]\n")
@@ -491,7 +493,7 @@ def cmd_status():
     console.print()
 
     stable = Table(
-        title=f"[{C['gold']}]Secrets[/]",
+        title=f"[{C['gold']}]Saved keys[/]",
         box=rbox.SIMPLE,
         show_header=True,
         header_style=f"bold {C['moon']}",
@@ -502,13 +504,19 @@ def cmd_status():
     stable.add_column("Exists", min_width=10)
     stable.add_column("Perms", style=C["dim"], min_width=8)
     stable.add_column("Last Modified", style=C["dim"], min_width=20)
-    stable.add_row(
-        hyperlink_text(str(secret_path)),
-        f"[{C['green']}]✓[/]" if secret_status["exists"] else f"[{C['red']}]✗[/]",
-        str(secret_status["permissions_octal"]),
-        str(secret_status["last_modified"]),
-    )
+    for secret_path in secret_paths:
+        secret_status = get_secret_file_status(secret_path)
+        stable.add_row(
+            hyperlink_text(str(secret_path)),
+            f"[{C['green']}]✓[/]" if secret_status["exists"] else f"[{C['red']}]✗[/]",
+            str(secret_status["permissions_octal"]),
+            str(secret_status["last_modified"]),
+        )
     console.print(stable)
+    mark = f"[{C['green']}]✓[/]" if store.kind == "keychain" else f"[{C['gold']}]⚠[/]"
+    console.print(f"  {mark} [{C['dim']}]{safe_markup(store.summary)}[/]")
+    if store.problem:
+        console.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{safe_markup(store.problem)}[/]")
     console.print()
 
     console.print(f"  [{C['gold']}]Warnings[/]")
@@ -640,7 +648,8 @@ def cmd_review(argv: list[str]) -> int:
                         help="seconds per model call, for models with no timeout of their own "
                              "(default: [review] timeout, else 180)")
     parser.add_argument("-c", "--continue", dest="follow_up", action="store_true",
-                        help="a follow-up: the panel also sees your last few questions and its answers to them")
+                        help="a follow-up: the panel also sees your last few questions and its answers to them "
+                             "(each kept for a day)")
     code = parser.add_argument_group("code to review (read-only: nothing runs, nothing changes)")
     diff = code.add_mutually_exclusive_group()
     diff.add_argument("--diff", action="store_true", help="your changes since the last commit (git diff HEAD)")
@@ -699,7 +708,8 @@ def cmd_review(argv: list[str]) -> int:
         out.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]The last conversation was asked with Private on, so it stays "
                   "with your own models. This is a new question.[/]")
     elif args.follow_up and not earlier:
-        out.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]Nothing to continue yet, so this is a new question.[/]")
+        out.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]Nothing to continue (Ixel keeps each question for a day), "
+                  "so this is a new question.[/]")
     # Auto mode asks Triage first (well under a second); the decision is reported with the run
     mode, decision = asyncio.run(choose_mode(settings, args.mode, question, earlier))
     problem = settings.private_problem(mode)
@@ -1194,8 +1204,11 @@ def cmd_app(argv: list[str]) -> int:
             console.print(f"\n  [{C['dim']}]{safe_markup(app.name)} didn't open, so Ixel opens in a browser window "
                           f"instead.[/]")
         if sys.platform.startswith("linux") and (command := linux_window_command()) is not None:
+            from ixel_mat.config.secrets import child_env
             try:
-                return subprocess.call(command)
+                # Without the keys Ixel saved: its `ixel app --host` loads them itself, and a link the window
+                # opens starts your browser with this environment
+                return subprocess.call(command, env=child_env(nested=False))
             except KeyboardInterrupt:
                 return 0
 
@@ -1233,6 +1246,47 @@ def cmd_docs(argv: list[str]) -> int:
         console.print(f"  [{C['dim']}]Opened in your browser.[/]")
     console.print()
     return 0
+
+
+def cmd_forget(argv: list[str]) -> int:
+    """`ixel forget`: deletes what Ixel keeps of what you asked and ran."""
+    import argparse
+
+    from ixel_mat.forget import WINDOW, forget
+
+    parser = argparse.ArgumentParser(
+        prog="ixel forget",
+        description="Delete what Ixel keeps of what you asked and ran: your last ixel review conversation, "
+                    "the Machines log, and the app window's storage. Your keys, settings, machines and "
+                    "usage stats stay. On Linux, Ixel's own GTK window keeps its storage where WebKitGTK "
+                    "puts it, which this leaves alone.")
+    parser.parse_args(argv)
+    found = forget()
+    console.print()
+    for item in found:
+        where = safe_markup(str(item.path))
+        if not item.error:
+            console.print(f"  [{C['green']}]✓[/] Deleted {safe_markup(item.what)} [{C['dim']}]({where})[/]")
+            continue
+        console.print(f"  [{C['red']}]✗[/] Couldn't delete {safe_markup(item.what)} [{C['dim']}]({where}): "
+                      f"{safe_markup(item.error)}[/]")
+        if item.what == WINDOW and os.path.lexists(item.path):  # on Windows, an open window holds it
+            console.print(f"    [{C['dim']}]If an Ixel window is open, close it, then run[/] "
+                          f"[{C['blue']}]ixel forget[/] [{C['dim']}]again.[/]")
+    if not found:
+        console.print(f"  [{C['dim']}]Nothing to forget: Ixel isn't keeping any of what you asked or ran.[/]")
+    elif os.name == "posix" and any(item.what == WINDOW and not item.error for item in found):
+        # On a Mac or Linux the folder goes even while a window has it open, and that window can write
+        # what it holds back as it closes
+        console.print(f"  [{C['dim']}]If an Ixel window was open, close it and run[/] [{C['blue']}]ixel forget[/] "
+                      f"[{C['dim']}]again: a window can save what it holds as it closes.[/]")
+    from ixel_mat.forget import gtk_window_folders
+    gtk = [str(folder) for folder in gtk_window_folders() if folder.is_dir()]
+    if gtk:
+        console.print(f"  [{C['dim']}]Ixel's Linux window keeps its own storage in {safe_markup(' and '.join(gtk))}, "
+                      "which this leaves alone: delete it with Ixel closed.[/]")
+    console.print(f"  [{C['dim']}]Your keys, settings, machines and usage stats are kept.[/]\n")
+    return 1 if any(item.error for item in found) else 0
 
 
 def cmd_update(argv: list[str]) -> int:
@@ -1293,6 +1347,10 @@ STOP_LIKE_CTRL_C = ("review", "ask", "image", "mcp", "gui", "app")
 
 def main():
     _tolerate_unencodable_output()
+    # Whatever the command: each review question and answer goes once it's a day old, Machines log lines
+    # once they're 30 days old (a stat or two, and a rewrite or a delete only when something's due)
+    from ixel_mat.forget import tidy
+    tidy()
     try:
         _main()
     except KeyboardInterrupt:  # Ctrl+C, kill or a closed terminal: stopped, no traceback
@@ -1341,6 +1399,8 @@ def _main():
         sys.exit(cmd_update(args[1:]))
     if resolved == 'docs':
         sys.exit(cmd_docs(args[1:]))
+    if resolved == 'forget':
+        sys.exit(cmd_forget(args[1:]))
     if resolved == 'triage':
         sys.exit(cmd_triage(args[1:]))
     if resolved == 'machines':

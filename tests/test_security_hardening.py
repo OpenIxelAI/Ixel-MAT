@@ -198,10 +198,13 @@ def _mode(path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
-def test_save_secret_is_never_world_readable(monkeypatch, tmp_path):
+@pytest.mark.parametrize("has_keychain", [True, False])
+def test_save_secret_is_never_world_readable(monkeypatch, tmp_path, keychain, has_keychain):
     env_dir = tmp_path / "ixel-mat"
     monkeypatch.setattr(secrets, "_ENV_DIR", env_dir)
     monkeypatch.setattr(secrets, "_ENV_FILE", env_dir / ".env")
+    monkeypatch.setattr(secrets, "_KEYS_FILE", env_dir / "keys.enc")
+    keychain.restart(present=has_keychain)
     old_umask = os.umask(0o022)
 
     modes_before_rename = []
@@ -219,15 +222,21 @@ def test_save_secret_is_never_world_readable(monkeypatch, tmp_path):
         os.umask(old_umask)
 
     assert modes_before_rename == [0o600, 0o600]
-    assert _mode(env_dir / ".env") == 0o600
+    name = "keys.enc" if has_keychain else ".env"
+    assert _mode(env_dir / name) == 0o600
     assert _mode(env_dir) == 0o700
-    assert sorted(p.name for p in env_dir.iterdir()) == [".env"]  # no temp files left
-    text = (env_dir / ".env").read_text()
-    assert 'OPENAI_API_KEY="sk-one"' in text and 'XAI_API_KEY="xai-two"' in text
+    assert sorted(p.name for p in env_dir.iterdir()) == [name]  # no temp files (or lock) left
+    text = (env_dir / name).read_text(encoding="utf-8")
+    if has_keychain:  # encrypted: neither key is in the file
+        assert "sk-one" not in text and "xai-two" not in text
+        assert secrets.load_env() == {"OPENAI_API_KEY": "sk-one", "XAI_API_KEY": "xai-two"}
+    else:
+        assert 'OPENAI_API_KEY="sk-one"' in text and 'XAI_API_KEY="xai-two"' in text
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
-def test_load_env_tightens_loose_permissions(monkeypatch, tmp_path):
+def test_load_env_tightens_loose_permissions(monkeypatch, tmp_path, keychain):
+    keychain.restart(present=False)  # so the key stays in .env
     env_path = tmp_path / ".env"
     env_path.write_text("SOME_KEY=value\n")
     env_path.chmod(0o644)

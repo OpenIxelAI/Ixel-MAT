@@ -14,6 +14,9 @@ Security model
   styles, no inline code, no third-party anything. Model output is
   rendered with textContent only, never as HTML.
 - Only a fixed list of static files is served. One review at a time.
+- Ask's conversations come back after a reload from this server's memory
+  (/api/conversations), never from the browser's storage, which Edge and
+  Chrome may write into a profile folder. They're gone when Ixel stops.
 
 `ixel app` serves the same page to a window of its own (see window.py) and
 stops once no page has been open for a few seconds: each open page holds
@@ -28,12 +31,14 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import sys
 import tempfile
 import threading
 import time
 import webbrowser
+from collections import OrderedDict
 from contextlib import aclosing
 from importlib import resources
 from pathlib import Path
@@ -47,6 +52,7 @@ from ixel_mat.agents.base import needs_api_key
 from ixel_mat.modes.review import MAX_EARLIER_TURNS, MAX_PANEL, EarlierTurn, run_review
 from ixel_mat.runtime import (MODE_CHOICES, choose_mode, connect_agents, disconnect_agents, load_settings,
                               local_agent_names)
+from ixel_mat.config.secrets import keys_withheld, load_env, where_keys_are
 from ixel_mat.material import Material, MaterialError, code_for_review
 from ixel_mat.sanitize import sanitize_terminal_text
 
@@ -157,6 +163,53 @@ class Presence:
         return 0.0 if self.pages else self._clock() - self._empty_since
 
 
+# Ask's conversations, kept for a reload of the page (see Conversations)
+CONVERSATIONS_PATH = "/api/conversations"
+MAX_CONVERSATION_BYTES = 4 * 1024 * 1024  # one tab's, as JSON (ask.js drops its oldest conversations to fit)
+MAX_TABS = 16                             # ids whose conversations are kept (each page load has its own)
+TAB_ID = re.compile(r"[A-Za-z0-9_-]{16,64}")
+
+
+class Conversations:
+    """
+    Each tab's conversations in Ask, by a random id the page made up for itself, so a reload brings them back.
+    Only in this server's memory: the page used to keep them in the browser's sessionStorage, which Edge and
+    Chrome may write into a profile folder (and in `ixel gui` that's your own browser's). Gone when Ixel stops.
+
+    A page takes a new id each time it loads and moves its conversations to it (a duplicated tab has a copy of
+    its original's id). When more than max_tabs ids are kept, the ids pages moved away from go first, then the
+    one unused longest.
+    """
+
+    def __init__(self, max_tabs: int = MAX_TABS):
+        self.max_tabs = max_tabs
+        self._tabs: OrderedDict[str, bytes] = OrderedDict()  # the next to go first
+
+    def get(self, tab: str) -> bytes | None:
+        data = self._tabs.get(tab)
+        if data is not None:
+            self._tabs.move_to_end(tab)
+        return data
+
+    def put(self, tab: str, data: bytes, moved_from: str = "") -> None:
+        self._tabs[tab] = data
+        self._tabs.move_to_end(tab)
+        # Not forgotten now: a duplicated tab may still be using it, and its next save makes it the newest again
+        if moved_from != tab and moved_from in self._tabs:
+            self._tabs.move_to_end(moved_from, last=False)
+        while len(self._tabs) > self.max_tabs:
+            self._tabs.popitem(last=False)
+
+    def forget(self, tab: str) -> None:
+        self._tabs.pop(tab, None)
+
+    def clear(self) -> None:
+        self._tabs.clear()
+
+    def __len__(self) -> int:
+        return len(self._tabs)
+
+
 async def until_closed(presence: Presence, *, first_wait: float = FIRST_PAGE_WAIT, grace: float = RELOAD_GRACE,
                        on_first_page: Callable[[], None] = lambda: None, tick: float = 0.25) -> None:
     """Return once no page has been open for grace seconds (or first_wait, if none ever was)."""
@@ -192,7 +245,8 @@ class GuiServer:
         *,
         port: int = 0,
         token: str | None = None,
-        settings_loader: Callable = load_settings,
+        # Requests never wait for the keychain or another save (secrets.load_env)
+        settings_loader: Callable = lambda: load_settings(wait=False),
         connect: Callable[..., Awaitable[dict]] = connect_agents,
         disconnect: Callable[..., Awaitable[None]] = disconnect_agents,
         health_report: Callable[[bool], Awaitable[dict]] | None = None,
@@ -214,6 +268,7 @@ class GuiServer:
         from ixel_mat.gui import machines_api
         self.machines = machines_api.Machines()
         self.pictures = pictures.PictureStore()  # attached to questions: in memory only, gone when Ixel stops
+        self.conversations = Conversations()     # Ask's, for a reload: in memory only, too
         from ixel_mat.gui import handoff_api
         self._handoff_command = handoff_command or handoff_api.handoff_command
         self._board_watch = handoff_api.BoardWatch()
@@ -235,10 +290,12 @@ class GuiServer:
         app.on_shutdown.append(self._end_presence)
         app.on_shutdown.append(self._stop_runs)
         app.on_shutdown.append(self._stop_reviews)
-        app.on_cleanup.append(self._forget_pictures)
+        app.on_cleanup.append(self._forget_what_was_asked)
         for path in STATIC_FILES:
             app.router.add_get(path, self._serve_static)
         app.router.add_get("/api/panel", self._panel)
+        app.router.add_get(CONVERSATIONS_PATH, self._conversations)
+        app.router.add_put(CONVERSATIONS_PATH, self._keep_conversations)
         app.router.add_get("/api/saves", self._saves)
         app.router.add_get("/api/health", self._health)
         app.router.add_get("/api/presence", self._presence)
@@ -275,6 +332,7 @@ class GuiServer:
         app.router.add_get("/api/appearance", self._appearance)
         app.router.add_post("/api/appearance", self._appearance_change)
         app.router.add_post("/api/docs", self._docs)
+        app.router.add_post("/api/forget", self._forget)
         return app
 
     def _allowed_hosts(self) -> set[str]:
@@ -349,8 +407,10 @@ class GuiServer:
         # On Ctrl+C, open pages mustn't keep the server waiting for them
         self._stopping = True
 
-    async def _forget_pictures(self, app: web.Application) -> None:
+    async def _forget_what_was_asked(self, app: web.Application) -> None:
+        # Pictures and conversations are only ever in memory: they go with the server
         self.pictures.clear()
+        self.conversations.clear()
 
     async def _stop_runs(self, app: web.Application) -> None:
         # Commands still running on your machines stop with Ixel
@@ -404,7 +464,7 @@ class GuiServer:
 
     async def _default_health(self, probe: bool) -> dict:
         from ixel_mat import health
-        return await health.report(probe, settings_loader=self._load_settings)
+        return await health.report(probe, settings_loader=self._load_settings, keychain_wait=False)
 
     async def _health(self, request: web.Request) -> web.Response:
         """The Health page: probe=1 also asks each model and program whether it answers."""
@@ -570,6 +630,13 @@ class GuiServer:
         open the website in the window itself (the Mac app's) or in its private browser profile (Windows')."""
         from ixel_mat import docs
         return web.json_response({"opened": await asyncio.to_thread(docs.open_docs), "url": docs.DOCS_URL})
+
+    async def _forget(self, request: web.Request) -> web.Response:
+        """Settings' Forget button: deletes the review conversation and the Machines log. Not the window's
+        storage, which this window is using (`ixel forget` does that, with Ixel closed)."""
+        from ixel_mat.forget import forget
+        found = await asyncio.to_thread(forget, window=False)
+        return web.json_response(_clean({"forgotten": [item.to_dict() for item in found]}))
 
     # /handoff: one request split across agents, through Handoff (see handoff.py)
 
@@ -904,6 +971,43 @@ class GuiServer:
             return web.json_response(said, status=400)
         return web.json_response(_clean({"text": text, "service": provider.label}))
 
+    @staticmethod
+    def _tab(request: web.Request, name: str = "tab") -> str | None:
+        tab = request.query.get(name, "")
+        return tab if TAB_ID.fullmatch(tab) else None
+
+    async def _conversations(self, request: web.Request) -> web.Response:
+        """This tab's conversations, as it last sent them ([] if none): after a reload, the page shows them again."""
+        tab = self._tab(request)
+        if tab is None:
+            return _json_error(400, "tab must be the id this tab made up for itself.")
+        return web.Response(body=self.conversations.get(tab) or b"[]",
+                            headers={"Content-Type": "application/json; charset=utf-8"})
+
+    async def _keep_conversations(self, request: web.Request) -> web.Response:
+        """Keep this tab's conversations (a JSON list; an empty one forgets them), in memory only. was: the id they
+        were under before the page loaded, which goes first when too many are kept."""
+        tab = self._tab(request)
+        if tab is None:
+            return _json_error(400, "tab must be the id this tab made up for itself.")
+        was = self._tab(request, "was") if "was" in request.query else ""
+        if was is None:
+            return _json_error(400, "was must be the id this tab had before.")
+        data = await self._read_capped(request, MAX_CONVERSATION_BYTES)
+        if data is None:
+            return _json_error(413, f"Conversations over {MAX_CONVERSATION_BYTES // (1024 * 1024)} MB aren't kept.")
+        try:
+            kept = json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return _json_error(400, "Body must be JSON.")
+        if not isinstance(kept, list):
+            return _json_error(400, "Body must be a JSON list.")
+        if kept:
+            self.conversations.put(tab, data, moved_from=was)
+        else:
+            self.conversations.forget(tab)
+        return web.json_response({"kept": len(kept)})
+
     async def _add_picture(self, request: web.Request) -> web.Response:
         """One picture for a question to come: checked, its metadata taken out, kept in memory. → its id"""
         data = await self._read_capped(request, pictures.MAX_BYTES)
@@ -1079,6 +1183,10 @@ class GuiServer:
 
 
 async def _start(port: int) -> tuple[GuiServer, web.AppRunner]:
+    # The saved keys first, on a thread: the keychain may wait for a password prompt, and the event loop
+    # mustn't stop while it does. After this, what the keychain said is remembered, and requests read the
+    # keys without waiting (load_settings(wait=False)); anything more is asked on a thread of its own.
+    await asyncio.to_thread(lambda: (load_env(), where_keys_are()))
     gui = GuiServer(port=port)
     runner = web.AppRunner(gui.app(), access_log=None)
     await runner.setup()
@@ -1095,7 +1203,8 @@ async def serve(port: int = 0, open_browser: bool = True, announce: Callable[[st
     if open_browser:
         try:
             launch_page = write_launch_page(gui.url)
-            webbrowser.open(launch_page.as_uri())
+            with keys_withheld():  # the browser it starts gets none of the keys Ixel saved
+                webbrowser.open(launch_page.as_uri())
         except Exception:  # noqa: BLE001 — the printed link still works
             pass
     try:

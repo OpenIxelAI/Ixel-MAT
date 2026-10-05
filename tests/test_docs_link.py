@@ -1,5 +1,10 @@
 """`ixel docs`, /docs and Settings' Docs button: the docs on ixelai.com, opened in your own browser."""
+import json
+import os
+import shlex
 import sys
+
+import pytest
 
 from ixel_mat import cli, docs
 from ixel_mat.commands import resolve_command_name
@@ -15,6 +20,22 @@ def test_opens_the_docs_where_there_is_a_desktop(monkeypatch):
     monkeypatch.setattr(docs, "can_open_browser", lambda: True)
     assert docs.open_docs(lambda url: opened.append(url) or True) is True
     assert opened == [docs.DOCS_URL]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a BROWSER command line with a POSIX path")
+def test_the_browser_starts_without_the_keys_ixel_saved(tmp_path, monkeypatch):
+    from ixel_mat.config import secrets
+    seen, browser = tmp_path / "seen.json", tmp_path / "browser.py"
+    browser.write_text(f"import json, os, sys\nopen({str(seen)!r}, 'w').write(json.dumps("
+                       "{'url': sys.argv[1], 'env': dict(os.environ)}))\n", encoding="utf-8")
+    monkeypatch.setenv("BROWSER", f"{shlex.quote(sys.executable)} {shlex.quote(str(browser))} %s")  # webbrowser's
+    monkeypatch.setenv("XAI_API_KEY", "xai-saved-in-ixel")
+    monkeypatch.setattr(secrets, "_INJECTED", {"XAI_API_KEY"})  # loaded from what's saved
+    monkeypatch.setenv("IXEL_SHELL_SETTING", "yours")
+    assert docs.open_in_browser(docs.DOCS_URL) is True
+    got = json.loads(seen.read_text(encoding="utf-8"))
+    assert got["url"] == docs.DOCS_URL and "XAI_API_KEY" not in got["env"]
+    assert got["env"]["IXEL_SHELL_SETTING"] == "yours" and os.environ["XAI_API_KEY"] == "xai-saved-in-ixel"
 
 
 def test_over_ssh_on_linux_no_text_browser_is_started(monkeypatch):

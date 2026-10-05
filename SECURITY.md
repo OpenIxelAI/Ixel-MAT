@@ -14,11 +14,11 @@ the repository is public, so if you don't see it, email us.
 
 | Asset | Where it lives |
 |---|---|
-| Your API keys | `~/.config/ixel-mat/.env` (mode 0600), or your shell environment |
+| Your API keys | `~/.config/ixel-mat/keys.enc` (0600), encrypted with a key kept in your system's keychain (below). On a computer with no keychain Ixel can use, or one that won't keep that key, `~/.config/ixel-mat/.env` (0600), in plain text. Or your shell environment |
 | Your subscription logins | Each CLI's own storage (`~/.claude`, `~/.codex`, `~/.gemini`…). Ixel never reads these |
 | Your files | Anything your user account can read |
 | Your code | Only the diff or files you name for a review (`--diff`, `--file`…) are read, once, and sent to the models on your panel (below) |
-| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`; the terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and the browser app in that tab's `sessionStorage`, which the browser clears when you close the tab |
+| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`, each with the time it was saved. Each one is deleted once it's 24 hours old, by the next `ixel` command after that (continuing the conversation doesn't keep its earlier questions longer), and all of them at once by `ixel forget` (or Forget in the app's Settings). The terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and so does the browser app: Ixel's own server keeps each tab's conversations so a reload brings them back, never the browser's storage, and they're gone when Ixel stops. `ixel forget` also deletes the app window's browser storage (`ixel app`'s Edge or Chrome profile, and on a Mac Ixel.app's WebKit storage). Gemini CLI, Copilot and OpenCode save every question they're asked in their own folders; Ixel removes what each run saved (below) |
 | Your usage and money | Every model call is billed to you |
 
 ## Who we assume might be hostile
@@ -31,15 +31,72 @@ the repository is public, so if you don't see it, email us.
 4. **Other programs' settings** that make a CLI more permissive than Ixel expects.
 5. **Lookalike services.** Sites that resell a model's API under its name see everything sent through them.
 
-We don't try to protect against someone who already controls your user account. They can read your keys
-directly.
+We don't try to protect against someone who already controls your user account. They can get your keys
+anyway: from your keychain, which gives them to programs you run (below), or from Ixel while it runs.
 
 ## Protections
 
 ### Keys
 
-- Stored with owner-only permissions (0600) and written atomically, so a crash never leaves a
-  half-written or world-readable file.
+- **Encrypted, with the key in your keychain.** A key you save with `ixel setup` or in Settings goes in
+  `~/.config/ixel-mat/keys.enc`, encrypted (Fernet: AES-128 with an HMAC-SHA256), and the key that opens
+  that file is one item in your system's keychain, as Chrome keeps its saved passwords: the macOS Keychain,
+  Windows Credential Manager, or on Linux GNOME Keyring, KWallet or another keyring that offers the Secret
+  Service, through the `keyring` package. The item is named `Ixel`, account `keys`. On Windows it goes with
+  a profile that roams, as `keys.enc` in it does, so the keys open on each computer you sign in to. Ixel
+  reads that item once per run and keeps it in memory while it runs.
+- **A copy of your files.** A backup, a synced folder or a copy of your home folder holds no key anyone can
+  read without your keychain's password. Your keychain is kept in your home folder too (on Windows, in your
+  profile's AppData folder), so a full copy of your home folder is only as safe as that password, which on
+  a Mac and on Windows is usually the one you sign in with. A Linux keyring given a blank password, so that
+  it stops asking, protects nothing.
+- **Moved out of `.env`.** Keys an earlier Ixel kept in `~/.config/ixel-mat/.env` move into `keys.enc` the
+  first time Ixel runs with a keychain it can use, and so does a line you add to `.env` by hand later.
+  Settings lists a key saved that way that Ixel doesn't use itself, so you can remove it there.
+  `.env` is deleted once nothing but comments is left in it.
+- **A keychain that doesn't answer.** Ixel gives the keychain 30 seconds (time to type your password when a
+  Mac asks, or to unlock a Linux keyring). If it doesn't answer in time, or fails, the keys in `keys.enc`
+  aren't used in that run, Health says so, and saving a key fails with "unlock it and try again". A key is
+  never written in plain text instead, and `keys.enc` is never overwritten while it can't be opened. The
+  app's pages never wait for the keychain, except to save or remove a key: the app asks it once as it
+  starts, and after that on a thread of its own (for keys another Ixel saved meanwhile, or ones to move out
+  of `.env`).
+- **Where the keychain can't be asked.** A run that can't reach your keychain, such as `ixel` over SSH or
+  from cron, can't open `keys.enc`, so it uses none of its keys and says why (a Mac's keychain that can't show
+  its password prompt there counts as locked, never as a reason to write keys in plain text). Give such a run
+  its keys in its environment (they win over saved ones), or unlock the keychain first (on a Mac,
+  `security unlock-keychain`).
+- **A keychain that won't keep the key.** If your keychain opens but refuses to keep Ixel's item (a company
+  policy against saved passwords, say, or a Linux keyring with nowhere to keep it), and there's no
+  `keys.enc` yet, keys go in `.env` in plain text, readable only by you, as on a computer with no keychain,
+  and Health, `ixel doctor`, `ixel status`, `ixel setup` and Settings say the keychain refused. Ixel asks
+  again each time you save a key, and each time it starts with keys in `.env`; they move into `keys.enc`
+  once the keychain keeps the item. Beside a `keys.enc`, a refusal means nothing is saved. A keychain
+  that's locked, or a password prompt you turn down, isn't a refusal: saving then fails with "unlock it
+  and try again".
+- **No keychain, plain text.** Only those keychains count. On a computer with none, such as a Linux server
+  with no Secret Service, or with `keyring` turned off (`PYTHON_KEYRING_BACKEND`, or its own settings
+  file), keys stay in `.env` in plain text, readable only by you (0600), and Health, `ixel doctor`,
+  `ixel status`, `ixel setup` and Settings say so. keyring's other backends, such as the plain-text files of
+  `keyrings.alt`, are never used: they'd keep the key next to the file it opens.
+- **If the key is gone.** When `keys.enc` can't be opened with the keychain's key (the item was deleted, or
+  the file came from another computer), Ixel uses none of its keys, leaves the file as it is, and Health
+  says to add them again. Saving a key then renames it `keys.enc.unreadable` and starts a new `keys.enc`.
+  A file set aside this way is never overwritten: an older `keys.enc.unreadable` is kept as
+  `keys.enc.unreadable-2` (then `-3`…), unless it opens with the key of the new `keys.enc` (it's this
+  computer's own, from before another computer's keychain wrote `keys.enc` in a folder that's synced, or
+  from before the keychain's item came back). Then its keys go into the new file, and it's deleted.
+- Written with owner-only permissions (0600) and atomically, so a crash never leaves a half-written or
+  world-readable file. Two Ixels saving at once take turns (through `keys.enc.lock`, which is taken over
+  if an Ixel that stopped mid-save left it behind for 2 minutes). When the keychain is still asking for
+  your password as Ixel stops waiting for a new item, the lock stays until it answers (or those 2 minutes
+  pass), so no other Ixel makes a different one meanwhile.
+- **What the keychain doesn't stop.** A program running as you can usually ask the keychain too: Windows
+  gives it to any program you run, an unlocked Linux keyring to any program in your session, and a Mac
+  asks first, except for the Python that saved it (a script run with that same Python counts as it). While
+  Ixel runs, your keys are in its memory and environment, as before. The other programs Ixel starts don't
+  get them: your browser (from the app, `ixel gui` and `ixel docs`), the app's window, and Handoff from the
+  Board start without the keys saved in Ixel, and CLI agents get only what they list (below).
 - Never written to `config.toml` (it holds only the *name* of the variable), the browser app, the
   plugin's output, or `ixel config` output. `ixel_panel` reports "missing API key", never a key.
 - Sent only over HTTPS/WSS, or over plain `http://` and `ws://` to this machine, and refused for any
@@ -47,8 +104,8 @@ directly.
   in `ixel agents`, `ixel status`, `ixel doctor --check`, `ixel model` and Health's **Check now**. A model
   server on your own network that needs no key (an Ollama on another PC) may use plain `http://`, and gets
   no `Authorization` header; give it a key and Ixel refuses to send it over `http://`.
-- **Checked only with their own provider.** `ixel status` checks each provider key it finds (in Ixel's
-  `.env` or your environment) by asking that provider for its list of models, even a key no agent uses
+- **Checked only with their own provider.** `ixel status` checks each provider key it finds (saved in
+  Ixel, or in your environment) by asking that provider for its list of models, even a key no agent uses
   yet. That request carries the key and nothing else: no question, no other key.
 - **Redirects are never followed** when a key is involved (API calls, the setup wizard's model lists, the
   gateway connection). A redirect would re-send the request to another host, cleartext `http://`
@@ -83,12 +140,52 @@ files. Ixel uses them only to answer, and for each preset:
   a script of yours), OpenCode you run yourself (it still fetches unless you set that variable too), and
   OpenCode 1's attempt to install its plugin package from npm the first time it runs with a new config folder.
 - **A fresh empty folder** for every run, deleted afterwards (`workdir = "temp"`).
+- **Nothing of the question left in the CLI's own folders**, as far as each allows. Claude Code and Codex are
+  told not to save the session (`--no-session-persistence`, `--ephemeral`). Gemini CLI, Copilot and OpenCode
+  have no such switch, so after a run in Ixel's temp folder, once the CLI has exited, Ixel removes what that run
+  saved and nothing else: never a login, a setting, or a session of yours (`ixel_mat/agents/leftovers.py`).
+  Checked against Gemini CLI 0.62.0, Copilot 1.0.91, OpenCode 1.18.34 and 2.0.22:
+
+  | CLI | What it saves of a question, and Ixel removes |
+  |---|---|
+  | Gemini CLI | The chat, with the question and answer (`~/.gemini/tmp/<folder>/chats/session-<date>-<id>.jsonl`), and `~/.gemini/history/<folder>`, each only if its `.project_root` names the run's folder; the temp folder's line in `~/.gemini/projects.json`, changed under Gemini CLI's own lock (if that's held for 2 seconds, the line, which has only the folder's path, stays). The same in `~/.cache/.gemini`, where Gemini CLI keeps them when you've turned its own sandbox on, on a Mac. With that sandbox on, Gemini CLI starts a second copy of itself inside it with the question on its command line, where other users of the computer can read it while it runs: Ixel can't change that |
+  | Copilot | Ixel gives each run its own `--session-id`, and `--log-dir` in a temp folder it removes. Afterwards: `~/.copilot/session-state/<id>/` (its `events.jsonl` and `workspace.yaml` have the question), the session's lock, and its rows in `~/.copilot/session-store.db` (its turns, summary and search index, which is then rebuilt so the question's words leave it too). `--no-remote-export` keeps Copilot from copying the session to GitHub's cloud session storage, which it does where GitHub has turned that on for your account. Both need Copilot 1.0.52 (May 2026) or later: an older one refuses them, and Ixel says to update it |
+  | OpenCode | The sessions whose folder is the run's (and any they started), with every row kept for them, in `~/.local/share/opencode/opencode*.db` (or the one `OPENCODE_DB` names); for OpenCode 2 also the project it made of the folder and the instructions it saved for that run (the folder's path and the date) |
+
+  Rows are deleted with SQLite's `secure_delete` on and the database's write-ahead log emptied afterwards, so
+  the text doesn't stay in the file's free space. If a CLI of yours is using a database at that moment, Ixel
+  waits up to 2 seconds; when it can't remove something, it says so in its log (the folder's path or the
+  error, never the text), and the answer isn't affected. What still stays:
+  - Gemini CLI: `~/.gemini/installation_id` (a random id made once), and `projects.json` itself.
+  - Copilot: `~/.copilot/config.json` (when it was first started), `~/.cache/Microsoft/DeveloperTools/deviceid`
+    (a random id), and Node's compile cache in the temp folder.
+  - OpenCode: `~/.local/share/opencode/log/opencode.log`, which grows by about 11 KB a question (3.5 KB for
+    OpenCode 1) with the folder's path, the session id and timings, never the question. OpenCode 2 deletes
+    the question's place in its queue itself, without overwriting it, so its text can stay in the database
+    file's free space until later use writes over it: nothing reads it there, but someone reading the file's
+    bytes could. OpenCode 1 also adds `$schema` to your `~/.config/opencode/opencode.json`, writes a
+    `.gitignore` beside it, leaves a lock folder in `~/.local/state/opencode/locks/`, and leaves a 5.5 MB
+    library file in the temp folder each time it runs. OpenCode 2 leaves three library files of its own in
+    the temp folder (on Linux `.bun-0-*.so` and `.bun-0-*.node`, 19.7 MB in all) and an empty `opencode`
+    folder; they're named after what's in them, so later runs use them again rather than add more, and none
+    has anything of the question.
+  - A run in a folder you gave the agent as its `workdir`: nothing is removed, since your own sessions are
+    kept there too.
+- **Usage statistics.** Gemini CLI sends Google usage statistics (`play.googleapis.com`): how long the prompt
+  was, the model, which tools were called, the system and version, with your Google account's email or the
+  random id, never the prompt's text. Only `"privacy": {"usageStatisticsEnabled": false}` in your
+  `~/.gemini/settings.json` turns them off; there's no switch for one run. Copilot's help says it sends
+  telemetry and that only `COPILOT_OFFLINE` turns it off, along with its GitHub sign-in, so Ixel can't; what it
+  sends wasn't checked, since that needs a GitHub login. OpenCode 2 contacted nothing but the model; OpenCode 1
+  contacts `registry.npmjs.org` (see above).
 - **No terminal:** stdin is closed or carries only the question, so a CLI can't stop and ask for approval.
-- **The question can't become a flag.** Every preset sends it on stdin, so it never shows on a command
-  line that other users of the computer can read with `ps`. An agent you set up with `prompt_via = "auto"`
-  or `"arg"` gets it after `--`, never as a bare argument, so a question that starts with
-  `--dangerously-…` stays a question.
-- **None of Ixel's keys:** keys Ixel loaded from its `.env` are withheld unless an agent lists them in
+- **The question can't become a flag.** Every preset, and every command-line agent of your own whose
+  config doesn't say otherwise, gets it on stdin, so it never shows on a command line that other programs
+  and other users of the computer can read (`ps`, Task Manager). An agent you set up with
+  `prompt_via = "auto"` or `"arg"` gets it after `--`, never as a bare argument, so a question that starts
+  with `--dangerously-…` stays a question; `"flag"` puts it after `-q`. Those three show it on the command
+  line. A chat-style (`"subprocess"`) agent always gets it on stdin.
+- **None of Ixel's keys:** keys saved in Ixel are withheld unless an agent lists them in
   `pass_env`. The Claude Code, Codex, Gemini CLI and Copilot presets also drop every AI vendor's key from
   your environment with `drop_env` (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`…): their own
   would make the CLI bill an API account instead of your plan, and the others are no business of theirs.
@@ -176,17 +273,44 @@ its catalog setting.
   fields it doesn't use are ignored.
 - When the page goes away (tab closed, Stop pressed), the running review is cancelled, so model calls
   stop (a call already under way may still be billed for what it used). Stopping Ixel cancels it too.
-- The page keeps this tab's conversations (questions, answers, verdicts; never keys) in `sessionStorage`
-  so a reload doesn't lose them. It belongs to that one tab and this server's random port, and the
-  browser deletes it when the tab closes. Restored text is rendered the same way as live text.
-- `ixel app` serves the same page, under the same rules, to an Edge or Chrome app window. The window gets
-  the same redirect file (deleted as soon as the page has loaded), so the key isn't on the browser's
-  command line either, and it runs with a browser profile of its own (`%LOCALAPPDATA%\IxelMAT\window` on
-  Windows): your normal browser's extensions, cookies and history aren't in it. It never syncs
-  (`--disable-sync`): Edge may still sign it in to the Microsoft account you use Windows with, but doesn't
-  sync its history, Ixel's addresses included, to that account. A window opened by an earlier Ixel may have
-  synced already; this stops it from now on. Each open page holds one request to `/api/presence` open (token
-  required, like every API call); the server stops a few seconds after the last one closes.
+- A reload brings this tab's conversations (questions, answers, verdicts; never keys) back from Ixel's server,
+  which keeps them in memory only (`/api/conversations`, token and origin checked like every API call), under
+  a random id the page makes up each time it loads and moves them to (so a duplicated tab starts with a copy
+  and keeps its own). The browser's storage holds only that id and the session key: Edge and Chrome may write
+  a page's storage into a profile folder (in `ixel gui`, your own browser's). The server keeps at most 4 MB
+  under each of 16 ids (the page drops its oldest conversations to fit; past 16, the ids pages moved away from
+  go first, then the one unused longest), and forgets them all when Ixel stops. The page also clears the copy
+  an earlier Ixel kept in that tab's `sessionStorage` (`ixel-conversations`). Restored text is rendered the
+  same way as live text. The browser's storage keeps the Board's recent folders and the last /handoff project
+  (`localStorage`), never a question or answer. On Linux, Ixel's own window (GTK with WebKit) keeps that
+  storage, and WebKit's cache, where WebKitGTK puts them for a program named `ixel` (usually
+  `~/.local/share/ixel` and `~/.cache/ixel`). `ixel forget` doesn't delete those: it says where they are, to
+  delete with Ixel closed.
+- Spell check, writing suggestions and autofill are off in every box you type into (`spellcheck`,
+  `writingsuggestions`, `autocomplete`): in Edge, enhanced spell check and text predictions send what's typed
+  to Microsoft, and autofill keeps it in the browser profile.
+- `ixel app` serves the same page, under the same rules, to an Edge or Chrome app window. The window gets the
+  same redirect file (deleted as soon as the page has loaded), so the key isn't on the browser's command line
+  either, and it runs with a browser profile of its own (`%LOCALAPPDATA%\IxelMAT\window` on Windows): your
+  normal browser's extensions, cookies and history aren't in it. It never syncs (`--disable-sync`): Edge may
+  still sign it in to the Microsoft account you use Windows with, but doesn't sync its history, Ixel's
+  addresses included, to that account. A window opened by an earlier Ixel may have synced already; this stops
+  it from now on. The window's browser also runs with its background services off (`WINDOW_SWITCHES` in
+  `ixel_mat/gui/window.py`: `--disable-background-networking`, `--disable-component-update`,
+  `--metrics-recording-only`, `--no-pings`, and features such as `AutofillServerCommunication` and
+  `PreconnectToSearch` turned off). Checked with a Chromium 141 window (not headless) and its network log,
+  over 100 seconds: without them, the window asked Google's autofill server about Ixel's page five times, and
+  contacted the update, time and search servers. With them, two requests are left, and no switch we found
+  turns them off. The browser's push-message service checks in (`android.clients.google.com/checkin`, a few
+  seconds after start and again until it gets through), with the browser's version, system and language. And
+  its sign-in service asks Google which Google accounts the window's profile is signed in to
+  (`accounts.google.com/ListAccounts`, about a second after start and again until it gets an answer); the
+  profile has no Google cookies to send unless you signed in to Google in that window. Neither has anything
+  from Ixel's page. If your computer's DNS server is a public one that has a secure version, such as Google's
+  8.8.8.8 or Cloudflare's 1.1.1.1, the browser also checks that server over HTTPS (it looks up
+  `www.gstatic.com`) and looks names up there instead: the same company your computer already asks. Edge's own
+  Microsoft services weren't part of that check. Each open page holds one request to `/api/presence` open
+  (token required, like every API call); the server stops a few seconds after the last one closes.
 - The Mac app and the Linux window start `ixel app --host` themselves, which prints the address with its
   key on a pipe only they read, and stops when they close its stdin. Both accept only an `http://127.0.0.1`
   address from it. The Linux window keeps only that server's pages inside (the address is parsed, so
@@ -279,8 +403,8 @@ authors hidden. It never gets your keys, which model wrote what, or anything els
   address works only if you set it, and then every start warns you, naming the host that will see your
   questions: in the terminal, on the app's page and in the plugin's results. An address on this computer
   (`localhost`, `127.0.0.1`) isn't flagged, since only a program you run there can answer it. `http://` is refused except to this machine. The key is never accepted in `config.toml`; it
-  lives in `TYPESAFE_API_KEY`, which `ixel setup` stores in your 0600 `.env`. Keys Ixel loads from there are
-  withheld from the CLIs it runs, like every other key. A redirect is an error, never followed, so the key
+  lives in `TYPESAFE_API_KEY`, which `ixel setup` saves with your other keys (see Keys, above). Keys saved
+  in Ixel are withheld from the CLIs it runs, like every other key. A redirect is an error, never followed, so the key
   and your text can't be forwarded. Replies over 64 KB are refused.
 - **Checked replies.** Probabilities and confidences must be numbers from 0 to 1, and anything unexpected
   counts as "no answer". A model that leaves its confidence out is taken as a coin flip, which never
@@ -356,7 +480,13 @@ scripted panels. End-to-end runs check that only the question and the anonymous 
   connection, which ends most commands, but one that writes nothing may keep running on the server. On
   Linux and macOS, if Ixel is killed outright, an ssh it started can carry on until its command ends.
 - **Nothing leaves your computer but ssh itself.** The log (`machines.log`, 0600) records each connection,
-  run (with the command), import, new key and key pinned, forgotten or changed, and stays on your computer.
+  run, import, new key and key pinned, forgotten or changed: which machine, its address, how it went and the
+  key fingerprints, never a command's text. It stays on your computer, in one file of at most 1 MB (the
+  oldest lines go first), and a line older than 30 days goes the next time Ixel starts or writes to the
+  log. A log an earlier Ixel wrote loses its commands, and its `machines.log.1`, the first time this
+  version starts. An app window opened before the update still runs the earlier Ixel and can add a command
+  until you close it; Ixel takes that out the next time it starts or writes to the log.
+  `ixel forget` deletes it.
   A new key is made with no passphrase so runs need no prompt, and the page says how to add one
   (`ssh-keygen -p`); it becomes a machine's key only when you save. Copy my key sends the public key's own
   characters only.

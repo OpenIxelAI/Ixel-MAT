@@ -49,6 +49,7 @@ let lookNext = "";        // a server to look at again once the look under way i
 let lookFailed = "";
 let removing = "";        // the model whose Take off waits for a second press
 let getting = null;       // a model an Ollama of yours is downloading: { base, model, text }
+let forgetting = false;   // Forget waits for a second press
 
 export function start(options) {
   if (options && options.changed) changed = options.changed;
@@ -269,6 +270,7 @@ function build() {
     pictures(),
     soundCard(),
     keys(),
+    kept(),
   ];
 }
 
@@ -829,10 +831,14 @@ function soundCard() {
 }
 
 function keys() {
-  return card("keys", "Keys",
-    "A saved key stays in Ixel's own file on this computer and is never shown again, here or anywhere. " +
+  const store = data.key_store;
+  const section = card("keys", "Keys",
+    `${store.where} A saved key is never shown again, here or anywhere. ` +
     "A key set in your system or shell wins over one saved here.",
     data.keys.map(keyRow));
+  // Saved keys that can't be opened (the keychain is locked, or its key is gone): above the list, in red
+  if (store.problem) section.querySelector(".set-list").before(notice("error", store.problem));
+  return section;
 }
 
 // One key's row, which can be drawn again on its own (Remove's question works while a save is under way)
@@ -864,6 +870,9 @@ function keyRow(k) {
       el("span", { class: `set-state ${k.state}` }, KEY_STATES[k.state] || k.state)),
     k.state === "system" && k.saved
       ? el("small", { class: "set-sub" }, "A copy saved in Ixel isn't used while that one is set.") : null,
+    k.remove_only
+      ? el("small", { class: "set-sub" }, "Saved in Ixel by hand, and kept with your other keys. Ixel doesn't use it itself.")
+      : null,
     removing
       ? el("div", { class: "set-key-row" },
         el("span", { class: "set-confirm" }, `Remove ${k.label}'s key from Ixel?`),
@@ -877,9 +886,9 @@ function keyRow(k) {
           redrawKey(k, `key:${k.name}:remove`);
         } }, "Keep it"))
       : el("div", { class: "set-key-row" },
-        input,
-        el("button", { type: "button", class: "btn", "data-key": `key:${k.name}:save`, "aria-label": `Save ${k.label}'s key`,
-          onclick: () => saveKey(k, input) }, "Save"),
+        k.remove_only ? null : input,
+        k.remove_only ? null : el("button", { type: "button", class: "btn", "data-key": `key:${k.name}:save`,
+          "aria-label": `Save ${k.label}'s key`, onclick: () => saveKey(k, input) }, "Save"),
         k.saved
           ? el("button", { type: "button", class: "btn danger", "data-key": `key:${k.name}:remove`,
             "aria-label": `Remove ${k.label}'s key`, onclick: () => {
@@ -888,4 +897,52 @@ function keyRow(k) {
             } }, "Remove")
           : null),
     noteNode(`key:${k.name}`));
+}
+
+// What Ixel keeps of what you asked and ran, and Forget. The window's own storage is in use here, so
+// `ixel forget` clears that, with Ixel closed.
+function kept() {
+  const ask = (now) => {
+    forgetting = now;
+    wantFocus = now ? "kept:confirm" : "kept:forget";
+    render();
+  };
+  return card("kept", "What Ixel keeps",
+    ["Your last few questions to ", el("code", {}, "ixel review"), " and its answers, each for a day, so ",
+      el("code", {}, "--continue"), " can pick them up. The Machines log, for 30 days, without the commands you " +
+      "run. Your keys, settings, machines and usage stats aren't part of this."],
+    el("div", { class: "set-row" },
+      el("span", { class: "set-text" }, el("span", { class: "set-label" }, "Forget them now"),
+        el("small", {}, "To clear this window's own storage too, close Ixel and run ", el("code", {}, "ixel forget"),
+          ".")),
+      forgetting
+        ? el("span", { class: "set-control set-pair" },
+          el("span", { class: "set-confirm" }, "Delete them?"),
+          el("button", { type: "button", class: "btn danger", "data-key": "kept:confirm", onclick: forgetNow }, "Forget"),
+          el("button", { type: "button", class: "btn", "data-key": "kept:keep", onclick: () => ask(false) }, "Keep them"))
+        : el("span", { class: "set-control" },
+          el("button", { type: "button", class: "btn danger", "data-key": "kept:forget", onclick: () => ask(true) },
+            "Forget"))));
+}
+
+async function forgetNow() {
+  forgetting = false;
+  wantFocus = "kept:forget";
+  render();
+  note("kept", "Deleting…", "busy");
+  const result = await post("/api/forget", {});
+  if (!result.ok) {
+    note("kept", result.error, "fail");
+    return;
+  }
+  const found = result.reply.forgotten || [];
+  const failed = found.filter((item) => item.error);
+  const gone = [...new Set(found.filter((item) => !item.error).map((item) => item.what))];
+  if (failed.length) {
+    note("kept", `Couldn't delete ${failed[0].what}: ${failed[0].error}`, "fail");
+  } else if (gone.length) {
+    note("kept", `Deleted ${gone.join(" and ")}`, "ok");
+  } else {
+    note("kept", "Nothing to forget", "ok");
+  }
 }

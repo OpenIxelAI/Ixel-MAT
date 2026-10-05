@@ -224,7 +224,7 @@ def parse_triage_settings(config: dict[str, Any],
             warnings.append("[triage] token_env must be the name of an environment variable")
     if "token" in section:
         warnings.append(f"[triage] the key doesn't go in config.toml (it's ignored there): put it in "
-                        f"{settings.token_env}, or run ixel setup, which keeps it in your private .env file")
+                        f"{settings.token_env}, or run ixel setup, which saves it with your other keys")
 
     url = section.get("url", OFFICIAL_URL)
     reason = _url_problem(url)

@@ -3,9 +3,12 @@
 # `ixel setup` writes ~/.config/ixel-mat/config.toml for you. To set it up by hand,
 # copy this file there, delete the agents you don't use, and edit the rest.
 #
-# API keys never go in this file. Put them in ~/.config/ixel-mat/.env
-# (`ixel setup` does this, readable only by you) or export them in your shell;
-# `token_env` names the variable to read.
+# API keys never go in this file. Save them with `ixel setup` or in the app's
+# Settings, or export them in your shell; `token_env` names the variable to read.
+# Saved keys are encrypted in ~/.config/ixel-mat/keys.enc, and the key that opens
+# it is kept in your system's keychain. On a computer with no keychain Ixel can
+# use (or one that won't keep that key), they're in ~/.config/ixel-mat/.env
+# instead, in plain text, readable only by you.
 #
 # A config file in the current directory is ignored on purpose: agents can name
 # commands to run, so they are only read from your own ~/.config/ixel-mat.
@@ -106,7 +109,7 @@ color = "yellow"
 #   timeout   seconds per call (the presets: 300, in a review too)
 #   label     the name shown on the panel
 #   billing   "api" if you signed the CLI in with an API key, not a subscription
-#   pass_env  keys from Ixel's .env this CLI may see (none, unless listed)
+#   pass_env  keys saved in Ixel this CLI may see (none, unless listed)
 
 [agents.claude_code]
 preset = "claude_code"
@@ -141,13 +144,17 @@ preset = "opencode"
 #                             # running, for chat-style programs)
 # command = "mycli"           # looked up on PATH only
 # args = ["--quiet"]
-# prompt_via = "stdin"        # stdin | arg (after --) | auto (arg, or stdin when
-#                             # too long) | flag (-q PROMPT, the default)
+# prompt_via = "stdin"        # stdin (the default: other programs on this
+#                             # computer can read a command line, but not
+#                             # this) | arg (after --) | auto (arg, or stdin
+#                             # when too long) | flag (-q PROMPT)
 # stdout_format = "text"      # or "claude-stream-json"
 # output_flag = "-o"          # if it writes its answer to a file you name
 # workdir = "temp"            # a fresh empty folder (the default) | "inherit" |
-#                             # a path
-# pass_env = ["MYCLI_KEY"]    # keys from Ixel's .env it may see
+#                             # a path. Gemini CLI, Copilot and OpenCode save
+#                             # each question; Ixel removes that only after a
+#                             # run in its own temp folder
+# pass_env = ["MYCLI_KEY"]    # keys saved in Ixel it may see
 # drop_env = ["OPENAI_API_KEY"]   # removed from its environment
 # env = { MYCLI_COLOR = "never" } # fixed settings (not secrets)
 # model_args = ["--model", "{model}"]     # how it takes `model`
@@ -243,8 +250,8 @@ verifier_effort = "low"       # checking is easier than writing (left out: the v
 # the remote has one (an https://macmini:3000/… remote is "macmini:3000"), and
 # the address must be on that same host and port.
 # kind: "gitea" (Gitea or Forgejo), "gitlab" or "github" (GitHub Enterprise).
-# A token for a private repository goes in .env, never here: the Board saves it
-# as IXEL_CONN_<HOST>_<PORT>_<CHECK>_TOKEN, and it's only ever sent to that
+# A token for a private repository never goes here: the Board saves it with your
+# keys, as IXEL_CONN_<HOST>_<PORT>_<CHECK>_TOKEN, and it's only ever sent to that
 # address.
 
 # [connections."macmini"]           # an ssh remote (git@macmini:robin/shop.git)

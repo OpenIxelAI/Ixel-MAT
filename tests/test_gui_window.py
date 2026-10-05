@@ -70,6 +70,24 @@ def test_window_command_is_an_app_window_with_a_private_profile():
     assert "--disable-sync" in cmd  # Edge would sign the profile in to your Microsoft account and sync it
 
 
+def test_the_window_turns_off_the_browsers_background_services():
+    cmd = window.window_command("msedge", "file:///tmp/ixel-gui-1.html", Path("/p/window"), "win32")
+    for switch in ("--disable-background-networking", "--disable-component-update", "--disable-domain-reliability",
+                   "--disable-breakpad", "--metrics-recording-only", "--no-pings", "--disable-default-apps",
+                   "--disable-component-extensions-with-background-pages", "--disable-field-trial-config"):
+        assert switch in cmd
+    # One --disable-features: a browser reads only the last one it's given
+    features = [arg for arg in cmd if arg.startswith("--disable-features=")]
+    assert len(features) == 1
+    off = features[0].split("=", 1)[1].split(",")
+    assert {"AutofillServerCommunication", "PreconnectToSearch", "AimServerRequestOnStartupEnabled",
+            "NetworkTimeServiceQuerying", "OptimizationHints", "Translate"} <= set(off)
+    assert all(name.isalnum() for name in off)  # no spaces or stray commas, which would end the list early
+    assert cmd[-1] == f"--window-size={window.WINDOW_SIZE}"
+    assert "--class=Ixel" not in cmd  # Linux only
+    assert window.window_command("chrome", "u", Path("/p"), "linux")[-1] == "--class=Ixel"
+
+
 # ── Opening it ────────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -114,6 +132,24 @@ def test_a_browser_that_fails_at_once_falls_back_to_a_tab(fake_browser, tmp_path
     where = asyncio.run(window.open_window("file:///y.html", str(tmp_path / "no-such-browser"), tmp_path / "p",
                                            fallback=lambda url: missing.append(url) or True))
     assert where == "your browser" and missing == ["file:///y.html"]
+
+
+def test_the_window_and_the_browser_get_none_of_the_keys_ixel_saved(fake_browser, tmp_path, monkeypatch):
+    from ixel_mat.config import secrets
+    monkeypatch.setenv("XAI_API_KEY", "xai-saved-in-ixel")
+    monkeypatch.setattr(secrets, "_INJECTED", {"XAI_API_KEY"})  # loaded from what's saved
+    monkeypatch.setenv("IXEL_SHELL_SETTING", "yours")
+    browser = tmp_path / "env-browser"
+    browser.write_text(f'#!/bin/sh\nenv > "{tmp_path / "env.txt"}"\nexit 0\n')
+    browser.chmod(0o755)
+    assert asyncio.run(window.open_window("file:///x.html", str(browser), tmp_path / "p")) == "its own window"
+    seen = (tmp_path / "env.txt").read_text()
+    assert "xai-saved-in-ixel" not in seen and "IXEL_SHELL_SETTING=yours" in seen
+    tab = []
+    where = asyncio.run(window.open_window("file:///x.html", fake_browser("exit 3"), tmp_path / "p",
+                                           fallback=lambda url: tab.append(os.environ.get("XAI_API_KEY")) or True))
+    assert where == "your browser" and tab == [None]  # webbrowser.open's browser takes Ixel's own environment
+    assert os.environ["XAI_API_KEY"] == "xai-saved-in-ixel"  # and they're back for Ixel
 
 
 def test_no_browser_at_all_is_not_called_open(fake_browser, tmp_path):
@@ -540,14 +576,18 @@ def test_chrome_windows_on_linux_carry_ixels_window_class():
 
 def test_ixel_app_opens_the_native_window_unless_told_not_to(monkeypatch, tmp_path):
     from ixel_mat import cli
-    calls = []
-    monkeypatch.setattr("subprocess.call", lambda cmd: calls.append(cmd) or 0)
+    from ixel_mat.config import secrets
+    calls, envs = [], []
+    monkeypatch.setattr("subprocess.call", lambda cmd, env=None: calls.append(cmd) or envs.append(env) or 0)
     monkeypatch.setattr(window, "mac_app", lambda: tmp_path / "Ixel.app")
     monkeypatch.setattr(window, "linux_window_command", lambda: ["/usr/bin/python3", "linux_window.py", "py"])
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     assert cli.cmd_app([]) == 0 and calls == [["/usr/bin/open", str(tmp_path / "Ixel.app")]]
     monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setenv("XAI_API_KEY", "xai-saved-in-ixel")
+    monkeypatch.setattr(secrets, "_INJECTED", {"XAI_API_KEY"})  # loaded from what's saved
     assert cli.cmd_app([]) == 0 and calls[-1] == ["/usr/bin/python3", "linux_window.py", "py"]
+    assert "XAI_API_KEY" not in envs[-1] and envs[-1]["PATH"] == os.environ["PATH"]  # the browser a link starts
 
     async def no_window(open_window, announce, port):
         calls.append("browser window")

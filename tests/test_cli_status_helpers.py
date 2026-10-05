@@ -144,3 +144,20 @@ def test_status_and_agents_say_whether_a_cli_is_installed(command, status, shown
     assert got == status
     label, _ = summarize_agent_probe(cfg, got, detail)
     assert shown in label and "connected" not in label
+
+
+def test_status_says_where_saved_keys_are(monkeypatch, capsys, keychain):
+    from ixel_mat import cli
+    from ixel_mat.config import secrets
+    from ixel_mat.config.setup import PROVIDERS
+    for provider in PROVIDERS:  # no provider is asked anything
+        monkeypatch.delenv(provider["env_name"], raising=False)
+    monkeypatch.setattr(cli.console, "width", 300)
+    cli.cmd_status()
+    out = " ".join(capsys.readouterr().out.split())
+    assert "Saved keys" in out and str(secrets.get_keys_file_path()) in out
+    assert "Keys saved in Ixel are encrypted, and the key that opens them is kept in your Mac's Keychain." in out
+    keychain.restart(present=False)
+    cli.cmd_status()
+    out = " ".join(capsys.readouterr().out.split())
+    assert str(secrets.get_env_file_path()) in out and "because this computer has no keychain Ixel can use" in out

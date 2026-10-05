@@ -217,7 +217,7 @@ class Machines:
             used = terminal.open_window(argv)
         except SSHError as exc:
             raise MachinesApiError(str(exc), 409, exc.code, line=line) from None
-        log.write(action, machine=machine.name, host=machine.host, command=machine.command, terminal=used)
+        log.write(action, machine=machine.name, host=machine.host, terminal=used)
         return {"terminal": used, "line": line}
 
     def connect(self, body: Any) -> dict:

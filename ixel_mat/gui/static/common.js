@@ -9,6 +9,11 @@ export const $$ = (selector, root = document) => [...root.querySelectorAll(selec
 
 // Builds an element. Children that are strings become text nodes. Attribute
 // names are always literals in this file; values may be data (text only).
+// For a box that can hold a question, a key or anything else you'd keep to yourself: no spell check or writing
+// suggestions (in Edge, enhanced spell check and text predictions send what's typed to Microsoft), and nothing the
+// browser remembers to suggest again (autofill keeps what's typed in its profile)
+export const PRIVATE_TYPING = { spellcheck: "false", autocomplete: "off", writingsuggestions: "false" };
+
 export function el(tag, attrs, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs || {})) {
@@ -84,7 +89,7 @@ export async function copyText(text) {
     return true;
   } catch (e) {
     // Older browsers, or the clipboard permission is off: copy from a hidden box
-    const box = el("textarea", { class: "sr-only", "aria-hidden": "true" });
+    const box = el("textarea", { class: "sr-only", "aria-hidden": "true", ...PRIVATE_TYPING });
     box.value = text;
     document.body.append(box);
     box.select();

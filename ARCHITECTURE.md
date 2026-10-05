@@ -19,7 +19,7 @@ MCP plugin. The engine doesn't know which one is calling.
 
 | Path | What it does |
 |---|---|
-| `ixel_mat/cli.py` | `ixel …` commands: setup, review, gui, mcp, saves, status, model, config, agents, doctor, update, machines |
+| `ixel_mat/cli.py` | `ixel …` commands: setup, review, gui, mcp, saves, status, model, config, agents, doctor, update, docs, forget, machines. Each one starts with `forget.tidy()` |
 | `ixel_mat/mat.py` | The interactive terminal: a plain question (`[review] plain_questions`), `/review`, `/saver`, `/answers`, `/saves`, `/compare`; ctrl+c cancels a running review (`_interruptible`) |
 | `ixel_mat/prompt_ui.py` | The prompt: history, completion, multi-line input, big pastes folded into a placeholder, the status rule above it (`prompt_toolkit`, imported only when there's a terminal; otherwise `mat.py` reads plain lines) |
 | `ixel_mat/asking.py` | Questions asked in the terminal (`ixel setup`, and `mat.py`'s plain lines): Rich's `Prompt` and `Confirm`, with the answer typed into `prompt_toolkit`, which draws the same prompt and keeps backspace and the arrow keys inside the answer (pipes, hidden answers and Windows go Rich's own way) |
@@ -37,14 +37,15 @@ MCP plugin. The engine doesn't know which one is calling.
 | `ixel_mat/sound.py` | Sound recorded or attached in the app, written out by OpenAI or Groq (`pick_provider`, `transcribe`); never kept |
 | `ixel_mat/triage.py` | Optional triage (your own model or TypeSafe's decision API): auto mode, skipping agreed reviews, saver's gate |
 | `ixel_mat/gui/` | `ixel gui`: an aiohttp server on 127.0.0.1 and a dependency-free HTML/JS/CSS app; `window.py` is `ixel app`, which shows it in an Edge or Chrome app window, or the native windows: `macos/` (Ixel.app, Swift) and `linux_window.py` (GTK), which run `ixel app --host` |
-| `ixel_mat/machines/` | Machines (SSH): `store.py` (`machines.json`, and imports from `~/.ssh/config` and Ixel Console), `ssh.py` (pinned host keys, learned with ssh into a temporary file; the ssh lines, with the destination after `--`), `terminal.py` (Connect's terminal window, given the argv unjoined, held open by a Python helper until Enter), `runs.py` ("Run on machines": 8 at a time, time and output limits), `log.py` (`machines.log`), `cli.py` (`ixel machines`) |
+| `ixel_mat/machines/` | Machines (SSH): `store.py` (`machines.json`, and imports from `~/.ssh/config` and Ixel Console), `ssh.py` (pinned host keys, learned with ssh into a temporary file; the ssh lines, with the destination after `--`), `terminal.py` (Connect's terminal window, given the argv unjoined, held open by a Python helper until Enter), `runs.py` ("Run on machines": 8 at a time, time and output limits), `log.py` (`machines.log`: never a command's text, lines kept 30 days, one file of at most 1 MB), `cli.py` (`ixel machines`) |
 | `ixel_mat/mcp_server.py` | `ixel mcp`: the MCP server (tools `ixel_review`, `ixel_panel`) and host setup snippets |
-| `ixel_mat/agents/` | Transports, one per kind of model (below); `launch.py` finds the program to run for a CLI (PATH only, and npm `.cmd` shims resolved on Windows) |
-| `ixel_mat/config/` | `loader.py` (TOML → `AgentConfig`, `set_agent_model`), `secrets.py` (.env, child environments, file I/O), `setup.py` (the wizard) |
+| `ixel_mat/agents/` | Transports, one per kind of model (below); `launch.py` finds the program to run for a CLI (PATH only, and npm `.cmd` shims resolved on Windows); `leftovers.py` removes what Gemini CLI, Copilot and OpenCode save of a question |
+| `ixel_mat/config/` | `loader.py` (TOML → `AgentConfig`, `set_agent_model`), `secrets.py` (saved keys: `keys.enc` and its key in the system keychain, or `.env` without one; child environments, file I/O), `setup.py` (the wizard) |
 | `ixel_mat/presets.py` | The locked-down subscription CLI presets; configs refer to them by name (`preset = "codex"`) |
 | `ixel_mat/models.py` | `latest` / `latest-fast`: which model id each means, from a provider's live list |
 | `ixel_mat/sanitize.py` | Strips terminal control sequences; escapes Rich markup |
-| `ixel_mat/conversation.py` | The saved conversation `ixel review --continue` picks up (last three exchanges, 0600) |
+| `ixel_mat/conversation.py` | The saved conversation `ixel review --continue` picks up (last three exchanges, 0600, each with the time it was saved, in UTC); each exchange is dropped once it's 24 hours old, and the file deleted when none is left (`expire` as each command starts: a stat, since the file's time is set to its oldest exchange's; `load_conversation` and `save_conversation`) |
+| `ixel_mat/forget.py` | What Ixel keeps of what you asked and ran: `tidy()` deletes what's past its time as each `ixel` command starts (a stat or two); `forget()` is `ixel forget` and Settings' Forget button (the conversation, the Machines log, and for `ixel forget` the app window's browser storage) |
 | `ixel_mat/update.py` | `ixel update` and the once-a-day update notice. Installer copies record where they came from in `install.json`, and, as the installer's last step, the commit installed (git pull, then the installer again whenever the checkout isn't that commit, unless install.ps1 is still running in its window: it holds `install.lock` open until it's done). pipx and uv copies are recognized from pip's `direct_url.json` plus `pipx_metadata.json` / `uv-receipt.toml`, compared with `git ls-remote`, and updated by that tool |
 
 ## Agents
@@ -77,16 +78,23 @@ stream (Anthropic `messages.stream`, OpenAI-style server-sent events), and CLI a
 `stdout_format = "claude-stream-json"` read Claude Code's `stream-json` events. Everything else ignores it
 and the whole reply arrives at the end.
 
-CLI agents run in a fresh temporary folder, with stdin closed (or carrying the prompt), the prompt after
-`--` or on stdin (`prompt_via = "auto"`: on stdin once it's too long for a command line, `ARG_LIMIT`),
-and an environment from `secrets.child_env()`. On Windows, `launch.resolve_argv` looks the command up on
+CLI agents run in a fresh temporary folder, with stdin closed (or carrying the prompt), the prompt on
+stdin (`prompt_via = "stdin"`, the default, since other programs on the computer can read a command line),
+after `--` (`"arg"`), after `-q` (`"flag"`), or after `--` unless it's too long for a command line, then
+on stdin (`"auto"`, `ARG_LIMIT`). An agent whose config leaves `prompt_via` out
+(`AgentConfig.prompt_via_default`) says so when it fails, since that once meant `"flag"`. Subprocess agents
+always get each prompt on their stdin (a pipe, or a PTY), never in their arguments. All of them get an
+environment from `secrets.child_env()`. On Windows, `launch.resolve_argv` looks the command up on
 PATH only (PATHEXT, limited to what CreateProcess can start), refuses a command that isn't there (a bare
 name would be looked for in the current folder), runs a plain npm shim's target (`node.exe script.js` or
 the `.exe`) instead of the `.cmd`, and refuses to pass cmd.exe syntax to any other batch file. Subprocess
 agents start the same way; the updater (`git`, PowerShell, pipx/uv) uses the same PATH-only lookup (`find_on_path`). That environment drops the keys Ixel
 loaded (unless `pass_env` names them) and anything in `drop_env`, adds `env`, and increments
 `IXEL_PANEL_DEPTH`. `agents/process_tree.py` ends a CLI and everything it started (a process group on
-POSIX, a job object on Windows). See [SECURITY.md](SECURITY.md).
+POSIX, a job object on Windows). Then, for a run in Ixel's temp folder, `agents/leftovers.py` removes what Gemini
+CLI, Copilot and OpenCode saved of it in their own folders (`leftovers.prepare` gives Copilot its own
+`--session-id` and `--log-dir` first; `Run.clean` runs in a thread once the CLI has exited). See
+[SECURITY.md](SECURITY.md).
 
 ## The review engine (`modes/review.py`)
 
@@ -184,7 +192,8 @@ skipped),
 `saver_saving` estimates the answer it didn't write. `ReviewResult.to_dict()` carries both, with the
 one-line summaries the front ends show, and `stats.record_run` adds every review's API spend (and saver's
 saving) to the month's totals. The terminal keeps its conversation
-in memory (`/new` clears it), the browser page sends it with each request, and `ixel review --continue`
+in memory (`/new` clears it), the browser page sends it with each request (and gets it back from the
+server's memory after a reload), and `ixel review --continue`
 loads it from `conversation.py`.
 
 All text a model wrote is fenced with a random per-run marker before it reaches another model, and
@@ -199,8 +208,10 @@ sanitized so the marker can't be forged. Runs refuse to start inside another pan
   `report()` prints the verdict, scoreboard, concessions and flagged issues. `ixel review --json` prints
   `ReviewResult.to_dict()`, with progress on stderr.
 - **Browser** (`gui/server.py`): `GET /api/panel`, `GET /api/saves`, `POST /api/review` (a streamed NDJSON
-  event log, ending with the result and any saves update), and `GET /api/presence`, which each open page
-  holds open so `ixel app` (`serve_window`) can stop once its window is closed. The Board's pull requests
+  event log, ending with the result and any saves update), `GET`/`PUT /api/conversations?tab=<id>` (Ask's
+  conversations for a reload, kept in the server's memory by a random id each page load makes up and moves
+  them to, `&was=<id>`; never in browser storage), and `GET /api/presence`, which each open page holds open so
+  `ixel app` (`serve_window`) can stop once its window is closed. The Board's pull requests
   are `GET /api/connections` and `POST /api/connections/{host,token,review,fix}` (`gui/connections_api.py`,
   over `connections.py`, which reads the host's API without following redirects and fetches a pull request
   into `refs/ixel/pr/N/` with git's prompts off); a review is a Handoff task approved for the fetched base
@@ -225,7 +236,20 @@ sanitized so the marker can't be forged. Runs refuse to start inside another pan
 
 `~/.config/ixel-mat/config.toml` holds `[agents.<id>]` tables plus optional `[review]`, `[saver]`,
 `[triage]`, `[sound]`, `[connections."<host>"]`, `[updates]` and `[pricing]`.
-Secrets are in `~/.config/ixel-mat/.env`, loaded at start; `token_env` names the variable. The loader
+Saved keys are in `~/.config/ixel-mat/keys.enc`, a Fernet token of `{NAME: value}` whose key is one item
+in the system keychain (`keyring`: macOS Keychain, Windows Credential Manager, Secret Service or KWallet;
+service `Ixel`, account `keys`; on Windows with keyring's own persistence, so it roams with a roaming profile
+as `keys.enc` does), or in `~/.config/ixel-mat/.env` as plain text where there's no keychain, or where it
+refuses to keep that item while there's no `keys.enc` yet.
+`secrets.load_env()` reads them at start (moving any found in `.env` into `keys.enc`); `token_env` names
+the variable. Keychain calls run on a thread with a 30-second limit, and one that fails or runs out of time
+leaves the keychain unavailable for the run: keys are then never written in plain text, and `keys.enc` is
+never overwritten. A `keys.enc` the keychain's key doesn't open is set aside as `keys.enc.unreadable` when
+a key is saved (older ones are kept, numbered, or merged back when they open with the new file's key).
+The app's requests load settings with `load_settings(wait=False)`: the keys as this run already has them,
+never waiting for the keychain or another save; what that leaves undone runs on a thread of its own
+(`secrets._load_later`), and Health runs its Ixel checks off the loop. `where_keys_are()` says where they
+are for Health, `ixel status`, `ixel setup` and Settings. The loader
 validates each field and reports problems as warnings instead of failing. Config in the current folder
 is never read. `config.example.toml` documents every option, and `tests/test_docs.py` keeps it loading
 cleanly and matching the CLI presets.
@@ -236,7 +260,10 @@ cleanly and matching the CLI presets.
 
 - `tests/conftest.py`: points every file Ixel keeps in `~/.config/ixel-mat`, and the installer's
   `install.json`, at each test's own folder, so the suite never writes yours; `test_user_files.py` fails if
-  a module still holds a path to them.
+  a module still holds a path to them. It also sets `IXEL_TEST_KEYCHAIN=memory` before Ixel is imported
+  (the programs the suite starts inherit it) and gives each test a fresh keychain in memory (the `keychain`
+  fixture, which can fail, refuse, hang or be missing), so no test reads or changes yours. Outside the
+  suite (no pytest, no `PYTEST_CURRENT_TEST`), that variable turns the keychain off instead.
 - `tests/fake_providers.py`: an in-process fake OpenAI/Anthropic API that plays a whole panel, so reviews
   run end to end with no network.
 - `tests/cli_capture.py` + `test_cli_presets_live.py`: the real subscription CLIs against a fake API that

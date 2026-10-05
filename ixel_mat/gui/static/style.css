@@ -1028,6 +1028,7 @@ details.original > summary:hover { color: var(--text-2); }
 }
 .board-notice.error { border-color: var(--red-line); background: var(--red-wash); }
 .board-notice .icon { flex: none; margin-top: 2px; color: var(--red); }
+.board-notice:not(.error) .icon { color: var(--amber); }
 .task-panel .board-notice { margin: 0 0 14px; }
 
 .board-message { max-width: 520px; margin: 9vh auto 0; padding: 0 24px; text-align: center; }

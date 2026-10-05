@@ -148,10 +148,14 @@ def test_full_review_in_the_browser(gui_url, browser):
     assert page.locator(".answers pre code").first.inner_text() == "window.__pwned = 4"
     assert page.locator(".answers strong").count() >= 1
 
-    # This tab keeps the conversation across a reload, and it's still only text
+    # This tab keeps the conversation across a reload, and it's still only text. Ixel keeps it, in memory: the
+    # browser's storage, which Edge and Chrome may write into a profile folder, has only the key and the tab's id
     page.reload()
     page.wait_for_selector(".verdict")
     assert "17 × 23 = 391" in page.inner_text(".verdict")
+    stored = page.evaluate("JSON.stringify([Object.entries(sessionStorage), Object.entries(localStorage)])")
+    assert "17 × 23" not in stored and "ixel-conversations" not in stored
+    assert sorted(page.evaluate("Object.keys(sessionStorage)")) == ["ixel-session", "ixel-tab"]
     assert page.locator(f"{LAST} th.step.done").count() == 3
     page.click(f"{LAST} .tab[data-tab=answers]")
     assert "<script>window.__pwned=2</script>" in page.inner_text(".answers")
@@ -163,6 +167,52 @@ def test_full_review_in_the_browser(gui_url, browser):
     shots = os.environ.get("IXEL_SCREENSHOT_DIR")
     if shots:
         page.screenshot(path=os.path.join(shots, "ixel-gui-review.png"), full_page=True)
+
+
+def test_a_duplicated_tab_keeps_its_own_conversations(gui_url, browser):
+    """Duplicate tab copies the tab's sessionStorage, and with it the id Ixel keeps its conversations under: each
+    page takes a new id when it loads, so the two start the same and then don't overwrite each other's."""
+    errors = []
+
+    def open_page(url, copied=None):
+        page = browser.new_page(viewport={"width": 1100, "height": 900})
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        if copied:  # what Duplicate does, once: a reload of the copy keeps its own storage
+            page.add_init_script(f'if (window.name !== "duplicate") {{ window.name = "duplicate"; '
+                                 f'for (const [k, v] of {copied}) sessionStorage.setItem(k, v); }}')
+        open_app(page, url)
+        return page
+
+    def ask(page, question):
+        asked = page.locator(".thread:not([hidden]) .turn").count()
+        page.fill("#question", question)
+        page.click("#ask")
+        page.locator(".thread:not([hidden]) .turn").nth(asked).locator(".verdict").wait_for(timeout=30_000)
+        page.wait_for_timeout(300)  # the save after it
+
+    def after_a_reload(page):
+        page.reload()
+        page.locator(".thread:not([hidden]) .turn .verdict").first.wait_for(timeout=10_000)
+        page.wait_for_timeout(300)
+        return page.inner_text(".thread:not([hidden])")
+
+    first = open_page(gui_url)
+    first.click('.modes button[data-mode="quick"]')
+    ask(first, "What is 17 × 23? Asked in the first tab")
+    copied = json.dumps(first.evaluate("Object.entries(sessionStorage)"))
+    second = open_page(gui_url.split("#")[0], copied)
+    second.locator(".thread:not([hidden]) .turn .verdict").first.wait_for(timeout=10_000)  # a copy of the first's
+    second.click('.modes button[data-mode="quick"]')
+    ask(first, "Asked in the first tab again")
+    ask(second, "Asked in the duplicate")
+
+    shown = after_a_reload(first)
+    assert "Asked in the first tab again" in shown and "Asked in the duplicate" not in shown
+    shown = after_a_reload(second)
+    assert "What is 17 × 23? Asked in the first tab" in shown and "Asked in the duplicate" in shown
+    assert "Asked in the first tab again" not in shown
+    assert "Asked in the duplicate" in after_a_reload(second)  # and again, under the id it took last time
+    assert not errors, errors
 
 
 def test_follow_up_questions_in_the_browser(gui_url, browser):
@@ -672,7 +722,10 @@ class FakeBoard:
                 return reply({"task": self.tasks[f"T-{n}"]})
             if body["op"] == "delete":
                 self.tasks.pop(args["task"])
-                return reply({"deleted": args["task"]})
+                return reply({"deleted": args["task"], "left": [
+                    f"{args['task']}'s worktree and branch are still there, with the agent's work. If you don't need "
+                    f"them any more: git worktree remove .handoff/worktrees/{args['task']}, then git branch -D "
+                    f"handoff/{args['task']}"]})
             if body["op"] == "approve":
                 self.tasks[args["task"]]["run"] = {"state": "approved", "agent": args["agent"], "kind": args["kind"]}
             if body["op"] == "run.start":
@@ -770,13 +823,18 @@ def test_board_actions_ask_first_and_go_to_handoff(gui_url, browser):
     count = len(fake.actions)
     page.click("#task-panel .actions button:has-text('Delete')")
     page.wait_for_selector("#board-dialog[open]")
-    assert "can't be undone" in page.inner_text("#board-dialog")
+    assert "results go too" in page.inner_text("#board-dialog") and "can't be undone" in page.inner_text("#board-dialog")
     page.keyboard.press("Escape")
     assert len(fake.actions) == count and page.is_visible("#task-panel")
     page.click("#task-panel .actions button:has-text('Delete')")
     page.click("#board-dialog button[value=yes]")
     page.wait_for_selector(".task-card[data-ref=T-1]", state="detached")
     assert fake.actions[-1] == ("delete", {"task": "T-1"}) and page.is_hidden("#task-panel")
+    # What it left is said, until it's dismissed
+    left = page.wait_for_selector(".board-notice[role=status]")
+    assert "git branch -D handoff/T-1" in left.inner_text()
+    left.query_selector("button[aria-label=Dismiss]").click()
+    page.wait_for_selector(".board-notice[role=status]", state="detached")
 
     # A new task, with its checks one per line, for an agent the roster names
     page.click("#board-new")
@@ -1444,8 +1502,11 @@ def test_settings_keys_go_in_and_never_come_back(settings_gui, browser):
     page.wait_for_selector('[data-note="key:OPENAI_API_KEY"].ok')
     assert "Saved OpenAI's key" in row.inner_text()
     assert row.locator(".set-state").inner_text() == "Saved in Ixel"
-    env_file = path.parent / ".env"
-    assert secret in env_file.read_text(encoding="utf-8")
+    keys_file = path.parent / "keys.enc"  # encrypted, with the key in the suite's keychain (in memory)
+    assert keys_file.exists() and secret.encode() not in keys_file.read_bytes()
+    assert not (path.parent / ".env").exists()
+    assert page.locator("section[aria-labelledby=set-h-keys] .set-hint").inner_text().startswith(
+        "Keys saved in Ixel are encrypted, and the key that opens them is kept in your keychain.")
 
     # Nowhere in the page, nor in anything the page can ask for
     assert row.locator("input[type=password]").input_value() == ""
@@ -1460,12 +1521,12 @@ def test_settings_keys_go_in_and_never_come_back(settings_gui, browser):
     assert page.evaluate("document.activeElement.textContent") == "Remove"
     row.locator("button:has-text('Keep it')").click()
     assert page.evaluate("document.activeElement.textContent") == "Remove"
-    assert secret in env_file.read_text(encoding="utf-8")
+    assert keys_file.exists()
     row.locator("button:has-text('Remove')").click()
     row.locator("button:has-text('Remove')").click()
     page.wait_for_selector('[data-note="key:OPENAI_API_KEY"]:has-text("Removed")')
     assert row.locator(".set-state").inner_text() == "Not set"
-    assert secret not in env_file.read_text(encoding="utf-8")
+    assert not keys_file.exists()  # its only key is gone
 
     # Something that isn't a key is refused before it's saved
     row.locator("input[type=password]").fill("my key has spaces")
@@ -1503,7 +1564,8 @@ def test_settings_without_a_file_say_so_and_still_take_keys(tmp_path, browser):
         row.locator("input[type=password]").fill("sk-ant-test-0123456789")
         row.locator("button:has-text('Save')").click()
         page.wait_for_selector('[data-note="key:ANTHROPIC_API_KEY"].ok')
-        assert "sk-ant-test-0123456789" in (home / ".config" / "ixel-mat" / ".env").read_text(encoding="utf-8")
+        keys_file = home / ".config" / "ixel-mat" / "keys.enc"
+        assert keys_file.exists() and b"sk-ant-test-0123456789" not in keys_file.read_bytes()
         assert not errors, errors
 
 
@@ -1563,7 +1625,10 @@ def test_settings_a_refused_change_drops_only_file_changes_and_shows_the_file(se
     assert "Not saved, since the file changed" in page.inner_text("[data-note=review]")
     assert setting(page, "agent:gpt:model").input_value() == "m-gpt-2"   # the file, not what was typed over it
     assert name.count() == 0
-    assert "sk-proj-QueuedBehindARefusal" in (path.parent / ".env").read_text(encoding="utf-8")
+    keys_file = path.parent / "keys.enc"  # saved, encrypted
+    assert keys_file.exists() and b"sk-proj-QueuedBehindARefusal" not in keys_file.read_bytes()
+    row = page.locator(".set-key", has=page.locator("code", has_text="OPENAI_API_KEY"))
+    assert row.locator(".set-state").inner_text() == "Saved in Ixel"
     assert "timeout = 120" in path.read_text(encoding="utf-8")
 
     # Remove asks at once, even while a save is under way, and focus follows

@@ -12,7 +12,7 @@
   <script src="/theme.js"></script>
   <script type="module" src="/app.js"></script>
 </head>
-<body>
+<body spellcheck="false" writingsuggestions="false">
   <div class="shell">
   <nav class="rail" aria-label="Ixel">
     <img src="/mark.svg" alt="" class="mark rail-mark" width="24" height="24">
@@ -97,11 +97,11 @@
             <button type="button" class="linkish" id="followup-new">Start over</button>
           </div>
           <label for="question" class="sr-only">Your question</label>
-          <textarea id="question" rows="1" spellcheck="true"
+          <textarea id="question" rows="1" spellcheck="false" autocomplete="off" writingsuggestions="false"
             placeholder="Ask the panel anything. Paste code, an error, or a decision you're weighing."></textarea>
           <div class="attach" id="attach" hidden>
             <label for="material">Code to review <span>A diff, files or a document. Every model checks it, and follow-ups don't resend it.</span></label>
-            <textarea id="material" rows="6" spellcheck="false" autocomplete="off"
+            <textarea id="material" rows="6" spellcheck="false" autocomplete="off" writingsuggestions="false"
               placeholder="Paste a diff (git diff), a file, or a document"></textarea>
           </div>
           <div class="pic-tray" id="pic-tray" hidden>
@@ -158,7 +158,7 @@
     <form class="board-project" id="board-project" hidden>
       <label for="board-project-input">Project</label>
       <input type="text" id="board-project-input" class="handoff-project" list="board-recent" spellcheck="false"
-        autocomplete="off" placeholder="The project's folder, like C:\Users\you\code\shop">
+        autocomplete="off" writingsuggestions="false" placeholder="The project's folder, like C:\Users\you\code\shop">
       <datalist id="board-recent"></datalist>
       <button type="submit" class="btn">Open</button>
     </form>

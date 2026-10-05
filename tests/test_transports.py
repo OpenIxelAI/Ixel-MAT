@@ -225,11 +225,99 @@ def test_prompt_via_stdin_keeps_prompt_out_of_argv():
 
 
 def test_cli_agent_cannot_read_the_terminal():
-    agent = _cli("input('confirm? ')")  # would hang forever if stdin were inherited
+    agent = _cli("input(); input('confirm? ')")  # the question, then a read that would hang on an inherited stdin
     started = time.monotonic()
     with pytest.raises(RuntimeError, match="exited with code 1"):
         _run(_ask_cli(agent))
     assert time.monotonic() - started < 10
+
+
+def test_your_own_cli_gets_the_question_on_stdin_unless_its_config_says_otherwise():
+    # Other programs on the computer can read a command line (ps, Task Manager), but not a program's stdin
+    configs, warnings = loader.build_agent_configs({"agents": {
+        "mine": {"type": "oneshot", "label": "Mine", "command": "mycli"},
+        **{mode: {"type": "oneshot", "label": mode, "command": "mycli", "prompt_via": mode}
+           for mode in ("flag", "arg", "auto", "stdin")},
+        "preset": {"preset": "claude_code"}}})
+    assert not warnings
+    mine = configs["mine"]
+    assert (mine.prompt_via, mine.prompt_via_default) == ("stdin", True)
+    assert OneShotAgent(mine)._build_command("my salary is 90k") == (["mycli"], b"my salary is 90k")
+    assert not any(configs[name].prompt_via_default for name in ("flag", "arg", "auto", "stdin", "preset"))
+    assert OneShotAgent(configs["flag"])._build_command("q")[0] == ["mycli", "-q", "q"]
+    assert OneShotAgent(configs["arg"])._build_command("q")[0] == ["mycli", "--", "q"]
+    assert OneShotAgent(configs["auto"])._build_command("q")[0] == ["mycli", "--", "q"]
+    assert AgentConfig(name="x", label="x", type="oneshot").prompt_via == "stdin"
+    assert not loader.validate_config({"agents": {"mine": {"type": "oneshot", "label": "Mine", "command": "mycli"}}})
+
+
+def test_a_cli_that_relied_on_the_old_default_says_how_to_set_it_when_it_fails():
+    usage = "import sys; sys.stderr.write('usage: mycli -q QUESTION\\n'); sys.exit(2)"
+    with pytest.raises(RuntimeError) as failed:
+        _run(_ask_cli(_cli(usage, prompt_via_default=True)))
+    # What to do comes first, then what the program said
+    assert str(failed.value) == ("'cli' exited with code 2 (it got the question on stdin; if it takes it as an "
+                                 'argument, set prompt_via = "arg" or "flag"): usage: mycli -q QUESTION')
+    with pytest.raises(RuntimeError) as failed:  # one that says how it takes it isn't told
+        _run(_ask_cli(_cli(usage, prompt_via="stdin")))
+    assert "prompt_via" not in str(failed.value)
+    waits = OneShotAgent(AgentConfig(name="cli", label="CLI", type="oneshot", command=sys.executable,
+                                     args=["-c", "import time; time.sleep(30)"], prompt_via_default=True),
+                         timeout=0.5)
+    with pytest.raises(TimeoutError, match="timed out after 0.5s \\(it got the question on stdin"):
+        _run(_ask_cli(waits))
+
+
+def test_ixel_review_shows_the_stdin_hint_though_it_cuts_the_error_short():
+    # ixel review shows an agent's error cut to its first 160 characters as it runs, and to 200 in the
+    # report at the end: a program's usage message mustn't push the hint out of what's shown
+    import io
+
+    from rich.console import Console
+
+    from ixel_mat import review_ui
+    from ixel_mat.modes.review import AgentFailure, ReviewEvent, ReviewMode, ReviewResult
+    said = ("usage: mycli [-h] -q QUERY [--resume SESSION] [--model MODEL] [--verbose] [--json]\n"
+            "mycli: error: the following arguments are required: -q/--query\n")
+    assert len(said) > 140
+    agent = OneShotAgent(AgentConfig(name="mine", label="Mine", type="oneshot", command=sys.executable,
+                                     args=["-c", f"import sys; sys.stderr.write({said!r}); sys.exit(2)"],
+                                     prompt_via_default=True))
+    with pytest.raises(RuntimeError) as failed:
+        _run(_ask_cli(agent))
+    error = str(failed.value)
+    assert len(error) > 200 and "-q/--query" in error
+
+    def shown(*renderables):
+        out = io.StringIO()
+        for renderable in renderables:
+            Console(file=out, width=400).print(renderable)
+        return out.getvalue()
+
+    live = review_ui.ReviewProgress("q", ReviewMode.QUICK, 1)
+    live.on_event(ReviewEvent("agent_failed", {"agent": "mine", "agent_label": "Mine", "error": error}))
+    report = review_ui.report(ReviewResult("q", ReviewMode.QUICK,
+                                           failures=[AgentFailure("mine", "Mine", "answer", error)]))
+    for text in (shown(live), shown(*report)):
+        assert "'mine' exited with code 2" in text and "-q/--query" not in text  # it was cut
+        assert 'set prompt_via = "arg" or "flag")' in text
+
+
+def test_a_chat_style_cli_gets_each_question_on_stdin_never_in_its_arguments():
+    from ixel_mat.agents.subprocess import SubprocessAgent
+    script = "import sys\nfor line in sys.stdin:\n    print('got', line.strip(), 'args', sys.argv[1:], flush=True)\n"
+    configs, _ = loader.build_agent_configs({"agents": {"chat": {
+        "type": "subprocess", "label": "Chat", "command": sys.executable, "args": ["-u", "-c", script]}}})
+    agent = SubprocessAgent(configs["chat"], use_pty=False, response_idle_timeout=0.5)
+
+    async def go():
+        await agent.connect()
+        try:
+            return await agent.send_and_receive("my salary is 90k")
+        finally:
+            await agent.disconnect()
+
+    assert _run(go()) == "got my salary is 90k args []"
 
 
 def test_cli_agent_runs_in_a_fresh_empty_dir_by_default(monkeypatch):
@@ -460,6 +548,18 @@ def test_what_stops_opencode_is_said_plainly(monkeypatch, says, tell):
     assert str(failure.value) == getattr(presets, tell) and len(str(failure.value)) <= 160
 
 
+@pytest.mark.parametrize("option", ["--no-remote-export", "--session-id"])
+def test_a_copilot_too_old_for_ixels_settings_is_said_plainly(monkeypatch, option):
+    from ixel_mat import presets
+    from ixel_mat.agents import oneshot
+    copilot = {k: v for k, v in presets.PRESETS_BY_ID["copilot"].items() if k != "required_args"}  # Python's args
+    monkeypatch.setattr(oneshot, "preset_for", lambda command: copilot)
+    script = f"import sys; sys.stderr.write(\"error: unknown option '{option}'\\n\"); sys.exit(1)"
+    with pytest.raises(RuntimeError) as failure:
+        _run(_ask_cli(_cli(script, prompt_via="stdin")))
+    assert str(failure.value) == presets.COPILOT_TOO_OLD and len(str(failure.value)) <= 160
+
+
 def test_questions_reach_the_subscription_clis_on_stdin_not_on_their_command_line():
     # Another person on this computer can read any program's command line (`ps`)
     from ixel_mat.presets import CLI_PRESETS
@@ -524,7 +624,7 @@ def test_agent_settings_are_parsed_and_validated():
     good = configs["claude_code"]
     assert (good.prompt_via, good.workdir, good.call_timeout, good.pass_env) == ("stdin", "inherit", 300.0, ["X"])
     bad = configs["bad"]
-    assert (bad.prompt_via, bad.workdir, bad.call_timeout, bad.pass_env) == ("flag", "temp", 180.0, None)
+    assert (bad.prompt_via, bad.workdir, bad.call_timeout, bad.pass_env) == ("stdin", "temp", 180.0, None)
     assert len([w for w in warnings if w.startswith("Agent 'bad'")]) == 3
 
 

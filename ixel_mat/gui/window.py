@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator, Mapping
 
 from ixel_mat.agents.launch import find_on_path
+from ixel_mat.config.secrets import child_env, keys_withheld
 
 WINDOW_SIZE = "1280,840"
 # A browser that fails this soon (a profile it can't use, a missing library) never opened a window
@@ -93,12 +94,48 @@ def data_dir(system: str = sys.platform, env: Mapping[str, str] = os.environ, ho
     return Path(env.get("XDG_STATE_HOME") or home / ".local" / "state", "ixel-mat")
 
 
+# Browser features that call out to the browser's maker, which a window showing only Ixel's own page
+# doesn't need. Checked against a Chromium 141 window (not headless) with a network log: with these off, it no
+# longer asked the autofill server about Ixel's text box (by a fingerprint of the page's form), asked the search
+# engine whether its AI mode is offered, asked a time server, checked for updates, or connected ahead to the
+# search engine. Two requests are left, and no switch we found stops them: the push-message service checks in
+# (version and system), and the sign-in service asks Google's account server which Google accounts the profile
+# has (none). Where the computer's DNS server is a public one with a secure version (8.8.8.8, 1.1.1.1), the
+# browser also tries that and looks names up there. SECURITY.md says what each sends.
+WINDOW_FEATURES_OFF = (
+    "AutofillServerCommunication",       # asks the autofill server what each page's form fields are
+    "AimServerRequestOnStartupEnabled",  # asks the search engine, at start, whether its AI mode is offered
+    "PreconnectToSearch",                # opens a connection to the search engine in case you search
+    "NetworkTimeServiceQuerying",        # asks a time server for the time
+    "OptimizationHints",                 # fetches page hints for the addresses you visit
+    "Translate",                         # offers to translate pages, which downloads models
+    "DialMediaRouteProvider",            # looks for TVs and speakers on your network to cast to
+    "CastMediaRouteProvider",
+)
+
+# Switches that turn off background services in the window's own browser. Each is one Chromium has.
+WINDOW_SWITCHES = (
+    # On Windows, Edge signs a new profile in to the Microsoft account you use Windows with, says over Ixel's
+    # page that it's syncing your browsing data, and syncs this profile's history (Ixel's addresses) to that
+    # account. With this, the profile may still be signed in, but nothing syncs.
+    "--disable-sync",
+    "--disable-background-networking",  # most fetches the browser makes on its own
+    "--disable-component-update",       # update checks for the browser's add-on parts
+    "--disable-default-apps",           # no web apps installed into the new profile
+    "--disable-component-extensions-with-background-pages",  # built-in extensions that run unseen
+    "--disable-domain-reliability",     # reports of failed connections to Google's sites
+    "--disable-breakpad",               # crash reports
+    "--metrics-recording-only",         # usage statistics stay in the profile and aren't sent
+    "--no-pings",                       # link-click pings to other sites
+    # Chromium builds (not Chrome or Edge) otherwise turn on test features, one of which loads a Google page
+    "--disable-field-trial-config",
+    "--disable-features=" + ",".join(WINDOW_FEATURES_OFF),
+)
+
+
 def window_command(browser: str, url: str, profile: Path, system: str = sys.platform) -> list[str]:
-    # --disable-sync: on Windows, Edge signs a new profile in to the Microsoft account you use Windows with,
-    # says over Ixel's page that it's syncing your browsing data, and syncs this profile's history (Ixel's
-    # addresses) to that account. With it, the profile may still be signed in, but nothing syncs.
     command = [browser, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run",
-               "--no-default-browser-check", "--disable-sync", f"--window-size={WINDOW_SIZE}"]
+               "--no-default-browser-check", *WINDOW_SWITCHES, f"--window-size={WINDOW_SIZE}"]
     if system.startswith("linux"):
         command.append("--class=Ixel")  # the window class ixel.desktop names: the dock shows Ixel's icon
     return command
@@ -158,8 +195,10 @@ async def open_window(url: str, browser: str | None = None, profile: Path | None
         detach = {"start_new_session": True} if os.name == "posix" else {}
         try:
             profile.mkdir(parents=True, exist_ok=True)
+            # Without the keys Ixel saved, as for every program it starts: the app has them loaded by now
             proc = subprocess.Popen(window_command(browser, url, profile), stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detach)
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    env=child_env(nested=False), **detach)
         except OSError:
             proc = None
         if proc is not None:
@@ -171,7 +210,9 @@ async def open_window(url: str, browser: str | None = None, profile: Path | None
                 code = 0
             if code == 0:
                 return "its own window"
-    return "your browser" if fallback(url) else ""
+    with keys_withheld():
+        opened = fallback(url)
+    return "your browser" if opened else ""
 
 
 def alert(message: str) -> None:

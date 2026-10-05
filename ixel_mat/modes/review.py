@@ -304,6 +304,9 @@ class EarlierTurn:
     """A question asked earlier in the conversation, and the panel's final answer to it."""
     question: str
     answer: str
+    # When `ixel review` saved it (seconds since 1970), so --continue's file can drop it after a day. The
+    # panel never sees it, and two turns with the same question and answer are the same turn.
+    saved: float | None = field(default=None, compare=False, repr=False)
 
     @classmethod
     def from_result(cls, result: ReviewResult) -> "EarlierTurn | None":

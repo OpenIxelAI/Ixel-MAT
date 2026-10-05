@@ -33,7 +33,7 @@ PROGRAM_TIMEOUT = 8.0   # `codex --version` on a cold Windows start, with the an
 PROBE_TIMEOUT = 25.0    # all of "Check now" together
 MAX_DETAIL = 300
 # What Ixel MAT needs installed (pyproject.toml's dependencies, by the name Python imports)
-PACKAGES = ("rich", "prompt_toolkit", "websockets", "cryptography", "aiohttp", "anthropic", "mcp")
+PACKAGES = ("rich", "prompt_toolkit", "websockets", "cryptography", "aiohttp", "anthropic", "mcp", "keyring")
 BROWSER_NAMES = {"msedge": "Microsoft Edge", "chrome": "Google Chrome", "microsoft-edge": "Microsoft Edge",
                  "microsoft-edge-stable": "Microsoft Edge", "google-chrome": "Google Chrome",
                  "google-chrome-stable": "Google Chrome", "chromium": "Chromium", "chromium-browser": "Chromium",
@@ -99,9 +99,8 @@ async def off_the_loop(fn, *args):
 
 # ── Ixel MAT itself ───────────────────────────────────────────────────────────
 
-def ixel_checks(settings, which: Callable[[str], str | None] | None = None) -> list[Check]:
+def ixel_checks(settings, which: Callable[[str], str | None] | None = None, keychain_wait: bool = True) -> list[Check]:
     from ixel_mat.config.loader import find_config, validate_config
-    from ixel_mat.config.secrets import get_env_file_path
     which = which or find_on_path
 
     checks = [Check("version", "Ixel MAT", "ok", f"Version {__version__}, on Python {sys.version.split()[0]}")]
@@ -126,17 +125,7 @@ def ixel_checks(settings, which: Callable[[str], str | None] | None = None) -> l
                             "; ".join(dict.fromkeys(problems)) if problems else f"Read from {path}",
                             "ixel config" if problems else ""))
 
-    keys = get_env_file_path()
-    if keys.exists() and os.name == "posix":
-        mode = stat.S_IMODE(keys.stat().st_mode)
-        if mode & 0o077:
-            checks.append(Check("keys-file", "Keys file", "warn",
-                                f"{keys} can be read by other people on this computer ({mode:o})",
-                                f"chmod 600 '{keys}'"))
-        else:
-            checks.append(Check("keys-file", "Keys file", "ok", f"Only you can read {keys}"))
-    elif keys.exists():
-        checks.append(Check("keys-file", "Keys file", "ok", f"Kept in {keys}, in your user folder"))
+    checks.append(keys_check(keychain_wait))
 
     git = which("git")
     if git:
@@ -146,6 +135,42 @@ def ixel_checks(settings, which: Callable[[str], str | None] | None = None) -> l
         checks.append(Check("git", "Git", "fail", "Not found. Code reviews and Handoff need it"
                             + ("" if fix else ": install it with your package manager"), fix))
     return checks
+
+
+def keys_check(wait: bool = True) -> Check:
+    """Where the keys saved in Ixel are: encrypted with a key in the system's keychain, or in a plain-text
+    file where there's none (or it refused to keep that key), and what to do when they can't be opened."""
+    try:
+        return _keys_check(wait)
+    except OSError as exc:  # a file Ixel can't read is one failed check, not a report that won't load
+        return Check("keys-file", "Saved keys", "fail", f"Ixel can't read the keys saved in it: {exc}")
+
+
+def _keys_check(wait: bool = True) -> Check:
+    from ixel_mat.config import secrets
+    store = secrets.where_keys_are(wait)
+    plain = secrets.get_env_file_path()
+    if plain.exists() and os.name == "posix":  # a .env left with keys, or the only place there is
+        mode = stat.S_IMODE(plain.stat().st_mode)
+        if mode & 0o077:
+            return Check("keys-file", "Saved keys", "warn", f"{plain} is plain text, and other people on this "
+                         f"computer can read it ({mode:o})", f"chmod 600 '{plain}'")
+    if store.kind == "unreadable":
+        return Check("keys-file", "Saved keys", "fail", store.problem, "ixel setup")
+    if store.kind == "unavailable":
+        return Check("keys-file", "Saved keys", "warn", store.problem)
+    some = bool(secrets.saved_names())
+    if store.kind == "keychain":
+        what = "Encrypted" if some else "None yet. Keys you save are encrypted"
+        return Check("keys-file", "Saved keys", "ok", f"{what} in {store.path}, and the key that opens them is kept "
+                     f"in {store.keychain}")
+    who = "only you can read" if os.name == "posix" else "in your user folder"
+    again = ". Ixel tries again when you next save a key or start it" if store.kind == "refused" else ""
+    if not some:
+        return Check("keys-file", "Saved keys", "ok", f"None yet. Keys you save go in {store.path}, a plain-text file "
+                     f"{who}, because {store.why_plain}{again}")
+    return Check("keys-file", "Saved keys", "warn", f"In {store.path}, a plain-text file {who}, because "
+                 f"{store.why_plain}{again}")
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -376,8 +401,10 @@ def _machine_checks(probe: bool, which=None, system: str | None = None) -> list[
 # ── All of it ─────────────────────────────────────────────────────────────────
 
 async def report(probe: bool = False, settings_loader: Callable | None = None, which=None, run=None,
-                 probe_agent: ProbeAgent | None = None, system: str | None = None) -> dict:
-    """The Health page's JSON: {schema, checked_at, probed, groups: [{id, title, checks: [...]}]}."""
+                 probe_agent: ProbeAgent | None = None, system: str | None = None,
+                 keychain_wait: bool = True) -> dict:
+    """The Health page's JSON: {schema, checked_at, probed, groups: [{id, title, checks: [...]}]}.
+    keychain_wait=False: the app's page, which doesn't wait for the keychain (secrets.where_keys_are)."""
     if settings_loader is None:
         from ixel_mat.runtime import load_settings as settings_loader
     settings = settings_loader()
@@ -400,14 +427,15 @@ async def report(probe: bool = False, settings_loader: Callable | None = None, w
             return Group(group_id, title, [Check(group_id, title, "warn", "The checks took too long; try again")])
 
     groups = await asyncio.gather(
+        # Off the loop: where the saved keys are may mean asking the keychain, which can wait for a password
+        bounded(off_the_loop(ixel_checks, settings, which, keychain_wait), "ixel", "Ixel"),
         bounded(models(), "models", "Models"),
         bounded(handoff_checks(probe, which, run, system), "handoff", "Handoff"),
         bounded(off_the_loop(window_checks, probe, system), "window", "Window"),
         bounded(off_the_loop(machine_checks, probe, which, system), "machines", "Machines"),
     )
     return {"schema": SCHEMA, "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "probed": probe,
-            "groups": [asdict(Group("ixel", "Ixel", ixel_checks(settings, which))),
-                       *(asdict(group) for group in groups)]}
+            "groups": [asdict(group) for group in groups]}
 
 
 def failing(health: dict) -> bool:

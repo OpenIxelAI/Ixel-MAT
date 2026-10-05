@@ -99,7 +99,7 @@ def connect(name: str) -> int:
             ssh.pin(learned.name, learned.keys)
             log.write("HOSTKEY_PINNED", machine=machine.name, name=learned.name, fingerprint=seen["fingerprint"])
     argv = ssh.connect_argv(machine)
-    log.write("CONNECT", machine=machine.name, host=machine.host, command=machine.command, terminal="here")
+    log.write("CONNECT", machine=machine.name, host=machine.host, terminal="here")
     try:
         return subprocess.run(argv, env=child_env(nested=False)).returncode
     except KeyboardInterrupt:

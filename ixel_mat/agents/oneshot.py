@@ -12,7 +12,7 @@ import tempfile
 from typing import Awaitable, Callable
 
 from ixel_mat.agents.base import AgentConfig, BaseAgent, in_folder, prepare_workdir, remove_workdir
-from ixel_mat.agents import launch
+from ixel_mat.agents import launch, leftovers
 from ixel_mat.agents.launch import LaunchError, find_on_path, resolve_argv
 from ixel_mat.agents.process_tree import SPAWN_OPTIONS, create_process_tree
 from ixel_mat.config.secrets import child_env, ixels_own
@@ -244,8 +244,9 @@ def _own_error(stderr: str, *prompts: str | bytes | None) -> str:
 
 class OneShotAgent(BaseAgent):
     """
-    Runs a fresh subprocess per message (e.g. hermes chat -q "prompt").
-    
+    Runs a fresh subprocess per message, with the question on its stdin unless its config's prompt_via
+    says otherwise (e.g. "flag" for hermes chat -q "prompt").
+
     No persistent process, no PTY, no TUI rendering issues.
     Each send() spawns a new process, captures stdout, returns the result.
     """
@@ -284,6 +285,14 @@ class OneShotAgent(BaseAgent):
         self._listen_callback = callback
         while self._connected:
             await asyncio.sleep(0.2)
+
+    def _stdin_hint(self) -> str:
+        """For an agent whose config doesn't say how it takes the question: that used to be -q PROMPT, and
+        a program that still wants it there fails now. It goes right after the agent's name, before what
+        the program said: `ixel review` shows only an error's first 160 or 200 characters."""
+        if not self.config.prompt_via_default:
+            return ""
+        return ' (it got the question on stdin; if it takes it as an argument, set prompt_via = "arg" or "flag")'
 
     async def _args(self, env: dict[str, str]) -> list[str]:
         return await version_args(self.config, env)
@@ -326,6 +335,11 @@ class OneShotAgent(BaseAgent):
         env = cli_env(self.config)
         args = await self._args(env)
         cwd, remove_cwd = prepare_workdir(self.config.workdir)
+        # Gemini CLI, Copilot and OpenCode save the question and answer under your home folder: what a run in
+        # Ixel's own temp folder left is taken away after it (leftovers.py)
+        run = leftovers.prepare(self.config.command, args, cwd if remove_cwd else None, env)
+        if run:
+            args = args + run.args
         output_file = None
         if self.config.output_flag:
             output_dir = cwd if remove_cwd else tempfile.mkdtemp(prefix="ixel-out-")
@@ -337,6 +351,8 @@ class OneShotAgent(BaseAgent):
             except FileNotFoundError:
                 raise RuntimeError(f"Command not found: {self.config.command}") from None
         except (LaunchError, RuntimeError, ValueError):
+            if run:
+                run.drop()
             remove_workdir(cwd, remove_cwd)
             if output_file and not remove_cwd:
                 remove_workdir(os.path.dirname(output_file), True)
@@ -368,7 +384,7 @@ class OneShotAgent(BaseAgent):
                     reading = proc.communicate(stdin_data)
                 stdout, stderr = await asyncio.wait_for(reading, timeout=self.timeout)
             except asyncio.TimeoutError:
-                raise TimeoutError(f"'{self.name}' timed out after {self.timeout:g}s") from None
+                raise TimeoutError(f"'{self.name}' timed out after {self.timeout:g}s{self._stdin_hint()}") from None
 
             if output_file and os.path.isfile(output_file):
                 with open(output_file, "rb") as handle:
@@ -396,7 +412,8 @@ class OneShotAgent(BaseAgent):
                 # Masked before it's cut, so a key's start isn't cut off and the rest left showing
                 detail = mask_secrets(said or result)[-500:]
                 failed = UsageLimit if out_of_usage(_own_error(said, message, stdin_data)) else RuntimeError
-                raise failed(f"'{self.name}' exited with code {proc.returncode}: {detail or 'no output'}")
+                raise failed(f"'{self.name}' exited with code {proc.returncode}{self._stdin_hint()}: "
+                             f"{detail or 'no output'}")
 
             return result
         finally:
@@ -410,3 +427,10 @@ class OneShotAgent(BaseAgent):
             remove_workdir(cwd, remove_cwd)
             if output_file and not remove_cwd:
                 remove_workdir(os.path.dirname(output_file), True)
+            if run and tree is not None:
+                # Once the CLI and everything it started have exited, so nothing is still writing. In a thread: a
+                # database a CLI of yours is using at that moment can take a moment to be free (and if this call
+                # is cancelled meanwhile, the thread still finishes)
+                await asyncio.to_thread(run.clean)
+            elif run:
+                run.drop()

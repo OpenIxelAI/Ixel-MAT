@@ -174,8 +174,9 @@ def test_ixel_machines_connect_asks_once_then_signs_in(sshd, monkeypatch, capfd)
     assert sshd.fingerprint in out and "connected to" in out and len(answers) == 1
     assert ssh.pinned(sshd.name) == sshd.host_keys()
     assert cli.main(["connect", "Lab box"]) == 0 and len(answers) == 1  # pinned: no question the second time
-    actions = [line.split()[1] for line in log.LOG_FILE.read_text().splitlines()]
+    actions = [line.split()[1] for line in log.LOG_FILE.read_text(encoding="utf-8").splitlines()[1:]]  # [0]: HEADER
     assert actions == ["HOSTKEY_PINNED", "CONNECT", "CONNECT"]
+    assert "echo connected" not in log.LOG_FILE.read_text(encoding="utf-8")  # what ran on connecting isn't kept
 
 
 # ── the page's API ──────────────────────────────────────────────────────────

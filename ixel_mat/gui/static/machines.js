@@ -3,7 +3,7 @@
 // time (you see its fingerprint and say yes), and ssh then refuses a server whose key changed. Nothing
 // here runs unless you typed or picked it.
 
-import { $, el, icon, copyButton, getJSON, postJSON, plural } from "./common.js";
+import { $, el, icon, copyButton, getJSON, postJSON, plural, PRIVATE_TYPING } from "./common.js";
 
 let data = null;      // GET /api/machines
 let failed = "";
@@ -93,7 +93,8 @@ function render() {
   parts.push(...groups());
   parts.push(el("p", { class: "fine machines-foot" }, icon("lock"),
     el("span", {}, "Each server's key is pinned in Ixel's own file the first time, and ssh refuses a server whose "
-      + "key has changed. Every connection and run is logged on this computer (machines.log, next to your settings).")));
+      + "key has changed. Every connection and run is logged on this computer for 30 days (machines.log, next to your "
+      + "settings), but never the command itself.")));
   body.replaceChildren(...parts);
 }
 
@@ -322,7 +323,7 @@ async function editMachine(m) {
   const agents = data ? data.agents : {};
   const value = m || { name: "", host: "", user: "", port: null, key: "", agent: "shell", command: "", group: "", notes: "" };
   const input = (id, attrs, v) => {
-    const node = el("input", { type: "text", id, autocomplete: "off", spellcheck: "false", ...attrs });
+    const node = el("input", { type: "text", id, ...PRIVATE_TYPING, ...attrs });
     node.value = v === null || v === undefined ? "" : String(v);
     return node;
   };
@@ -334,7 +335,7 @@ async function editMachine(m) {
   const group = input("m-group", { maxlength: "60", placeholder: "Optional", list: "m-groups" }, value.group);
   const groupsList = el("datalist", { id: "m-groups" },
     [...new Set((data ? data.machines : []).map((x) => x.group).filter(Boolean))].map((g) => el("option", { value: g })));
-  const notes = el("textarea", { id: "m-notes", rows: "2", maxlength: "2000" });
+  const notes = el("textarea", { id: "m-notes", rows: "2", maxlength: "2000", ...PRIVATE_TYPING });
   notes.value = value.notes || "";
   const agent = el("select", { id: "m-agent" },
     Object.entries(agents).map(([key2, a]) => el("option", { value: key2 }, a.label)));

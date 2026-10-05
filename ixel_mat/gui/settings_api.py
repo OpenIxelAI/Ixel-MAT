@@ -34,6 +34,8 @@ from ixel_mat.runtime import PLAIN_CHOICES as PLAIN
 
 TRIAGE_PROVIDERS = ("typesafe", "model")
 KEY_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+# Any name a key can be saved under by hand in .env (what's listed to remove)
+SAVED_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 KEY_ENDINGS = ("_KEY", "_TOKEN")
 MAX_KEY_CHARS = 400
 MIN_TIMEOUT, MAX_TIMEOUT = 10, 3600
@@ -67,9 +69,13 @@ def _kind(cfg) -> str:
 
 def known_keys(settings) -> list[dict]:
     """The keys the page may set: the providers `ixel setup` knows, the picture and sound services, Triage's,
-    and the ones your agents name (only names that look like a key or token)."""
+    and the ones your agents name (only names that look like a key or token). And any other saved in Ixel
+    that nothing in Ixel uses, one added to .env by hand say, so it can be removed here (remove_only). Not a
+    git host's token the Board saved: that's the Board's to change."""
     from ixel_mat import images
     from ixel_mat.config.setup import PROVIDERS
+    from ixel_mat.connections import TOKEN_PREFIX
+    from ixel_mat.gui.model_choices import KEYS
     found: dict[str, dict] = {}
 
     def add(name: str, label: str, user: str = "") -> None:
@@ -96,8 +102,24 @@ def known_keys(settings) -> list[dict]:
             if name in found and use not in found[name]["used_by"]:
                 found[name]["used_by"].append(use)
     saved = secrets.saved_names()
+    # Not one Ixel uses: Triage's, an agent's (token_env, token = "${NAME}", or given to it with pass_env),
+    # or a Gemini key (Gemini CLI and the model lists use GEMINI_API_KEY too)
+    used = {settings.triage.token_env, *(n for names in KEYS.values() for n in names)}
+    for name, raw in _raw_agents(settings).items():
+        token, cfg = raw.get("token"), settings.agent_configs.get(name)
+        used |= {raw.get("token_env"), token[2:-1] if isinstance(token, str) and token[:2] == "${" else None}
+        used |= set(cfg.pass_env or ()) if cfg else set()
+    for name in sorted(saved - found.keys() - used):
+        if SAVED_NAME.match(name) and not name.startswith(TOKEN_PREFIX):
+            found[name] = {"name": name, "label": name, "used_by": [], "remove_only": True}
     return [{**entry, "state": secrets.key_state(entry["name"]), "saved": entry["name"] in saved}
             for entry in found.values()]
+
+
+def key_store() -> dict:
+    """Where saved keys are kept, in words, and what's wrong when they can't be used ("" when nothing is)."""
+    store = secrets.where_keys_are(wait=False)
+    return {"kind": store.kind, "where": store.summary, "problem": store.problem}
 
 
 def _holds_secrets(config: dict) -> bool:
@@ -174,6 +196,7 @@ def snapshot(settings, version: str | None = None) -> dict:
         "images": {"provider": image_provider if image_provider in images.PROVIDERS else ""},
         "sound": _sound(settings),
         "keys": known_keys(settings),
+        "key_store": key_store(),
         "choices": {"modes": list(MODES), "plain": list(PLAIN), "escalate": list(ESCALATE),
                     "on_wrong": list(ON_WRONG), "efforts": list(EFFORT_LEVELS),
                     "triage_providers": list(TRIAGE_PROVIDERS),
@@ -583,7 +606,7 @@ def change(settings, body: Any) -> dict | None:
 
 
 NEW_FILE = ("# Ixel MAT — Agent Configuration\n"
-            "# Started in the app's Settings. ixel setup can add more; secrets live in .env, never here.\n")
+            "# Started in the app's Settings. ixel setup can add more. Keys never go in this file.\n")
 
 
 def _new_file(version: str) -> tuple[Path, str]:
@@ -663,15 +686,23 @@ def set_key(settings, body: Any) -> dict:
     if not isinstance(name, str) or name not in allowed:
         raise SettingsError("That isn't a key Ixel uses.")
     label = allowed[name]["label"]
+    if allowed[name].get("remove_only") and body.get("remove") is not True:  # it can go, not be set here
+        raise SettingsError("That isn't a key Ixel uses.")
     if body.get("remove") is True:
-        removed = secrets.remove_live(name)
+        try:
+            removed = secrets.remove_live(name)
+        except secrets.KeyStoreError as exc:
+            raise SettingsError(str(exc), 503) from None
         state = secrets.key_state(name)
         if state == "system":
             return {"state": state, "message": f"{label}'s key is also set outside Ixel ({name}), and that one is "
                                                "still used. Remove it there to stop using it."}
         return {"state": state, "message": f"Removed {label}'s key." if removed else f"{label} had no key saved here."}
     value = check_key_value(body.get("value"))
-    outcome = secrets.set_live(name, value)
+    try:
+        outcome = secrets.set_live(name, value)
+    except secrets.KeyStoreError as exc:
+        raise SettingsError(str(exc), 503) from None
     if outcome == "system":
         return {"state": "system", "message": f"Saved, but {name} is also set outside Ixel (in your system or "
                                               "shell), and that one wins. Change or remove it there."}

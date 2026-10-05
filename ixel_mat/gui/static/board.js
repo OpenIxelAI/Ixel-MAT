@@ -4,7 +4,7 @@
 // page builds from the server's bytes.
 
 import {
-  $, el, icon, ago, plural, copyButton, api, getJSON, postJSON, rememberedProject, rememberProject,
+  $, el, icon, ago, plural, copyButton, api, getJSON, postJSON, rememberedProject, rememberProject, PRIVATE_TYPING,
 } from "./common.js";
 import { renderMarkdown } from "./markdown.js";
 
@@ -58,6 +58,7 @@ let project = "";      // the folder the person picked (Handoff's root for it on
 let board = null;      // the board last read for `project`: { exists, revision, project, counts, tasks }
 let failure = null;    // what went wrong with the last look: { message, code }
 let notice = "";       // what went wrong starting a board: kept until it's dismissed or tried again
+let deleteLeft = "";   // what a delete left (results it couldn't remove, the agent's worktree): kept until dismissed
 let looking = null;    // the look under way
 let openRef = "";      // the task in the panel
 let detail = null;     // its data, from /api/board/task
@@ -213,6 +214,7 @@ function choose(value) {
   board = null;
   failure = null;
   notice = "";
+  deleteLeft = "";
   hint = "";
   agents = null;
   prs = null;
@@ -293,6 +295,11 @@ function mainView() {
     const dismiss = el("button", { type: "button", class: "icon-btn", "aria-label": "Dismiss", title: "Dismiss" }, icon("x"));
     dismiss.addEventListener("click", () => { notice = ""; render(); });
     nodes.push(el("div", { class: "board-notice error", role: "alert" }, icon("alert"), el("span", {}, notice), dismiss));
+  }
+  if (deleteLeft) {
+    const dismiss = el("button", { type: "button", class: "icon-btn", "aria-label": "Dismiss", title: "Dismiss" }, icon("x"));
+    dismiss.addEventListener("click", () => { deleteLeft = ""; render(); });
+    nodes.push(el("div", { class: "board-notice", role: "status" }, icon("alert"), el("span", {}, deleteLeft), dismiss));
   }
   if (!board && failure && failure.code === "no_project") {
     nodes.push(pickProject());
@@ -710,7 +717,7 @@ async function fixPr(pr, host) {
   const select = el("select", { id: "pr-fixer" }, list.map((a) =>
     el("option", { value: a.name }, a.label && a.label !== a.name ? `${a.label} (${a.name})` : a.name)));
   select.value = list.some((a) => a.name === "claude") ? "claude" : list[0].name;
-  const text = el("textarea", { id: "pr-fix-text", rows: "8", maxlength: String(MAX_FIX_CHARS),
+  const text = el("textarea", { id: "pr-fix-text", rows: "8", maxlength: String(MAX_FIX_CHARS), ...PRIVATE_TYPING,
     placeholder: "What should change? For example: handle a declined card." });
   const from = el("small", {}, "Looking for a review of it on the board…");
   const problem = el("div", { class: "dialog-problem", role: "alert" });
@@ -1036,7 +1043,7 @@ function needsForm(asked, t) {
   let read;
   if (a.needs === "text") {
     const box = el("textarea", { rows: "3", maxlength: "4000", "data-first": true, id: "needs-text", "data-key": "needs-text",
-      required: TEXT_NEEDED[a.op] || false });
+      required: TEXT_NEEDED[a.op] || false, ...PRIVATE_TYPING });
     box.value = asked.draft || "";
     box.addEventListener("input", () => { asked.draft = box.value; });
     form.append(el("label", { for: "needs-text" }, TEXT_LABEL[a.op] || "Note"), box);
@@ -1082,7 +1089,9 @@ function confirmWords(a, t, args) {
     return { title: `Run ${t.ref} now?`, text: `${agent} ${kindHint(kind, of)} Its result comes back to this board.`,
       yes: "Run it now" };
   }
-  if (a.op === "delete") return { title: `Delete ${t.ref}?`, text: "Its history goes too. This can't be undone.", yes: "Delete" };
+  if (a.op === "delete") {
+    return { title: `Delete ${t.ref}?`, text: "Its history and results go too. This can't be undone.", yes: "Delete" };
+  }
   if (isDanger(a)) return { title: `Cancel ${t.ref}?`, text: "It moves to Done as cancelled. You can reopen it later.", yes: "Cancel the task" };
   return { title: `${a.label}?`, text: t.title, yes: a.label };
 }
@@ -1106,7 +1115,10 @@ async function act(a, t, args) {
   const seen = a.op === "approve" && detail && detail.task && detail.task.ref === t.ref && detail.task.content
     ? { shown: detail.task.content } : {};
   try {
-    await postJSON("/api/board/action", { project: where, op: a.op, args: { ...args, ...seen, task: t.ref } });
+    const reply = await postJSON("/api/board/action", { project: where, op: a.op, args: { ...args, ...seen, task: t.ref } });
+    // As a rule nothing's left; when something is (the agent's worktree and branch), Handoff says what, and how
+    // to remove it
+    if (a.op === "delete") deleteLeft = Array.isArray(reply && reply.left) ? reply.left.join(" ") : "";
     // "Run it now" approves the run, then starts it (as `handoff run T-N` would). Once approved, the
     // form is done with even if the start fails: the panel then offers Run it now on its own.
     if (a.op === "approve") {
@@ -1202,9 +1214,9 @@ async function newTask() {
     }
     return;
   }
-  const title = el("input", { type: "text", id: "new-title", maxlength: "200", required: true, autocomplete: "off" });
-  const body = el("textarea", { id: "new-body", rows: "4", maxlength: "20000" });
-  const checks = el("textarea", { id: "new-checks", rows: "3", placeholder: "One check per line" });
+  const title = el("input", { type: "text", id: "new-title", maxlength: "200", required: true, ...PRIVATE_TYPING });
+  const body = el("textarea", { id: "new-body", rows: "4", maxlength: "20000", ...PRIVATE_TYPING });
+  const checks = el("textarea", { id: "new-checks", rows: "3", placeholder: "One check per line", ...PRIVATE_TYPING });
   const assignee = agentSelect("", "new-assignee");
   const field = (id, label, input, hint) => el("div", { class: "field" }, el("label", { for: id }, label), input,
     hint ? el("small", {}, hint) : null);
