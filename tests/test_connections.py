@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -121,8 +122,13 @@ def test_a_reply_nested_past_the_depth_limit_isnt_read():
         origin, host = _host(fake, "gitea")
         with pytest.raises(ConnectionError_, match="isn't JSON"):
             pull_requests(origin, host, "")
-    assert not connections._too_deep(json.loads('{"a":' * (connections.MAX_JSON_DEPTH - 1) + "1"
-                                                + "}" * (connections.MAX_JSON_DEPTH - 1)))  # just under still reads
+    assert not connections._too_deep(json.loads('{"a":' * connections.MAX_JSON_DEPTH + "1"
+                                                + "}" * connections.MAX_JSON_DEPTH))  # right at the limit still reads
+    if getattr(sys, "get_int_max_str_digits", lambda: 0)():  # Python stops at 4300 digits unless told otherwise
+        with FakeHost(raw=b'[{"number": 1' + b"0" * 5000 + b'}]') as fake:
+            origin, host = _host(fake, "gitea")
+            with pytest.raises(ConnectionError_, match="isn't JSON"):
+                pull_requests(origin, host, "")
 
 
 def test_names_that_only_look_alike_never_share_a_token():

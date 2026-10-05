@@ -331,7 +331,7 @@ def _running(pid: int) -> bool:
     except ProcessLookupError:
         return False
     try:  # ended but not yet collected: in a container whose first process collects nothing, it stays that way
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()[0] != b"Z"
     except (OSError, IndexError):  # no /proc (a Mac), or it went in between
         return True
 

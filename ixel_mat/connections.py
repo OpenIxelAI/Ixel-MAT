@@ -356,7 +356,7 @@ def _get(host: Host, url: str, token: str) -> Any:
     try:
         reply = json.loads(data.decode("utf-8"))
         readable = not _too_deep(reply)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):  # (nested thousands deep, json may give up)
+    except (ValueError, RecursionError):  # not UTF-8 or JSON, a number past Python's digit limit, or nested thousands deep
         readable = False
     if not readable:
         raise ConnectionError_("unreachable", f"{host.label} sent back something that isn't JSON. Check the web "
