@@ -1,7 +1,7 @@
 name: tests
 
-# Runs only when started by hand (Actions → tests → Run workflow), so pushes and pull
-# requests spend no Actions minutes. Test locally with `pytest` before pushing.
+# The full run, started by hand (Actions → tests → Run workflow). checks.yml runs the fast
+# tests on every pull request and push to main. Test locally with `pytest` before pushing.
 # Windows first: that's where Ixel is used and tested today. A run covers the Windows
 # jobs, the live check that the subscription CLIs are locked down, and the Linux and
 # macOS jobs (macOS minutes count 10x).
