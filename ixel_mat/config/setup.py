@@ -27,7 +27,7 @@ from ixel_mat.asking import Prompt, Confirm
 from ixel_mat.config.secrets import (KeyStoreError, load_env, normalize_secret_input, save_secret, where_keys_are,
                                      write_private_file)
 from ixel_mat.models import ALIASES, pick_latest, valid_model_id
-from ixel_mat.presets import CLI_PRESETS  # noqa: F401 — the wizard offers these
+from ixel_mat.presets import CLI_PRESETS, OPENCODE_ONLY_FREE, opencode_only_free  # it offers CLI_PRESETS
 from ixel_mat.sanitize import safe_markup
 
 console = Console()
@@ -298,8 +298,13 @@ def _configure_cli_agents(taken_ids: set[str]) -> list[dict]:
     for preset in found:
         if preset["id"] in taken_ids:
             continue
+        add = True
+        if preset["id"] == "opencode" and _opencode_only_free():
+            # Every question would come back turned down, so it's left off unless you say otherwise
+            console.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{OPENCODE_ONLY_FREE}[/]")
+            add = False
         if Confirm.ask(f"  [{C['moon']}]Add {preset['label']} to the panel?[/] "
-                       f"[{C['dim']}]({preset['why']})[/]", default=True):
+                       f"[{C['dim']}]({preset['why']})[/]", default=add):
             # A reference, not a copy: when the preset is tightened, this agent gets it too
             agent = {"id": preset["id"], "preset": preset["id"], "type": "oneshot",
                      "label": preset["label"], "color": "white", "_asked": True}
@@ -314,6 +319,23 @@ def _configure_cli_agents(taken_ids: set[str]) -> list[dict]:
             agents.append(agent)
     console.print()
     return agents
+
+
+def _opencode_only_free() -> bool:
+    """
+    Whether OpenCode has only its free models, which turn Ixel down (presets.OPENCODE_ONLY_FREE). Asked as
+    Settings asks for its list: from what it already knows, never fetching its catalog, and never through your
+    background service. False when it can't say.
+    """
+    from ixel_mat.config.loader import build_agent_configs
+    from ixel_mat.gui.model_choices import PROGRAM_LISTS, program_models
+    console.print(f"  [{C['dim']}]Looking at the models OpenCode has…[/]")
+    configs, _ = build_agent_configs({"agents": {"opencode": {"preset": "opencode"}}})
+    try:
+        models = program_models(configs["opencode"], PROGRAM_LISTS["opencode"])
+    except Exception:  # noqa: BLE001 — an old or broken install: asking it a question says why
+        return False
+    return opencode_only_free([m["id"] for m in models])
 
 
 def _suggest_more_members(agents: list[dict]) -> None:

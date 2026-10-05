@@ -170,6 +170,10 @@ GEMINI_SIGN_IN = ("Gemini CLI isn't signed in: add a free Gemini API key (aistud
 # OpenCode's free tier refuses an agent of anyone else's, like Ixel's locked-down one
 OPENCODE_FREE_TIER = ("OpenCode's free tier only works inside OpenCode: sign in to a provider (opencode auth login) "
                       "and pick its model in Settings, or take OpenCode off the panel.")
+# OpenCode listing only OpenCode Zen's free models: no provider you've connected, and no Zen credit (which would
+# list Zen's paid ones too), so what it would answer Ixel with turns Ixel down
+OPENCODE_ONLY_FREE = ("OpenCode has only its free models, which answer only inside OpenCode. To use it in Ixel, "
+                      "connect a provider in OpenCode (opencode auth login), then pick one of its models.")
 # OpenCode 1 started on the data OpenCode 2 has moved on
 OPENCODE_OLD_COPY = ("This OpenCode is older than the data a newer one left: put the newer OpenCode first on PATH, "
                      "or set its full path as OpenCode's command.")
@@ -188,6 +192,16 @@ PLAIN_ERRORS = {"gemini_cli": {"Please set an Auth method": GEMINI_SIGN_IN},
                 "opencode": {"free tier can only be used from within OpenCode": OPENCODE_FREE_TIER,
                              "Database is not empty and has no session table": OPENCODE_OLD_COPY,
                              "Model unavailable:": OPENCODE_UNKNOWN_MODEL}}
+
+
+def opencode_only_free(models: list[str]) -> bool:
+    """Whether OpenCode's model list (provider/model names, as `opencode models` prints them) has only OpenCode Zen's
+    free models (OPENCODE_ONLY_FREE): named …-free, and Big Pickle. A model it doesn't know to be free counts as one
+    that may answer, so a new free one only means no warning."""
+    return bool(models) and all(m.startswith("opencode/") and (m.endswith("-free") or m == "opencode/big-pickle")
+                                for m in models)
+
+
 # Where your Gemini API key can be: Gemini CLI's own name for it, or the Google (Gemini) key in Ixel's Keys
 GEMINI_KEYS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 # Variables that choose a sign-in for Gemini CLI when set to "true", and GOOGLE_GEMINI_BASE_URL (a gateway,

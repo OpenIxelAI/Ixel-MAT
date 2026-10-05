@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 from ixel_mat import effort
 from ixel_mat.local_models import is_chat_model
 from ixel_mat.models import ALIASES, models_url, pick_latest, provider_for_url, valid_model_id
+from ixel_mat.presets import OPENCODE_ONLY_FREE, opencode_only_free
 
 # Built in, newest first (as of October 2026). Shown only when the company can't be asked.
 BUILT_IN: dict[str, list[str]] = {
@@ -328,6 +329,9 @@ def agent_choices(cfg, raw: dict) -> dict:
             out.update(source="program", models=listed(None, program_models(cfg, PROGRAM_LISTS[program])))
         except Exception as exc:  # noqa: BLE001 — not installed, signed in nowhere, an old version…
             out["note"] = f"Ixel couldn't ask {cfg.label} for its models ({_why(exc)})."
+            return out
+        if program == "opencode" and opencode_only_free(out["models"]):
+            out["note"] = OPENCODE_ONLY_FREE  # before you pick one of its free models, which turn Ixel down
         return out
     provider = PROGRAM_COMPANY.get(program)
     if provider is None:

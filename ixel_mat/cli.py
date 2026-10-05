@@ -1347,6 +1347,10 @@ STOP_LIKE_CTRL_C = ("review", "ask", "image", "mcp", "gui", "app")
 
 def main():
     _tolerate_unencodable_output()
+    # The model programs where their installers put them, also when Ixel was opened from the app menu, whose
+    # PATH has none of what your shell's startup file adds (OpenCode's ~/.opencode/bin)
+    from ixel_mat.agents.launch import add_install_folders
+    add_install_folders()
     # Whatever the command: each review question and answer goes once it's a day old, Machines log lines
     # once they're 30 days old (a stat or two, and a rewrite or a delete only when something's due)
     from ixel_mat.forget import tidy

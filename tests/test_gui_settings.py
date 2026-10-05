@@ -746,6 +746,25 @@ def test_opencode_lists_its_own_models(tmp_path, monkeypatch):
     assert out["source"] == "none" and not (tmp_path / "ran").exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="a shell script stands in for opencode")
+def test_opencode_with_only_its_own_models_says_they_turn_ixel_down(tmp_path):
+    # OpenCode Zen's free models answer only inside OpenCode: the list says so before one is picked
+    from ixel_mat.agents.base import AgentConfig
+    from ixel_mat.gui import model_choices
+    from ixel_mat.presets import OPENCODE_ONLY_FREE
+    fake = tmp_path / "opencode"
+    fake.write_text('#!/bin/sh\nprintf "opencode/big-pickle\\nopencode/fledge-alpha-free\\n"\n')
+    fake.chmod(0o755)
+    cfg = AgentConfig(name="opencode", label="OpenCode", type="oneshot", command=str(fake),
+                      model_args=["-m", "{model}"])
+    out = model_choices.agent_choices(cfg, {"preset": "opencode"})
+    assert out["models"] == ["opencode/big-pickle", "opencode/fledge-alpha-free"]
+    assert out["note"] == OPENCODE_ONLY_FREE
+    for theirs in ("lmstudio/qwen-local", "opencode/claude-opus-5-5"):  # a provider of yours, or Zen credit
+        fake.write_text(f'#!/bin/sh\nprintf "opencode/big-pickle\\n{theirs}\\n"\n')
+        assert model_choices.agent_choices(cfg, {"preset": "opencode"})["note"] == ""
+
+
 @pytest.mark.skipif(os.name != "posix", reason="a script stands in for opencode")
 def test_opencode_2_lists_through_a_server_of_its_own_never_your_background_service(tmp_path, monkeypatch):
     # OpenCode 2's `models` would ask your background service, which runs with your settings (and fetches OpenCode's
