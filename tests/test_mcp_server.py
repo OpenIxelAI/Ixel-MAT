@@ -361,9 +361,13 @@ def test_other_systems_set_up_the_ixel_command(tmp_path, monkeypatch):
     assert f'claude mcp add --scope user ixel -- {shell(folder / "ixel")} mcp' in host_snippets()
     (folder / "ixel").unlink()
     # No ixel script beside Python (pip install --user): python, kept from importing the current folder
-    flags = " ".join(mcp_server._safe_path_flags())
-    assert flags in ("-I", "-P")
-    assert f'claude mcp add --scope user ixel -- {shell(folder / "python")} {flags} -m ixel_mat mcp' in host_snippets()
+    flags = mcp_server._safe_path_flags()
+    if sys.prefix != sys.base_prefix and not site.ENABLE_USER_SITE:  # a virtualenv that leaves user site out
+        assert flags == ["-I"]
+    else:  # -P does just the folder part, from 3.11; 3.10 has no flag for it
+        assert flags == (["-P"] if sys.version_info >= (3, 11) else [])
+    command = " ".join([shell(folder / "python"), *flags, "-m", "ixel_mat", "mcp"])
+    assert f"claude mcp add --scope user ixel -- {command}" in host_snippets()
 
 
 @pytest.mark.parametrize("flag", ["-I", pytest.param("-P", marks=pytest.mark.skipif(sys.version_info < (3, 11),

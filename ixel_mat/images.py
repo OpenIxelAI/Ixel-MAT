@@ -272,6 +272,8 @@ def save(pictures: list[bytes], folder: Path, stem: str = "image") -> list[Path]
         while True:
             n += 1
             path = folder / f"{stem}-{n}.{image_type(picture)}"
+            if os.path.lexists(path):  # a link counts as taken, even to nothing: Windows' "x" open would follow it
+                continue
             try:
                 with open(path, "xb") as handle:
                     handle.write(picture)

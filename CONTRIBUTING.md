@@ -64,7 +64,8 @@ python -m venv .venv
 .\.venv\Scripts\python scripts\check_windows.py
 ```
 
-Nothing runs the tests for you on GitHub: the workflow runs only when started by hand (**Actions → tests → Run
-workflow**), so run `pytest` before you push.
+On GitHub, every pull request and every push to `main` runs the tests on Linux and Windows (`checks`). The full
+run, with the installers, macOS, the live CLI checks and the browser test, starts only by hand (**Actions → tests →
+Run workflow**). Run `pytest` before you push either way.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the code fits together.
