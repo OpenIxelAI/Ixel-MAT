@@ -845,8 +845,9 @@ class _Reader:
         root = self.xml("content.xml")
         if root is None:
             raise DocumentError(f"{self.name} has no content in it.")
-        body = _child(_child(root, "body"), "text") or _child(_child(root, "body"), "spreadsheet") \
-            or _child(_child(root, "body"), "presentation")
+        body = next((part for part in (_child(_child(root, "body"), kind) for kind in ("text", "spreadsheet",
+                                                                                    "presentation"))
+                     if part is not None), None)  # (an element with nothing in it is false, for now)
         if body is None:
             raise DocumentError(f"{self.name} has no text, sheets or slides in it.")
         kind = _local(body.tag)
