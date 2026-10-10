@@ -16,6 +16,7 @@ authors) isn't read. Text Word hides is kept, marked [hidden text: …], so a mo
 """
 from __future__ import annotations
 
+import codecs
 import io
 import logging
 import posixpath
@@ -473,6 +474,10 @@ class _Reader:
             raise DocumentError(f"{self.name} has no text or pictures Ixel can read.")
         return Document(self.name, self.kind, text + "\n" if text else "", self.images, self.notes)
 
+    def left(self) -> int:
+        """Room left for text: a reader that builds a lot before adding it stops once it has this much."""
+        return max(self.room - self.size, 0)
+
     def run(self, read) -> None:
         """Read, until the text is full."""
         try:
@@ -702,7 +707,7 @@ class _Reader:
             self.where = f"sheet {name}"
             kind, target = rels.get(_rid(sheet), ("", ""))
             root = self.xml(target) if kind == "worksheet" else None
-            rows = []
+            rows, length = [], 0
             for row in _children(_child(root, "sheetData"), "row"):
                 cells: dict[int, str] = {}
                 for cell in _children(row, "c"):
@@ -712,6 +717,9 @@ class _Reader:
                         cells[column] = value
                 if cells:
                     rows.append(" | ".join(cells.get(i, "") for i in range(max(cells) + 1)))
+                    length += len(rows[-1]) + 1
+                    if length > self.left():  # more than will fit: a row can be 16,384 columns wide
+                        break
                 if len(rows) % 200 == 0:
                     self.tick()
             if rows:
@@ -928,23 +936,36 @@ class _Reader:
         return "".join(pieces).strip()
 
     def od_rows(self, table) -> list[str]:
+        """The table's rows, repeats written out, up to a little more than the room left (a cell and a row
+        can each be repeated a thousand times)."""
         rows: list[str] = []
+        room, length = self.left(), 0
         for row in table.iter():
             if _local(row.tag) != "table-row":
                 continue
             cells: list[str] = []
+            wide = 0
             for cell in row:
                 if _local(cell.tag) not in ("table-cell", "covered-table-cell"):
                     continue
                 text = " ".join(self.od_inline(p) for p in cell if _local(p.tag) in ("p", "h"))
                 repeat = _attr(cell, "number-columns-repeated", "1")
                 times = int(repeat) if repeat.isdigit() else 1
-                cells += [text] * (min(times, MAX_REPEAT) if text else min(times, 1))
+                times = min(times, MAX_REPEAT, room // (len(text) + 3) + 1) if text else min(times, 1)
+                cells += [text] * times
+                wide += times * (len(text) + 3)
+                if wide > room:
+                    break
             while cells and not cells[-1]:
                 cells.pop()
             if cells:
+                line = " | ".join(cells)
                 repeat = _attr(row, "number-rows-repeated", "1")
-                rows += [" | ".join(cells)] * min(int(repeat) if repeat.isdigit() else 1, MAX_REPEAT)
+                times = min(int(repeat) if repeat.isdigit() else 1, MAX_REPEAT, room // (len(line) + 1) + 1)
+                rows += [line] * times
+                length += times * (len(line) + 1)
+                if length > room:
+                    break
             if len(rows) % 200 == 0:
                 self.tick()
         return rows
@@ -1066,6 +1087,8 @@ class _Reader:
         stack: list[tuple[bool, bool, int]] = []
         skip, hidden, skip_bytes, uc = False, False, 0, 1
         hidden_text: list[str] = []
+        codepage = "cp1252"   # \ansicpgN says which, for the text written as \'xx bytes
+        held = bytearray()    # those bytes, decoded together: a character can take two (Chinese, Japanese…)
         destinations = {"fonttbl", "colortbl", "stylesheet", "info", "pict", "object", "header", "footer",
                         "headerl", "headerr", "footerl", "footerr", "listtable", "listoverridetable", "rsidtbl",
                         "generator", "themedata", "colorschememapping", "datastore", "latentstyles", "xmlnstbl",
@@ -1073,7 +1096,11 @@ class _Reader:
         pos = 0
 
         def put(piece: str) -> None:
-            (hidden_text if hidden else out).append(piece)
+            if held:  # before what's hidden changes, or anything else is put
+                (hidden_text if hidden else out).append(held.decode(codepage, errors="replace"))
+                held.clear()
+            if piece:
+                (hidden_text if hidden else out).append(piece)
 
         def end_hidden() -> None:
             if hidden_text and "".join(hidden_text).strip():
@@ -1086,6 +1113,8 @@ class _Reader:
             if pos % 5000 == 0:
                 self.tick()
             pos += 1
+            if brace or word == "v":
+                put("")
             if brace == "{":
                 if len(stack) >= MAX_NESTING:
                     raise DocumentError(f"{self.name} is nested too deeply to be a document Ixel reads.")
@@ -1125,6 +1154,11 @@ class _Reader:
                     skip_bytes = uc
                 elif word == "uc" and arg:
                     uc = int(arg)
+                elif word == "ansicpg" and arg:
+                    try:
+                        codepage = codecs.lookup(f"cp{int(arg)}").name
+                    except LookupError:
+                        pass
                 elif word == "v":
                     if arg == "0" and hidden:
                         end_hidden()
@@ -1145,11 +1179,14 @@ class _Reader:
                 elif not skip and symbol == "~":
                     put("\u00a0")
             elif hexed and not skip:
-                put(bytes([int(hexed, 16)]).decode("cp1252", errors="replace"))
+                held.append(int(hexed, 16))
             elif plain and not skip:
                 put(plain)
+        put("")
         end_hidden()
-        self.run(lambda: [self.add(block) for block in re.split(r"\n{2,}", "".join(out))])
+        # An emoji is two \uN, one for each half of its UTF-16 pair: joined here, and a half alone replaced
+        read = "".join(out).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+        self.run(lambda: [self.add(block) for block in re.split(r"\n{2,}", read)])
 
     # Web pages
 

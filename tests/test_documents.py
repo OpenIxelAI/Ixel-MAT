@@ -3,6 +3,7 @@ Documents attached to a question (documents.py): Word, Excel, PowerPoint, OpenDo
 and text, read on this computer into text and pictures, within limits, and nothing in them followed.
 """
 import io
+import time
 import zipfile
 
 import pytest
@@ -229,3 +230,44 @@ def test_hidden_characters_count_as_the_models_see_them():
     line = "می‌خواهم " * 50 + "\n"
     doc = read_document((line * 400).encode(), "fa.txt", max_chars=20_000)
     assert len(mark_hidden_characters(doc.text)) <= 20_000 and "left out" in doc.text
+
+
+def test_a_sheet_of_rows_out_at_its_last_column_stops_once_the_text_is_full():
+    rows = "".join(f'<row r="{i}"><c r="XFD{i}" t="inlineStr"><is><t>x</t></is></c></row>' for i in range(1, 20_001))
+    sheet = ('<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+             f'<sheetData>{rows}</sheetData></worksheet>')
+    data = samples.zipped({
+        "xl/workbook.xml": '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/'
+                           f'2006/main" xmlns:r="{samples.REL}"><sheets><sheet name="S" sheetId="1" r:id="rId1"/>'
+                           '</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": samples._rels([("rId1", "worksheet", "worksheets/sheet1.xml")]),
+        "xl/worksheets/sheet1.xml": sheet})
+    started = time.monotonic()
+    doc = read_document(data, "wide.xlsx")  # (a billion characters built before it was cut, before)
+    assert len(doc.text) <= 60_000 and "left out" in doc.text and time.monotonic() - started < 10
+
+
+def test_repeated_cells_and_rows_of_a_spreadsheet_stop_once_the_text_is_full():
+    ns = ('xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+          'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+          'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"')
+    cell = ('<table:table-cell table:number-columns-repeated="1000"><text:p>' + "w" * 5000
+            + '</text:p></table:table-cell>')
+    row = f'<table:table-row table:number-rows-repeated="1000">{cell * 50}</table:table-row>'
+    content = (f'<?xml version="1.0"?><office:document-content {ns}><office:body><office:spreadsheet>'
+               f'<table:table table:name="S">{row * 20}</table:table></office:spreadsheet></office:body>'
+               '</office:document-content>')
+    data = samples.zipped({"mimetype": "application/vnd.oasis.opendocument.spreadsheet", "content.xml": content})
+    started = time.monotonic()
+    doc = read_document(data, "repeats.ods")  # (a million copies of 5,000 characters, before)
+    assert len(doc.text) <= 60_000 and "w" * 5000 in doc.text and time.monotonic() - started < 10
+
+
+def test_rtf_emoji_and_code_pages_come_through_as_written():
+    doc = read_document(rb"{\rtf1\ansi Done \u-10179?\u-8704? and a half \u-10179?alone}", "e.rtf")
+    assert "Done 😀 and a half �alone" in doc.text
+    doc.text.encode("utf-8")  # what a program reading its question on stdin is sent
+    doc = read_document(rb"{\rtf1\ansi\ansicpg1251 \'cf\'f0\'e8\'e2\'e5\'f2{\v \'f1\'e5\'ea\'f0\'e5\'f2}}", "ru.rtf")
+    assert "Привет" in doc.text and "[hidden text: секрет]" in doc.text
+    doc = read_document(rb"{\rtf1\ansi\ansicpg936 \'c4\'e3\'ba\'c3}", "zh.rtf")  # two bytes a character
+    assert "你好" in doc.text

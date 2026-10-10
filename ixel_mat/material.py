@@ -469,7 +469,7 @@ def read_files(paths: list[str], cwd: str | os.PathLike | None = None, room: int
     if not paths:
         raise MaterialError("Name at least one file.")
     base = Path(cwd or os.getcwd())
-    found = []  # (given, name, kind, bytes or text): each file read and sorted first
+    found = []  # (given, name, kind, data): each file sorted first; data is code's text, or a path to read later
     for given in paths:
         try:
             path = Path(given).expanduser()
@@ -489,7 +489,8 @@ def read_files(paths: list[str], cwd: str | os.PathLike | None = None, room: int
                 raise MaterialError(f"{given} is too big to review ({size:,} bytes"
                                     + (f"; a document can be up to {megabytes(limit)})." if kind == "document"
                                        else ")."))
-            data = path.read_bytes()
+            # Pictures and documents are read one at a time below, so twenty big ones aren't all held at once
+            data = path.read_bytes() if kind == "code" else path
         except (OSError, RuntimeError) as exc:  # locked, no permission, ~nosuchuser
             raise MaterialError(f"{given}: couldn't read it ({getattr(exc, 'strerror', None) or exc}).") from None
         try:
@@ -513,6 +514,12 @@ def read_files(paths: list[str], cwd: str | os.PathLike | None = None, room: int
     parts, notes, pictures = [], [], []
     for given, name, kind, data in found:
         held = sum(len(p.data) for p in pictures)
+        if isinstance(data, Path):
+            try:
+                data = data.read_bytes()
+            except (OSError, RuntimeError) as exc:
+                raise MaterialError(f"{given}: couldn't read it ({getattr(exc, 'strerror', None) or exc}).") \
+                    from None
         if kind == "code":
             parts.append(data)
         elif kind == "picture":
