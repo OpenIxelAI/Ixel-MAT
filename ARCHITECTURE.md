@@ -159,26 +159,30 @@ only see the question; `ReviewResult.material` records its title, files and size
 secret-looking material before any model is called. Every front end goes through `code_for_review()`, which
 does both and fills in the default question when there's code and no question.
 
-**Documents:** `read_files` reads a document (`documents.is_document`: .docx, .xlsx, .pptx, .odt, .pdf, .rtf,
-.html…) into its text with `documents.read_document`, in what room is left of `MAX_MATERIAL_CHARS`, under a
-`=== name (kind) ===` line, and a picture file (.png, .jpg) with `read_picture`. A document's own pictures
+**Documents:** `read_files` reads a document (`documents.is_document`: .docx, .xlsx, .pptx, .odt, .pdf,
+.rtf…) into its text with `documents.read_document`, in what room is left of `MAX_MATERIAL_CHARS` once the
+code files and pictures named with it are counted (as the models see it, hidden characters marked), under a
+`=== name (kind) ===` line, and a picture file (.png, .jpg) with `read_picture`. A web page named with
+`--file` is code, kept as written; dropped in the app, it's read as a page. A document's own pictures
 become `Material.pictures` (`documents.pictures_of`: PNG and JPEG, numbered `[Picture N]` in the text as
 they're sent), and `run_review` and `ask` send them first, before the question's own. The app posts a
 document to `POST /api/documents` (application/octet-stream, a counted 50 MB cap; `?room=`, `?first=` and
 `?fit=` say how much text and how many pictures still fit), which returns its text, for the page to put in
 the attached text, and its pictures (`documents.numbered`), which the page makes smaller and attaches like
-any other. Old Office files (.doc, .xls, .ppt) are refused with a word on saving them in the new format.
+any other. Old Office files (.doc, .xls, .ppt) are refused with a word on saving them in the new format,
+and so is a file whose name says it holds keys (`credential_file`). A file that can't be read for any other
+reason (damaged, nested too deeply, an XML encoding Python lacks) is a `DocumentError`, never a crash.
 
 **Pictures:** `run_review(…, pictures=[Picture])` gives them to every call to an agent whose
 `AgentConfig.sees_pictures` (`accepts`, else for an HTTP agent the four big APIs, and for a program one whose
 config says how it takes pictures and that runs in its own temp folder); the others' prompts start by saying
 there are pictures they can't see. `HttpAgent` sends them as OpenAI `image_url` parts or Anthropic image
 blocks, and when the API refuses them (400, 413, 415, 422) asks again without them, for the rest of the run.
-`OneShotAgent` writes them into the run's temp folder (`ixel-picture-1.png`…, owner-only, removed with the
-folder) and gives them to the program as its preset says: `picture_args` once per picture (Codex
-`--image NAME`, Copilot `--attachment PATH`, OpenCode `-f PATH`), `picture_prompt` before the question
-(Gemini CLI's `@NAME`), or `picture_stdin = "claude-stream-json"` (Claude Code: `--input-format stream-json`,
-with the pictures as image blocks in the question's message). `tests/test_cli_presets_live.py` checks each
+`OneShotAgent` gives them to the program as its preset says: written into the run's temp folder
+(`ixel-picture-1.png`…, owner-only, removed with the folder) and named by `picture_args` once per picture
+(Codex `--image NAME`, Copilot `--attachment PATH`, OpenCode `-f PATH`) or `picture_prompt` before the
+question (Gemini CLI's `@NAME`), or with no file at all by `picture_stdin = "claude-stream-json"` (Claude
+Code: `--input-format stream-json`, with the pictures as image blocks in the question's message). `tests/test_cli_presets_live.py` checks each
 program's picture reaches the model with the program still answer-only. The app uploads each one to `POST /api/pictures` (its own body, read with a counted 3.9 MB cap; every
 other route keeps 512 KB) and names their ids in `/api/review`.
 

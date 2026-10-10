@@ -89,7 +89,8 @@ def test_no_more_than_a_question_takes(tmp_path, monkeypatch):
     from ixel_mat import pictures
     monkeypatch.setattr(pictures, "MAX_PER_QUESTION_BYTES", 2 * len(read_picture(samples.png()).data) + 1)
     found = read_files(names[:4])
-    assert len(found.pictures) == 2 and any("Pictures 3 to 4 left out" in note for note in found.notes)
+    assert len(found.pictures) == 2 and any("p3.png left out" in note for note in found.notes)
+    assert "Picture 3" not in found.text  # numbered only when it's sent
 
 
 def test_documents_share_the_panels_room(tmp_path):
@@ -245,3 +246,34 @@ def test_a_preset_brings_its_picture_settings_and_your_config_is_checked():
     assert (mine.picture_args, mine.picture_prompt, mine.picture_stdin) == (None, "", "")
     assert not mine.sees_pictures
     assert len([w for w in warnings if "picture_" in w]) == 3
+
+
+def test_a_web_page_named_with_file_is_code_to_review_as_it_is(tmp_path):
+    (tmp_path / "index.html").write_text("<p>Hello</p><script>document.write(location.hash)</script>\n")
+    found = read_files(["index.html"], cwd=tmp_path)
+    assert "<script>document.write(location.hash)</script>" in found.text and not found.documents
+
+
+def test_code_named_after_a_document_still_fits(tmp_path):
+    lines = "".join(f"<w:p><w:r><w:t>{'line of text ' * 20}</w:t></w:r></w:p>" for _ in range(400))
+    (tmp_path / "long.docx").write_bytes(samples.docx(lines))
+    (tmp_path / "main.py").write_text("print('hi')\n" * 400)
+    material = check(read_files(["long.docx", "main.py"], cwd=tmp_path))  # (over the limit, before)
+    assert material.text.index("long.docx") < material.text.index("main.py")  # in the order named
+    assert "print('hi')\n" * 400 in material.text
+
+
+def test_pasted_code_leaves_the_documents_less_room(tmp_path, monkeypatch):
+    lines = "".join(f"<w:p><w:r><w:t>{'line of text ' * 20}</w:t></w:r></w:p>" for _ in range(400))
+    (tmp_path / "long.docx").write_bytes(samples.docx(lines))
+    monkeypatch.chdir(tmp_path)
+    material, _ = code_for_review("q", files=["long.docx"], code="x = 1\n" * 5000)
+    assert len(material.text) <= 60_000 and "x = 1\n" * 5000 in material.text
+
+
+def test_a_secrets_file_is_refused_whatever_ixel_adds_to_its_name():
+    from ixel_mat.material import pasted
+    for header in ("=== .env (text file) ===", "=== id_rsa: Picture 1 ===", "=== keys/.env ==="):
+        with pytest.raises(MaterialError, match="looks like a secrets file"):
+            check(pasted(f"{header}\nDB_PASSWORD=hunter2\n"))
+    check(pasted("=== report (final).txt ===\nfine\n"))

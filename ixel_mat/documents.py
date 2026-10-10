@@ -41,6 +41,8 @@ MAX_ZIP_PARTS = 10_000
 MAX_ZIP_UNPACKED = 512 * 1024 * 1024    # all parts, as the file declares them
 MAX_PART_BYTES = 32 * 1024 * 1024       # one XML part read whole
 MAX_PDF_PAGES = 2_000
+EXCEL_COLUMNS = 16_384                  # A to XFD
+MAX_NESTING = 500                       # groups inside groups (RTF)
 MAX_REPEAT = 1_000                      # a repeated row or cell in an OpenDocument spreadsheet, written at most
 
 # What a browser shows, so the Ixel window can turn it into a PNG or JPEG
@@ -127,34 +129,45 @@ def read_document(data: bytes, name: str, *, max_chars: int = MAX_TEXT_CHARS) ->
                             f".{'docx' if OLD_OFFICE[ext] == 'Word' else 'xlsx' if OLD_OFFICE[ext] == 'Excel' else 'pptx'}"
                             " (File > Save As) and attach that.")
     reader = _Reader(name, max_chars)
-    if ext == ".pdf" or data.startswith(b"%PDF-"):
-        reader.pdf(data)
-    elif ext in WORD | EXCEL | POWERPOINT | OPENDOCUMENT:
-        reader.package(data, ext)
-    elif ext == ".rtf" or data.startswith(b"{\\rtf"):
-        reader.rtf(data)
-    elif ext in WEB:
-        reader.kind = "web page"
-        reader.html(_decode(data, name))
-    else:
-        reader.kind = "text file"
-        text = _decode(data, name).replace("\r\n", "\n")
-        reader.run(lambda: reader.add(text))
-    return reader.document()
+    try:
+        if ext == ".pdf" or data.startswith(b"%PDF-"):
+            reader.pdf(data)
+        elif ext in WORD | EXCEL | POWERPOINT | OPENDOCUMENT:
+            reader.package(data, ext)
+        elif ext == ".rtf" or data.startswith(b"{\\rtf"):
+            reader.rtf(data)
+        elif ext in WEB:
+            reader.kind = "web page"
+            reader.html(_decode(data, name))
+        else:
+            reader.kind = "text file"
+            text = _decode(data, name).replace("\r\n", "\n")
+            reader.run(lambda: reader.add(text))
+        return reader.document()
+    except DocumentError:
+        raise
+    except RecursionError:  # parts inside parts, a thousand deep: no document is
+        raise DocumentError(f"{name} is nested too deeply to be a document Ixel reads.") from None
+    except MemoryError:
+        raise DocumentError(f"{name} is too big to read.") from None
+    except Exception:  # noqa: BLE001 — a damaged or unusual file is something to tell the person, never a crash
+        raise DocumentError(f"{name} couldn't be read: it may be damaged. Try saving it again, or as a PDF.") \
+            from None
 
 
-def pictures_of(document: Document, room: int = MAX_IMAGES, first: int = 1):
+def pictures_of(document: Document, room: int = MAX_IMAGES, first: int = 1, max_bytes: int | None = None):
     """
     The document's PNG and JPEG pictures as pictures.Picture (cleaned of their metadata, as every picture
-    Ixel sends is), up to room of them, with a note for each kind left out, and its text with the pictures
-    numbered from first on, as they're sent (one left out says so). For the command line: the Ixel window
-    converts the other kinds, and shrinks big ones, before they're sent. → (pictures, notes, text)
+    Ixel sends is), up to room of them and max_bytes in all, with a note for each kind left out, and its text
+    with the pictures numbered from first on, as they're sent (one left out says so). For the command line:
+    the Ixel window converts the other kinds, and shrinks big ones, before they're sent. → (pictures, notes, text)
     """
-    from ixel_mat.pictures import MAX_BYTES, PictureError, megabytes, read_picture
-    found, notes, other, too_big, many = [], [], 0, 0, 0
+    from ixel_mat.pictures import MAX_BYTES, MAX_PER_QUESTION_BYTES, PictureError, megabytes, read_picture
+    max_bytes = MAX_PER_QUESTION_BYTES if max_bytes is None else max_bytes
+    found, notes, other, too_big, many, over = [], [], 0, 0, 0, 0
     numbers: dict[str, str] = {}
     for i, image in enumerate(document.images, 1):
-        numbers[str(i)] = "[picture left out]"
+        numbers[str(i)] = _LEFT_OUT
         if image.media_type not in ("image/png", "image/jpeg"):
             other += 1
             continue
@@ -165,10 +178,14 @@ def pictures_of(document: Document, room: int = MAX_IMAGES, first: int = 1):
             many += 1
             continue
         try:
-            found.append(read_picture(image.data))
+            picture = read_picture(image.data)
         except PictureError:
             other += 1
             continue
+        if sum(len(p.data) for p in found) + len(picture.data) > max_bytes:
+            over += 1
+            continue
+        found.append(picture)
         numbers[str(i)] = f"[Picture {first + len(found) - 1}]"
     if too_big:
         notes.append(f"{document.name}: {_count(too_big, 'picture')} over {megabytes(MAX_BYTES)} left out "
@@ -178,11 +195,34 @@ def pictures_of(document: Document, room: int = MAX_IMAGES, first: int = 1):
                      "(the Ixel window converts them).")
     if many:
         notes.append(f"{document.name}: {_count(many, 'picture')} left out (a question takes at most {MAX_IMAGES}).")
+    if over:
+        notes.append(f"{document.name}: {_count(over, 'picture')} left out: with them, the question's pictures "
+                     f"would be over {megabytes(MAX_PER_QUESTION_BYTES)}, more than a model takes at once.")
     text = _PICTURE.sub(lambda m: numbers.get(m.group(1), m.group(0)), document.text)
     return found, notes, text
 
 
 _PICTURE = re.compile(r"\[Picture (\d+)\]")
+_LEFT_OUT = "[picture left out]"  # in place of a [Picture N] that isn't sent: the reader leaves room for it
+
+
+def shown(text: str) -> int:
+    """How long text is as the models see it, hidden characters shown as [U+…]: what the panel's limit counts
+    (material.check)."""
+    from ixel_mat.material import mark_hidden_characters
+    return len(mark_hidden_characters(text))
+
+
+def _fitting(text: str, room: int) -> str:
+    """The longest start of text that's at most room long as the models see it."""
+    low, high = 0, max(min(len(text), room), 0)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if shown(text[:middle]) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low]
 
 
 def numbered(document: Document, first: int = 1, room: int = MAX_IMAGES, max_bytes: int = 64 * 1024 * 1024):
@@ -191,18 +231,23 @@ def numbered(document: Document, first: int = 1, room: int = MAX_IMAGES, max_byt
     numbered from first on, as they'll be attached, the first room of them (and no more than max_bytes in
     all), and a note if the rest are left out. → (text, images, notes)
     """
-    images, numbers, size = [], {}, 0
+    images, numbers, size, many, over = [], {}, 0, 0, 0
     for i, image in enumerate(document.images, 1):
-        if len(images) < max(room, 0) and size + len(image.data) <= max_bytes:
+        numbers[str(i)] = _LEFT_OUT
+        if len(images) >= max(room, 0):
+            many += 1
+        elif size + len(image.data) > max_bytes:
+            over += 1
+        else:
             images.append(image)
             size += len(image.data)
             numbers[str(i)] = f"[Picture {first + len(images) - 1}]"
-        else:
-            numbers[str(i)] = "[picture left out]"
     notes = []
-    if len(images) < len(document.images):
-        notes.append(f"{document.name}: {_count(len(document.images) - len(images), 'picture')} left out "
-                     f"(a question takes at most {MAX_IMAGES}).")
+    if many:
+        notes.append(f"{document.name}: {_count(many, 'picture')} left out (a question takes at most {MAX_IMAGES}).")
+    if over:
+        notes.append(f"{document.name}: {_count(over, 'picture')} left out: together they're over "
+                     f"{_mb(max_bytes)}.")
     return _PICTURE.sub(lambda m: numbers.get(m.group(1), m.group(0)), document.text), images, notes
 
 
@@ -273,6 +318,8 @@ def _xml(data: bytes, part: str) -> ET.Element:
         return ET.fromstring(data)
     except ET.ParseError as exc:
         raise DocumentError(f"Part of this file is damaged ({part}: {exc}).") from None
+    except (ValueError, LookupError):  # an encoding Python doesn't have, or can't parse with
+        raise DocumentError(f"Part of this file ({part}) is in an encoding Ixel can't read.") from None
 
 
 def image_size(data: bytes) -> tuple[str, int, int]:
@@ -339,7 +386,9 @@ class _Reader:
         self.max_chars = max_chars
         self.end = (f"\n\n[… the rest of {name} was left out: the panel reads up to {MAX_TEXT_CHARS:,} "
                     "characters.]")
-        self.room = max(max_chars - len(self.end) - 1, 0)  # for the text, leaving room for the line that ends it
+        # For the text, leaving room for the line that ends it. Counted as the models will see it (shown(): hidden
+        # characters as [U+…]), which is how the panel's limit is checked
+        self.room = max(max_chars - shown(self.end) - 1, 0)
         self.parts: list[str] = []
         self.size = 0
         self.where = ""          # the page, slide or sheet being read, for a note if the text is cut there
@@ -360,18 +409,19 @@ class _Reader:
         if not text.strip():
             return
         room = self.room - self.size
-        if len(text) + 2 > room:
-            cut = text[:max(room, 0)]
+        size = shown(text) + 2
+        if size > room:
+            cut = _fitting(text, room - 2)
             line = cut.rfind("\n")
             if line > len(cut) * 0.6:
                 cut = cut[:line]
             if cut.strip():
                 self.parts.append(cut.rstrip())
-            self.size = sum(len(p) + 2 for p in self.parts)
+                self.size += shown(self.parts[-1]) + 2
             self.cut = True
             raise _Full
         self.parts.append(text)
-        self.size += len(text) + 2
+        self.size += size
 
     def tick(self) -> None:
         if time.monotonic() - self.started > MAX_SECONDS:
@@ -397,15 +447,16 @@ class _Reader:
             self.left_out["many"] += 1
             return "[picture left out]"
         self.images.append(Image(data, IMAGE_TYPES[kind], width, height, where or self.where))
+        self.size += len(_LEFT_OUT) - len("[Picture 1]")  # room for it to say it was left out, if it is
         return f"[Picture {len(self.images)}]"
 
     def document(self) -> Document:
         text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(self.parts)).strip()
         if self.cut and text:
             where = f" It stops partway through {self.where}{self.of}." if self.where else ""
+            self.notes.append(f"{self.name}: only the first {len(text):,} characters fit (the panel reads up to "
+                              f"{MAX_TEXT_CHARS:,} in all).{where}")
             text += self.end
-            self.notes.append(f"{self.name}: only the first {len(text) - len(self.end):,} characters fit (the "
-                              f"panel reads up to {MAX_TEXT_CHARS:,} in all).{where}")
         elif self.cut and self.images:
             self.notes.append(f"{self.name}: its text left out, as there was no room for it (the panel reads up "
                               f"to {MAX_TEXT_CHARS:,} characters in all).")
@@ -463,8 +514,7 @@ class _Reader:
         self.tick()
         if info.file_size > cap:
             raise DocumentError(f"Part of {self.name} ({name}) is {_mb(info.file_size)} unpacked, too big to read.")
-        self.unpacked += info.file_size
-        if self.unpacked > MAX_ZIP_UNPACKED:
+        if self.unpacked + info.file_size > MAX_ZIP_UNPACKED:
             raise DocumentError(f"{self.name} unpacks to far more than a document does, so it isn't read.")
         try:
             with self.zip.open(info) as handle:
@@ -476,6 +526,9 @@ class _Reader:
             raise DocumentError(f"Part of {self.name} ({name}) is damaged.") from None
         if len(data) > cap:  # it said it was smaller
             raise DocumentError(f"Part of {self.name} ({name}) is too big to read.")
+        self.unpacked += len(data)  # what it really was, whatever the zip said
+        if self.unpacked > MAX_ZIP_UNPACKED:
+            raise DocumentError(f"{self.name} unpacks to far more than a document does, so it isn't read.")
         return data
 
     def xml(self, name: str) -> ET.Element | None:
@@ -654,8 +707,9 @@ class _Reader:
                 cells: dict[int, str] = {}
                 for cell in _children(row, "c"):
                     value = self._excel_value(cell, shared, dates, base1904)
-                    if value:
-                        cells[_column(_attr(cell, "r")) if _attr(cell, "r") else len(cells)] = value
+                    column = _column(_attr(cell, "r")) if _attr(cell, "r") else len(cells)
+                    if value and column < EXCEL_COLUMNS:  # past Excel's last column, XFD, a cell is made up
+                        cells[column] = value
                 if cells:
                     rows.append(" | ".join(cells.get(i, "") for i in range(max(cells) + 1)))
                 if len(rows) % 200 == 0:
@@ -964,6 +1018,7 @@ class _Reader:
         except Exception:  # noqa: BLE001
             return found
         for name in list(objects or {})[:200]:
+            self.tick()
             try:
                 image = objects[name].get_object()
                 subtype = image.get("/Subtype")
@@ -990,6 +1045,9 @@ class _Reader:
                         or any(f not in ("/FlateDecode", "/LZWDecode", "/RunLengthDecode") for f in filters) \
                         or width * height > MAX_IMAGE_PIXELS:
                     self.left_out["kind"] += 1
+                    continue
+                if filters == ["/FlateDecode"] and not _inflates_within(image, height * (width * components + 1)):
+                    self.left_out["big"] += 1  # it unpacks to far more than its size says: left out unread
                     continue
                 pixels = image.get_data()
                 if len(pixels) < width * height * components:
@@ -1029,6 +1087,8 @@ class _Reader:
                 self.tick()
             pos += 1
             if brace == "{":
+                if len(stack) >= MAX_NESTING:
+                    raise DocumentError(f"{self.name} is nested too deeply to be a document Ixel reads.")
                 stack.append((skip, hidden, uc))
                 continue
             if brace == "}":
@@ -1100,10 +1160,24 @@ class _Reader:
         self.run(lambda: [self.add(block) for block in re.split(r"\n{2,}", parser.text())])
 
 
+def _inflates_within(stream, limit: int) -> bool:
+    """Whether a PDF's Flate-packed stream unpacks to about limit bytes or fewer, found out without unpacking
+    more than that: a picture a few pixels big can say so and unpack to gigabytes."""
+    raw = getattr(stream, "_data", None)  # as it's stored in the file
+    if not isinstance(raw, bytes):
+        return True  # pypdf's own cap (75 MB a stream) still holds
+    inflater = zlib.decompressobj()
+    try:
+        inflater.decompress(raw, limit + 4096)
+    except zlib.error:
+        return True  # damaged: pypdf finds that out, within its own limits
+    return not inflater.unconsumed_tail
+
+
 def _column(ref: str) -> int:
-    """A1's column as a number from 0."""
+    """A1's column as a number from 0 (EXCEL_COLUMNS or more for one past Excel's last)."""
     n = 0
-    for letter in re.match(r"[A-Za-z]*", ref).group().upper():
+    for letter in re.match(r"[A-Za-z]{0,4}", ref).group().upper():
         n = n * 26 + ord(letter) - 64
     return max(n - 1, 0)
 

@@ -140,6 +140,8 @@ def credential_file(name: str) -> bool:
 
 # Where a diff names a file: the new name, and the old one of a rename, copy or deletion
 _DIFF_NAME = re.compile(r"(?:=== (.+) ===|\+\+\+ b/(.+)|--- a/(.+)|rename from (.+)|copy from (.+))$")
+# What follows a file's name in its === line: its kind (a document's), or which picture it is
+_HEADER_SAYS = re.compile(r" \([^()]*\)(?::.*)?$|: Picture \d+$")
 
 
 def mask_secrets(text: str, also: Iterable[str] = ()) -> str:
@@ -163,8 +165,9 @@ def find_secret(material: Material) -> str | None:
         header = _DIFF_NAME.match(line)
         if header:
             name = next(g for g in header.groups() if g)
-            if secret_file(name):
-                return f"{name} looks like a secrets file"
+            plain = _HEADER_SAYS.sub("", name)  # "notes.env (text file)": what Ixel adds to a file's name
+            if secret_file(name) or secret_file(plain):
+                return f"{plain} looks like a secrets file"
             if not line.startswith(("rename from", "copy from")):
                 current = name
             continue
@@ -453,19 +456,20 @@ def _new_files(top: str, names: list[str], room: int) -> tuple[str, list[str]]:
     return "".join(parts), left_out
 
 
-def read_files(paths: list[str], cwd: str | os.PathLike | None = None) -> Material:
-    """Files you name, read as they are on disk: code and text as they are, documents (Word, PDF, Excel,
-    PowerPoint…) as their text (documents.py), and pictures (PNG or JPEG, and the ones in documents) for the
-    models that see pictures."""
+def read_files(paths: list[str], cwd: str | os.PathLike | None = None, room: int = MAX_MATERIAL_CHARS) -> Material:
+    """Files you name, read as they are on disk: code and text (web pages too) as they are, documents (Word,
+    PDF, Excel, PowerPoint…) as their text (documents.py), and pictures (PNG or JPEG, and the ones in
+    documents) for the models that see pictures. Documents get the room the code and text leave of room
+    (characters as the models see them), and are cut to fit."""
     from ixel_mat import documents
     from ixel_mat.pictures import (MAX_BYTES, MAX_PER_QUESTION, MAX_PER_QUESTION_BYTES, PictureError, megabytes,
                                    read_picture)
     if len(paths) > MAX_FILES:
         raise MaterialError(f"That's {len(paths)} files; up to {MAX_FILES} at a time.")
+    if not paths:
+        raise MaterialError("Name at least one file.")
     base = Path(cwd or os.getcwd())
-    parts, names, notes, pictures = [], [], [], []
-    code = False
-    room = MAX_MATERIAL_CHARS
+    found = []  # (given, name, kind, bytes or text): each file read and sorted first
     for given in paths:
         try:
             path = Path(given).expanduser()
@@ -473,14 +477,18 @@ def read_files(paths: list[str], cwd: str | os.PathLike | None = None) -> Materi
             if not path.is_file():
                 raise MaterialError(f"{given}: {'is a folder, not a file' if path.is_dir() else 'no such file'}.")
             size = path.stat().st_size
-            picture, document = documents.is_picture(path.name), documents.is_document(path.name)
-            limit = MAX_BYTES if picture else documents.MAX_FILE_BYTES if document else MAX_MATERIAL_CHARS * 4
-            if size > limit and picture:
+            # A web page is code to review here, as it is: the Ixel window reads one as a page
+            kind = "picture" if documents.is_picture(path.name) else \
+                "document" if documents.is_document(path.name) and documents.suffix(path.name) not in documents.WEB \
+                else "code"
+            limit = {"picture": MAX_BYTES, "document": documents.MAX_FILE_BYTES}.get(kind, MAX_MATERIAL_CHARS * 4)
+            if size > limit and kind == "picture":
                 raise MaterialError(f"{given} is too big to send ({megabytes(size)}; a picture can be up to "
                                     f"{megabytes(limit)}). The Ixel window makes big pictures smaller.")
             if size > limit:
                 raise MaterialError(f"{given} is too big to review ({size:,} bytes"
-                                    + (f"; a document can be up to {megabytes(limit)})." if document else ")."))
+                                    + (f"; a document can be up to {megabytes(limit)})." if kind == "document"
+                                       else ")."))
             data = path.read_bytes()
         except (OSError, RuntimeError) as exc:  # locked, no permission, ~nosuchuser
             raise MaterialError(f"{given}: couldn't read it ({getattr(exc, 'strerror', None) or exc}).") from None
@@ -488,59 +496,63 @@ def read_files(paths: list[str], cwd: str | os.PathLike | None = None) -> Materi
             name = str(path.resolve().relative_to(base.resolve())).replace("\\", "/")
         except (ValueError, OSError):
             name = str(given)
-        names.append(name)
-        if picture:
+        if kind == "code" and data.startswith(b"%PDF-"):
+            kind = "document"
+        if kind == "code":
+            if data.startswith((b"\xff\xfe", b"\xfe\xff")):  # UTF-16, as PowerShell 5.1 writes
+                text = data.decode("utf-16", errors="replace")
+            elif b"\0" in data[:8192]:
+                raise MaterialError(f"{given} looks like a binary file, not code or a document Ixel reads.")
+            else:
+                text = data.decode("utf-8-sig", errors="replace")
+            data = f"=== {name} ===\n{text.replace(chr(13) + chr(10), chr(10))}"
+        found.append((given, name, kind, data))
+    # What the code and text, and the pictures' lines, take: documents get the rest
+    room -= sum(len(mark_hidden_characters(data)) + 2 for _, _, kind, data in found if kind == "code")
+    room -= sum(len(f"=== {name}: Picture 8 ===") + 2 for _, name, kind, _ in found if kind == "picture")
+    parts, notes, pictures = [], [], []
+    for given, name, kind, data in found:
+        held = sum(len(p.data) for p in pictures)
+        if kind == "code":
+            parts.append(data)
+        elif kind == "picture":
             if len(pictures) >= MAX_PER_QUESTION:
                 notes.append(f"{name} left out: a question takes at most {MAX_PER_QUESTION} pictures.")
                 continue
             try:
-                pictures.append(read_picture(data))
+                picture = read_picture(data)
             except PictureError as exc:
                 raise MaterialError(f"{given}: {exc}") from None
+            if held + len(picture.data) > MAX_PER_QUESTION_BYTES:
+                notes.append(f"{name} left out: with it, the pictures would be over "
+                             f"{megabytes(MAX_PER_QUESTION_BYTES)}, more than a model takes in one question.")
+                continue
+            pictures.append(picture)
             parts.append(f"=== {name}: Picture {len(pictures)} ===")
-            room -= len(parts[-1]) + 2
-            continue
-        if document or data.startswith(b"%PDF-"):
-            if room < 500:
+        else:
+            header = f"=== {name} (document) ==="
+            fits = room - len(mark_hidden_characters(header)) - 30  # its kind, said in the header, is a few more
+            if fits < 500:
                 notes.append(f"{name} left out: there was no room left for it (the panel reads up to "
                              f"{MAX_MATERIAL_CHARS:,} characters).")
                 continue
             try:
-                found = documents.read_document(data, path.name, max_chars=room - len(name) - 40)
+                document = documents.read_document(data, Path(name).name, max_chars=fits)
             except documents.DocumentError as exc:
                 raise MaterialError(str(exc)) from None
-            taken, more, text = documents.pictures_of(found, MAX_PER_QUESTION - len(pictures), len(pictures) + 1)
+            taken, more, text = documents.pictures_of(document, MAX_PER_QUESTION - len(pictures), len(pictures) + 1,
+                                                      MAX_PER_QUESTION_BYTES - held)
             pictures += taken
-            notes += found.notes + more
+            notes += document.notes + more
             if text:
-                parts.append(f"=== {name} ({found.kind}) ===\n{text}")
+                parts.append(f"=== {name} ({document.kind}) ===\n{text}")
             else:
                 numbers = (f"Picture {len(pictures)}" if len(taken) == 1 else
                            f"Pictures {len(pictures) - len(taken) + 1} to {len(pictures)}" if taken else "none sent")
-                parts.append(f"=== {name} ({found.kind}): no text, only pictures ({numbers}) ===")
-            room -= len(parts[-1]) + 2
-            continue
-        code = True
-        if data.startswith((b"\xff\xfe", b"\xfe\xff")):  # UTF-16, as PowerShell 5.1 writes
-            text = data.decode("utf-16", errors="replace")
-        elif b"\0" in data[:8192]:
-            raise MaterialError(f"{given} looks like a binary file, not code or a document Ixel reads.")
-        else:
-            text = data.decode("utf-8-sig", errors="replace")
-        parts.append(f"=== {name} ===\n{text.replace(chr(13) + chr(10), chr(10))}")
-        room -= len(parts[-1]) + 2
-    if not names:
-        raise MaterialError("Name at least one file.")
-    total = 0
-    for i, picture in enumerate(pictures):
-        total += len(picture.data)
-        if total > MAX_PER_QUESTION_BYTES:
-            notes.append(f"Pictures {i + 1} to {len(pictures)} left out: together the pictures are over "
-                         f"{megabytes(MAX_PER_QUESTION_BYTES)}, more than a model takes in one question.")
-            pictures = pictures[:i]
-            break
-    return Material(title="files the user chose", text="\n\n".join(parts), files=names, notes=notes,
-                    pictures=pictures, documents=not code)
+                parts.append(f"=== {name} ({document.kind}): no text, only pictures ({numbers}) ===")
+            room -= len(mark_hidden_characters(parts[-1])) + 2
+    return Material(title="files the user chose", text="\n\n".join(parts), files=[n for _, n, _, _ in found],
+                    notes=notes, pictures=pictures, documents=all(kind != "code" for _, _, kind, _ in found))
 
 
 def combine(*materials: Material | None) -> Material | None:
@@ -566,8 +578,9 @@ def code_for_review(question: str, diff: str | None = None, base: str | None = N
     typed = pasted(code, code_title) if code and code.strip() else None
     if typed is not None:
         typed.documents = documents
-    material = combine(git_diff(diff, base, new_files=new_files, head_ref=head) if diff else None,
-                       read_files(files) if files else None, typed)
+    changes = git_diff(diff, base, new_files=new_files, head_ref=head) if diff else None
+    room = MAX_MATERIAL_CHARS - sum(len(mark_hidden_characters(m.text)) + 2 for m in (changes, typed) if m)
+    material = combine(changes, read_files(files, room=room) if files else None, typed)
     if material is None:
         return None, question
     check(material, allow_secrets=allow_secrets)

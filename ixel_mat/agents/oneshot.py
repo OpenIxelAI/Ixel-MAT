@@ -384,7 +384,10 @@ class OneShotAgent(BaseAgent):
             output_dir = cwd if remove_cwd else tempfile.mkdtemp(prefix="ixel-out-")
             output_file = os.path.join(output_dir, "answer.txt")
         try:
-            written = _write_pictures(cwd, pictures) if pictures else None
+            if pictures and self.config.picture_stdin:  # in the question's own message: no files
+                written = [("", picture) for picture in pictures]
+            else:
+                written = _write_pictures(cwd, pictures) if pictures else None
             cmd, stdin_data = self._build_command(message, output_file, effort, args, written)
             try:
                 cmd = resolve_argv(cmd)

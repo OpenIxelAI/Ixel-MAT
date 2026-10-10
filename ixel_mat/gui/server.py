@@ -54,7 +54,7 @@ from ixel_mat.modes.review import MAX_EARLIER_TURNS, MAX_PANEL, EarlierTurn, run
 from ixel_mat.runtime import (MODE_CHOICES, choose_mode, connect_agents, disconnect_agents, load_settings,
                               local_agent_names)
 from ixel_mat.config.secrets import keys_withheld, load_env, where_keys_are
-from ixel_mat.material import MAX_MATERIAL_CHARS, Material, MaterialError, code_for_review
+from ixel_mat.material import MAX_MATERIAL_CHARS, Material, MaterialError, code_for_review, credential_file
 from ixel_mat.sanitize import sanitize_terminal_text
 
 logger = logging.getLogger("ixel_mat.gui")
@@ -1041,6 +1041,9 @@ class GuiServer:
             except ValueError:
                 return default
         name = re.sub(r"[\x00-\x1f\x7f]", "", request.query.get("name", ""))[:200].strip() or "document"
+        if credential_file(name):  # .env, id_rsa, credentials.json…: never read, so never sent
+            return _json_error(400, f"{name} looks like a file of keys or logins, so Ixel doesn't attach it. Copy "
+                                    "in only the part you mean to send, without its secrets.")
         room = number("room", MAX_MATERIAL_CHARS, MAX_MATERIAL_CHARS)
         first = max(number("first", 1, pictures.MAX_PER_QUESTION), 1)
         fit = number("fit", pictures.MAX_PER_QUESTION, pictures.MAX_PER_QUESTION)

@@ -1300,11 +1300,7 @@ async function ask() {
     voice.warned = true;
     return;
   }
-  if (reading) {  // its text and pictures aren't in yet
-    showNotice(`Still reading ${reading === 1 ? "a document" : `${reading} documents`}. Ask once ` +
-      `${reading === 1 ? "it's" : "they're"} attached.`, "info");
-    return;
-  }
+  if (stillReading()) return;
   if (attached.some((p) => !p.id)) {  // still being made smaller and sent to Ixel (well under a second each)
     const before = failures;
     starting = true;
@@ -1316,6 +1312,7 @@ async function ask() {
       $("#ask").classList.remove("waiting");
     }
     if (current || failures !== before) return;  // one couldn't be attached: its notice says why
+    if (stillReading()) return;  // one dropped meanwhile
   }
   const code = codeBox.value;
   const docs = fromDocuments && Boolean(code.trim());
@@ -1327,8 +1324,8 @@ async function ask() {
     showNotice(TOO_LONG(question.length), "error");
     return;
   }
-  if (code.length > MAX_CODE_CHARS) {  // said here, before a large paste is sent at all
-    showNotice(TOO_MUCH_CODE(code.length), "error");
+  if (chars(code) > MAX_CODE_CHARS) {  // said here, before a large paste is sent at all
+    showNotice(TOO_MUCH_CODE(chars(code)), "error");
     return;
   }
   if (attached.length > pics.MAX_PICTURES) {
@@ -1367,7 +1364,7 @@ async function ask() {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      if (res.status === 413) throw new Error(TOO_MUCH_CODE(code.length));  // over the server's size cap
+      if (res.status === 413) throw new Error(TOO_MUCH_CODE(chars(code)));  // over the server's size cap
       if (err.code === "pictures_gone") picturesGone = true;
       throw new Error(err.error || `Request failed (${res.status})`);
     }
@@ -1897,10 +1894,20 @@ function cancelSound() {
 // ── Documents read into the attached text ─────────────────────────────────
 
 const MAX_DOCUMENT = 50 * 1024 * 1024;  // documents.MAX_FILE_BYTES
+// Characters as Ixel counts them (an emoji is one, where a string's length says two)
+const chars = (text) => text.length - (text.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g) || []).length;
 let reading = 0;               // documents being read (one at a time, so each knows the room left)
 let readingDone = Promise.resolve();
 let fromDocuments = false;     // the attached text came from documents: the panel is asked to check them
 const isPicture = (file) => file.type.startsWith("image/");
+
+// Said instead of asking while a document's text and pictures aren't in yet
+function stillReading() {
+  if (!reading) return false;
+  showNotice(`Still reading ${reading === 1 ? "a document" : `${reading} documents`}. Ask once ` +
+    `${reading === 1 ? "it's" : "they're"} attached.`, "info");
+  return true;
+}
 
 function addDocuments(files) {
   for (const file of files) {
@@ -1919,16 +1926,16 @@ async function readDocument(file) {
     return;
   }
   const box = $("#material");
-  const room = MAX_CODE_CHARS - box.value.length - name.length - 40;
+  const room = MAX_CODE_CHARS - chars(box.value) - chars(name) - 40;
   if (room < 500) {
     showNotice(`There's no room left for ${name}: the panel reads up to ${MAX_CODE_CHARS.toLocaleString()} ` +
       "characters of attached text. Take something out first.", "error");
     return;
   }
   showNotice(`Reading ${name}…`, "info");
+  const first = attached.length + 1;
   const query = new URLSearchParams({
-    name, room: String(room), first: String(attached.length + 1),
-    fit: String(Math.max(pics.MAX_PICTURES - attached.length, 0)),
+    name, room: String(room), first: String(first), fit: String(Math.max(pics.MAX_PICTURES - attached.length, 0)),
   });
   let res;
   try {
@@ -1946,17 +1953,24 @@ async function readDocument(file) {
     showNotice(data.error || `Couldn't read ${name} (${res.status}).`, "error");
     return;
   }
+  const found = (data.pictures || []).map((p, i) =>
+    new File([bytesOf(p.data)], `${name}, picture ${i + 1}`, { type: p.type }));
+  const start = attached.length + 1;
+  const added = found.length ? addPictures(found) : 0;
+  // Numbered as they are in the tray now (pictures added while it was read come first), or left out
+  const said = (data.text || "").replace(/\[Picture (\d+)\]/g, (marker, n) => {
+    const i = Number(n) - first;
+    if (i < 0 || i >= found.length) return marker;
+    return i < added ? `[Picture ${start + i}]` : "[picture left out]";
+  });
   const header = `=== ${data.name} (${data.kind}) ===`;
-  const text = data.text ? `${header}\n${data.text.trimEnd()}` : `${header}: no text, only pictures`;
+  const text = said ? `${header}\n${said.trimEnd()}` : `${header}: no text, only pictures`;
   box.value = box.value.trim() ? `${box.value.trimEnd()}\n\n${text}\n` : `${text}\n`;
   fromDocuments = true;
   if ($("#attach").hidden) {
     $("#attach").hidden = false;
     $("#attach-toggle").setAttribute("aria-expanded", "true");
   }
-  const found = (data.pictures || []).map((p, i) =>
-    new File([bytesOf(p.data)], `${name}, picture ${i + 1}`, { type: p.type }));
-  const added = found.length ? addPictures(found) : 0;
   showNotice([`${name} is attached as text${added ? `, and ${plural(added, "picture")} from it` : ""}.`,
     ...(data.notes || [])].join(" "), "info");
   grow();

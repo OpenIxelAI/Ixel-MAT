@@ -250,3 +250,15 @@ def test_documents_get_a_question_about_documents():
     assert status == 200 and result["question"].startswith("Read what's attached and check it")
     assert result["material"]["title"] == "what the user attached"
     assert "We used 0.100 M HCl." in seeing.calls[0][0]
+
+
+@pytest.mark.parametrize("name", [".env", "id_ed25519", "credentials.json", "prod.pem"])
+def test_a_file_of_keys_is_never_read(name):
+    gui, _ = make_gui()
+
+    async def scenario(client):
+        resp = await client.post(f"/api/documents?name={name}", headers=DOC_AUTH, data=b"DB_PASSWORD=hunter2\n")
+        return resp.status, await resp.json()
+
+    status, data = run_with_client(gui, scenario)
+    assert status == 400 and "keys or logins" in data["error"] and "hunter2" not in json.dumps(data)

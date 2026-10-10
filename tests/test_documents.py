@@ -163,3 +163,69 @@ def test_pictures_for_the_window_are_numbered_from_the_tray():
     assert "[Picture 5]" in text and len(images) == 1 and not notes
     text, images, notes = documents.numbered(doc, first=9, room=0)
     assert "[picture left out]" in text and not images and notes
+
+
+# ── What a hostile file can't do ──────────────────────────────────────────────
+
+def test_a_cell_past_excels_last_column_is_ignored():
+    sheet = ('<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+             '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>kept</t></is></c>'
+             '<c r="AAAAAAA1" t="inlineStr"><is><t>far away</t></is></c></row></sheetData></worksheet>')
+    data = samples.zipped({
+        "xl/workbook.xml": '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/'
+                           f'2006/main" xmlns:r="{samples.REL}"><sheets><sheet name="S" sheetId="1" r:id="rId1"/>'
+                           '</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": samples._rels([("rId1", "worksheet", "worksheets/sheet1.xml")]),
+        "xl/worksheets/sheet1.xml": sheet})
+    doc = read_document(data, "wide.xlsx")  # (a row 321 million cells wide, before)
+    assert "kept" in doc.text and "far away" not in doc.text
+
+
+def test_parts_nested_a_thousand_deep_are_refused_not_a_crash():
+    deep = "<w:r>" * 2000 + "<w:t>x</w:t>" + "</w:r>" * 2000
+    data = samples.docx(f"<w:p>{deep}</w:p>")
+    with pytest.raises(DocumentError):
+        read_document(data, "deep.docx")
+    with pytest.raises(DocumentError, match="nested too deeply"):
+        read_document(b"{\\rtf1 " + b"{" * 100_000 + b"x", "deep.rtf")
+
+
+@pytest.mark.parametrize("encoding", ["bogus-encoding", "utf-7"])
+def test_xml_in_an_encoding_python_lacks_is_refused(encoding):
+    part = f'<?xml version="1.0" encoding="{encoding}"?><w:document {samples.W}><w:body/></w:document>'
+    with pytest.raises(DocumentError):
+        read_document(samples.zipped({"word/document.xml": part}), "odd.docx")
+
+
+def test_a_tiny_pdf_picture_that_unpacks_to_gigabytes_is_left_out_unread():
+    import io
+    import zlib
+
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, NumberObject, StreamObject
+    writer = PdfWriter()
+    page = writer.add_blank_page(200, 200)
+    image = StreamObject()
+    image._data = zlib.compress(b"\0" * 100_000_000, 9)  # 100 MB of pixels in a 64×64 picture
+    image.update({NameObject("/Type"): NameObject("/XObject"), NameObject("/Subtype"): NameObject("/Image"),
+                  NameObject("/Width"): NumberObject(64), NameObject("/Height"): NumberObject(64),
+                  NameObject("/ColorSpace"): NameObject("/DeviceGray"),
+                  NameObject("/BitsPerComponent"): NumberObject(8), NameObject("/Filter"): NameObject("/FlateDecode")})
+    contents = DecodedStreamObject()
+    contents.set_data(b"q 64 0 0 64 0 0 cm /Im1 Do Q")
+    page[NameObject("/Contents")] = writer._add_object(contents)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/XObject"): DictionaryObject({NameObject("/Im1"): writer._add_object(image)})})
+    out = io.BytesIO()
+    writer.write(out)
+    with pytest.raises(DocumentError, match="no text or pictures"):  # left out, and nothing else in it
+        read_document(out.getvalue(), "bomb.pdf")
+
+
+def test_hidden_characters_count_as_the_models_see_them():
+    # A Persian text uses the zero-width non-joiner in ordinary words; the panel shows each as [U+200C], and
+    # that's what its limit counts, so what's read has to fit counted that way
+    from ixel_mat.material import mark_hidden_characters
+    line = "می‌خواهم " * 50 + "\n"
+    doc = read_document((line * 400).encode(), "fa.txt", max_chars=20_000)
+    assert len(mark_hidden_characters(doc.text)) <= 20_000 and "left out" in doc.text

@@ -141,9 +141,9 @@ files. Ixel uses them only to answer, and for each preset:
   OpenCode 1's attempt to install its plugin package from npm the first time it runs with a new config folder.
 - **A fresh empty folder** for every run, deleted afterwards (`workdir = "temp"`).
 - **Pictures through your sign-in, as files only that run can see.** A picture attached to a question
-  (or found in a document) is written into the run's own empty folder as `ixel-picture-1.png`… (readable
-  only by you) and given to the CLI its own way: Claude Code gets it inside the question's message on stdin
-  (`--input-format stream-json`), Codex `--image`, Gemini CLI an `@` name in the question (it reads only files
+  (or found in a document) goes to Claude Code inside the question's message on stdin
+  (`--input-format stream-json`), with no file written. For the others it's written into the run's own empty
+  folder as `ixel-picture-1.png`… (readable only by you) and given to the CLI its own way: Codex `--image`, Gemini CLI an `@` name in the question (it reads only files
   in that folder), Copilot `--attachment`, OpenCode `-f`. The folder goes when the run ends, and what Gemini
   CLI, Copilot and OpenCode save of the picture with the session is removed with the rest of the run (below).
   Pictures go only to a CLI running in its own temp folder; one with a `workdir` of yours never gets any.
@@ -386,7 +386,9 @@ ever uses an API that turns a string into HTML (`innerHTML`, `insertAdjacentHTML
 - **Read on your computer, and nowhere else.** Word, Excel, PowerPoint and OpenDocument files are read with
   Python's own zip and XML readers, PDFs with pypdf, RTF and web pages by Ixel itself. Only the text and the
   pictures go to the models, as attached text and pictures, the same way as code: fenced as material to read,
-  never instructions, with hidden characters marked and the secret check applied.
+  never instructions, with hidden characters marked and the secret check applied. A file whose name says it
+  holds keys or logins (`.env`, `id_rsa`, `credentials.json`, `*.pem`…) is refused before it's read, in the
+  app as on the command line.
 - **Nothing in a document runs or is followed.** Macros, scripts, links, fields, embedded objects and
   pictures stored outside the file are ignored; a web page's scripts, styles and hidden parts are left out.
   Who wrote a document, when, and its other properties aren't read.
@@ -394,8 +396,10 @@ ever uses an API that turns a string into HTML (`innerHTML`, `insertAdjacentHTML
   `[hidden text: …]`, so a model can't be steered by instructions you can't see without being told they
   were hidden. Deleted tracked changes are left out.
 - **Bounded.** Documents up to 50 MB; reading stops after 30 seconds; a zip with more than 10,000 parts or
-  more than 512 MB unpacked, a part over 32 MB, and XML that declares entities (a "billion laughs") are
-  refused; PDFs are read up to 2,000 pages. The text shares the 60,000 characters every model reads (what
+  more than 512 MB unpacked (counted as it unpacks, not as the zip claims), a part over 32 MB, XML that
+  declares entities (a "billion laughs") and parts nested more than 500 deep are refused; spreadsheet cells
+  past Excel's last column are ignored, and a PDF picture that would unpack to more than its size says is
+  left out unread; PDFs are read up to 2,000 pages. The text shares the 60,000 characters every model reads (what
   doesn't fit is left out, and you're told), and a question takes at most 8 pictures, 20 MB in all. Locked
   PDFs and old Office files (.doc, .xls, .ppt) are refused, with what to do instead.
 - **Pictures lose their metadata.** Every picture, attached or found in a document, is checked and
@@ -405,7 +409,8 @@ ever uses an API that turns a string into HTML (`innerHTML`, `insertAdjacentHTML
   memory and keeps nothing.
 
 **How it's checked:** `tests/test_documents.py` reads each kind, and checks hidden text is marked, deleted
-text and the author left out, a zip bomb and an entity bomb refused, and cut text kept inside its limit;
+text and the author left out, a zip bomb, an entity bomb, a deeply nested file, a far-off spreadsheet cell
+and a PDF picture bomb handled, and cut text kept inside its limit, hidden characters counted;
 `tests/test_attachments.py` and `tests/test_gui_pictures.py` check the command line and the app.
 
 **How it's checked:** `tests/test_code_review.py` plants an fsmonitor, external diff, textconv filter,
