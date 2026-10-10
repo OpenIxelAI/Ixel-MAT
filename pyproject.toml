@@ -18,6 +18,7 @@ dependencies = [
     "anthropic>=1.8",
     "mcp>=2.2",
     "keyring>=24",
+    "pypdf>=6.1",  # reads the text and pictures of PDFs attached to a question (documents.py)
     "tomli>=2.0; python_version < '3.11'",
 ]
 

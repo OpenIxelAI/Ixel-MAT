@@ -25,6 +25,7 @@ a request to /api/presence open.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import html
 import json
@@ -53,7 +54,7 @@ from ixel_mat.modes.review import MAX_EARLIER_TURNS, MAX_PANEL, EarlierTurn, run
 from ixel_mat.runtime import (MODE_CHOICES, choose_mode, connect_agents, disconnect_agents, load_settings,
                               local_agent_names)
 from ixel_mat.config.secrets import keys_withheld, load_env, where_keys_are
-from ixel_mat.material import Material, MaterialError, code_for_review
+from ixel_mat.material import MAX_MATERIAL_CHARS, Material, MaterialError, code_for_review, credential_file
 from ixel_mat.sanitize import sanitize_terminal_text
 
 logger = logging.getLogger("ixel_mat.gui")
@@ -231,6 +232,9 @@ def _json_error(status: int, message: str) -> web.Response:
 PICTURE_TYPES = ("image/png", "image/jpeg")
 PICTURES_PATH = "/api/pictures"
 SOUND_PATH = "/api/sound"  # sound to write out: sent as it is, whatever kind (sound.py checks)
+DOCUMENTS_PATH = "/api/documents"  # a document to read into text (Word, PDF…): sent as it is (documents.py reads it)
+# Pictures from one document sent back to the page, which makes each smaller before it's attached
+MAX_DOCUMENT_PICTURE_BYTES = 64 * 1024 * 1024
 TOO_BIG = f"That picture is over {pictures.megabytes(pictures.MAX_BYTES)}, even made smaller."
 
 
@@ -302,6 +306,7 @@ class GuiServer:
         app.router.add_post("/api/review", self._review)
         app.router.add_post(PICTURES_PATH, self._add_picture)
         app.router.add_post(SOUND_PATH, self._sound)
+        app.router.add_post(DOCUMENTS_PATH, self._read_document)
         app.router.add_get("/api/handoff", self._handoff_info)
         app.router.add_post("/api/handoff/plan", self._handoff_plan)
         app.router.add_post("/api/handoff/run", self._handoff_run)
@@ -359,10 +364,10 @@ class GuiServer:
                 if request.path == PICTURES_PATH:
                     if request.content_type not in PICTURE_TYPES:
                         return _json_error(415, "Expected a PNG or JPEG picture.")
-                elif request.path == SOUND_PATH:
+                elif request.path in (SOUND_PATH, DOCUMENTS_PATH):
                     # (aiohttp calls a request with no Content-Type octet-stream too: the page always says)
                     if "Content-Type" not in request.headers or request.content_type != "application/octet-stream":
-                        return _json_error(415, "Expected the sound as application/octet-stream.")
+                        return _json_error(415, "Expected the file as application/octet-stream.")
                 elif request.content_type != "application/json":
                     return _json_error(415, "Expected application/json.")
         return await handler(request)
@@ -1020,6 +1025,42 @@ class GuiServer:
         return web.json_response({"id": self.pictures.add(picture), "width": picture.width,
                                   "height": picture.height, "bytes": len(picture.data)})
 
+    async def _read_document(self, request: web.Request) -> web.Response:
+        """
+        A document attached in Ask (Word, PDF, Excel, PowerPoint, a web page or text), read here into text, and
+        its pictures, for the page to attach like any other → {name, kind, text, notes, pictures: [{type, data
+        (base64), width, height}]}. Nothing is kept, and nothing goes anywhere else. ?name= its file name, ?room=
+        the characters left for attached text, ?first= the number its first picture will have, ?fit= how many
+        more pictures the question takes.
+        """
+        from ixel_mat import documents
+
+        def number(key: str, default: int, top: int) -> int:
+            try:
+                return min(max(int(request.query.get(key, default)), 0), top)
+            except ValueError:
+                return default
+        name = re.sub(r"[\x00-\x1f\x7f]", "", request.query.get("name", ""))[:200].strip() or "document"
+        if credential_file(name):  # .env, id_rsa, credentials.json…: never read, so never sent
+            return _json_error(400, f"{name} looks like a file of keys or logins, so Ixel doesn't attach it. Copy "
+                                    "in only the part you mean to send, without its secrets.")
+        room = number("room", MAX_MATERIAL_CHARS, MAX_MATERIAL_CHARS)
+        first = max(number("first", 1, pictures.MAX_PER_QUESTION), 1)
+        fit = number("fit", pictures.MAX_PER_QUESTION, pictures.MAX_PER_QUESTION)
+        data = await self._read_capped(request, documents.MAX_FILE_BYTES)
+        if data is None:
+            return _json_error(413, f"{name} is over {pictures.megabytes(documents.MAX_FILE_BYTES)}, more than "
+                                    "Ixel reads. Attach a smaller part of it.")
+        try:
+            document = await asyncio.to_thread(documents.read_document, data, name, max_chars=room)
+        except documents.DocumentError as exc:
+            return _json_error(400, str(exc))
+        text, images, notes = documents.numbered(document, first, fit, MAX_DOCUMENT_PICTURE_BYTES)
+        found = _clean({"name": name, "kind": document.kind, "text": text, "notes": document.notes + notes})
+        found["pictures"] = [{"type": image.media_type, "data": base64.b64encode(image.data).decode("ascii"),
+                              "width": image.width, "height": image.height} for image in images]
+        return web.json_response(found)
+
     def _pictures_for(self, value: Any) -> list:
         """The pictures a question names (PictureError says why not)."""
         if value is None:
@@ -1042,9 +1083,11 @@ class GuiServer:
         code = body.get("material") or ""
         if not isinstance(code, str):
             return _json_error(400, "material must be text.")
+        documents = body.get("documents") is True  # what's attached came from documents read here
         try:
             material, asked = code_for_review(question if isinstance(question, str) else "", code=code,
-                                              code_title="code the user attached")
+                                              code_title="what the user attached" if documents
+                                              else "code the user attached", documents=documents)
         except MaterialError as exc:
             return _json_error(400, str(exc))
         try:

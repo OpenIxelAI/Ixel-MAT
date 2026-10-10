@@ -85,9 +85,15 @@ color = "yellow"
 #            | "unknown" (counted, not priced: other CLIs, gateways). Set "api" on
 #            a paid proxy on your network.
 #
-# Pictures you attach in the app go to API models that can see them. Claude,
-# GPT, Grok and Gemini can; a local or other model only with:
+# Pictures you attach (in the app, with --file, or in a document) go to the
+# models that can see them. Claude, GPT, Grok and Gemini can, and so do the
+# subscription logins below, through your sign-in; a local or other model only
+# with:
 #   accepts  ["image"] to send it pictures, [] to never send it any
+# Your own command-line agent can take them as files in its temp folder:
+#   picture_args    once per picture, e.g. ["--image", "{path}"] ({path} is
+#                   the picture's full path, {name} its file name)
+#   picture_prompt  before the question, once per picture, e.g. "@{name} "
 
 # ── Your subscription logins ───────────────────────────────────────────────────
 # These run the vendors' own CLIs with the login you already have, so they use

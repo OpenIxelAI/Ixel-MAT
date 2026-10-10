@@ -2,18 +2,24 @@
 The subscription CLI presets, run for real: each installed CLI is pointed at a
 fake model API that answers the question with tool calls (run a shell command,
 write a file, read Ixel's key file). Nothing may run, no secret (or anything from
-the folder Ixel runs in) may reach the model, and the answer must still come back.
+the folder Ixel runs in, or a file an @path in the question names) may reach the
+model, and the answer must still come back. Pictures attached to the question
+reach the model too, through the subscription, and are gone afterwards.
 
 Each CLI is skipped when it isn't installed; CI installs the latest releases, so
 a vendor changing a flag's meaning shows up here.
 """
 import asyncio
+import base64
 import json
 import os
+import random
 import shutil
 import sqlite3
+import struct
 import tempfile
 import threading
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -174,10 +180,13 @@ def test_preset_is_answer_only(preset_id, long_prompt, tmp_path, monkeypatch):
         fields["args"] = list(preset["args"]) + extra_args
         agent = OneShotAgent(AgentConfig(name=preset_id, type="oneshot", workdir="temp", **fields))
 
+        # An @path in the question (or in a document attached to it) is text, never a file to send along
+        question = f"What is 17 x 23? See @{home / '.config' / 'ixel-mat' / '.env'}"
+
         async def ask():
             await agent.connect()
             try:
-                return await agent.send_and_receive("What is 17 x 23?" + (LONG if long_prompt else ""))
+                return await agent.send_and_receive(question + (LONG if long_prompt else ""))
             finally:
                 await agent.disconnect()
 
@@ -352,3 +361,95 @@ def test_nothing_of_the_question_is_left_behind(preset_id, tmp_path, monkeypatch
             continue  # only in free space (see FREE_SPACE)
         left.append(str(path.relative_to(tmp_path)))
     assert not left, f"the question is still in {left}"
+
+
+def _noise_png(side: int = 64) -> bytes:
+    """A PNG of random pixels: small (12 KB), so no CLI makes it smaller, and found only where it was sent."""
+    rng = random.Random(7)
+    rows = b"".join(b"\0" + bytes(rng.getrandbits(8) for _ in range(side * 3)) for _ in range(side))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", side, side, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+def _sees_pictures(home):
+    """OpenCode sends a picture only to a model its catalog says takes them (real ones do); the fake one too."""
+    path = home / ".config" / "opencode" / "opencode.json"
+    config = json.loads(path.read_text())
+    config["provider"]["fake"]["models"]["m"].update(
+        {"attachment": True, "modalities": {"input": ["text", "image"], "output": ["text"]}})
+    path.write_text(json.dumps(config))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="like the others here")
+@pytest.mark.parametrize("preset_id", sorted(SETUPS))
+def test_pictures_reach_the_model_through_the_subscription(preset_id, tmp_path, monkeypatch):
+    # Each program gets the pictures its own way (AgentConfig.picture_args, picture_prompt, picture_stdin), still
+    # answer-only: the picture's bytes reach the model, nothing runs, no file an @path names goes along, and
+    # nothing of the picture is left under the CLI's home or the temp folder afterwards.
+    from ixel_mat.pictures import read_picture
+    preset = PRESETS[preset_id]
+    if not shutil.which(preset["command"]):
+        if os.environ.get("IXEL_REQUIRE_CLIS") == "1":
+            pytest.fail(f"{preset['command']} is not installed")
+        pytest.skip(f"{preset['command']} is not installed")
+    home, temp = tmp_path / "home", tmp_path / "temp"
+    temp.mkdir()
+    _write(home / ".config" / "ixel-mat" / ".env", f"IXEL_TEST_SECRET={SECRET}\n")
+    for name in list(os.environ):
+        if name not in KEEP_ENV:
+            monkeypatch.delenv(name)
+    for name, value in {"HOME": str(home), "USERPROFILE": str(home), "NO_PROXY": "127.0.0.1,localhost",
+                        "no_proxy": "127.0.0.1,localhost", "TMPDIR": str(temp)}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    yours = tmp_path / "your-repo"
+    _write(yours / "AGENTS.md", f"{FOLDER_NOTE}\n")
+    monkeypatch.chdir(yours)
+    picture = read_picture(_noise_png())
+
+    with CaptureServer() as fake:
+        calls, extra_args, mcp_marker = SETUPS[preset_id](home, tmp_path, fake.url, monkeypatch)
+        if preset_id == "opencode":
+            _sees_pictures(home)
+        fake.tool_calls = calls
+        fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
+        fields["args"] = list(preset["args"]) + extra_args
+        agent = OneShotAgent(AgentConfig(name=preset_id, type="oneshot", workdir="temp", **fields))
+        assert agent.config.sees_pictures
+
+        async def ask():
+            await agent.connect()
+            try:
+                return await agent.send_and_receive(
+                    f"What is 17 x 23? See @{home / '.config' / 'ixel-mat' / '.env'}", pictures=[picture])
+            finally:
+                await agent.disconnect()
+
+        answer = asyncio.run(ask())
+
+    assert ANSWER in answer
+    sent = base64.b64encode(picture.data).decode()
+    assert any(sent in r["raw"] for r in fake.requests), "the picture never reached the model"
+    assert any(r["body"] and _answered_tools(r["body"]) for r in fake.requests), "the tool calls never came back"
+    assert not (tmp_path / "PWNED_SHELL").exists(), "a shell command ran"
+    assert not (tmp_path / "PWNED_WRITE").exists(), "a file was written"
+    if mcp_marker is not None:
+        assert not mcp_marker.exists(), "a user-configured MCP server was started"
+    for request in fake.requests:
+        assert SECRET not in request["raw"], "a file an @path in the question names reached the model"
+        assert FOLDER_NOTE not in request["raw"], "the folder Ixel runs from reached the model"
+        unexpected = set(offered_tools(request["body"])) - ALLOWED_TOOLS.get(preset_id, set())
+        assert not unexpected, f"tools offered to the model: {sorted(unexpected)}"
+    assert not list(temp.glob("ixel-*")), "Ixel's folders for the run are left"
+    left = []
+    for path in sorted(p for root in (home, temp) for p in root.rglob("*") if p.is_file() and not p.is_symlink()):
+        data = path.read_bytes()
+        if sent[:200].encode() not in data and picture.data not in data:
+            continue
+        if path.match(FREE_SPACE.get(preset_id, "-")) and not _rows_with(path, sent[:200]):
+            continue  # only in free space, like the question's text (see FREE_SPACE)
+        left.append(str(path.relative_to(tmp_path)))
+    assert not left, f"the picture is still in {left}"

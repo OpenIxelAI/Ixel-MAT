@@ -244,10 +244,13 @@ def test_which_agents_see_pictures():
         "text_only": {"type": "http", "url": "https://api.x.ai/v1/chat/completions", "accepts": []},
         "llava": {"type": "http", "url": "http://127.0.0.1:11434/v1/chat/completions", "accepts": ["image", "smell"]},
         "llama": {"type": "http", "url": "http://127.0.0.1:11434/v1/chat/completions"},
-        "codex": {"preset": "codex", "accepts": ["image"]},
+        "codex": {"preset": "codex"},  # through your sign-in (presets.py says how each program takes them)
+        "codex_off": {"preset": "codex", "accepts": []},
+        "mine": {"type": "oneshot", "command": "mycli", "accepts": ["image"]},  # no way to give it any
     }})
     assert {n: c.sees_pictures for n, c in configs.items()} == \
-        {"gpt": True, "text_only": False, "llava": True, "llama": False, "codex": False}
+        {"gpt": True, "text_only": False, "llava": True, "llama": False, "codex": True, "codex_off": False,
+         "mine": False}
     assert configs["llava"].accepts == ["image"] and any("'smell'" in w for w in warnings)
 
 

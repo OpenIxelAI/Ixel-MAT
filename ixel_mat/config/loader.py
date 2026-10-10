@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ixel_mat.agents.base import (EFFORT_LEVELS, MEDIA, PROMPT_MODES, STDOUT_FORMATS, AgentConfig,
+from ixel_mat.agents.base import (EFFORT_LEVELS, MEDIA, PICTURE_STDIN, PROMPT_MODES, STDOUT_FORMATS, AgentConfig,
                                    cleartext_refusal, is_loopback_host, needs_api_key, sends_key_in_cleartext)
 from ixel_mat.usage import BILLING
 from ixel_mat.config.secrets import read_text_file, write_private_file
@@ -168,6 +168,15 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
             warnings.append(f"Agent '{name}': accepts can list {', '.join(MEDIA)}; ignoring "
                             f"{', '.join(repr(k) for k in accepts if k not in MEDIA)}")
             accepts = [kind for kind in accepts if kind in MEDIA]
+        picture_args = _str_list(data, "picture_args", name, warnings)
+        picture_prompt = data.get("picture_prompt", "")
+        if not isinstance(picture_prompt, str):
+            warnings.append(f"Agent '{name}': picture_prompt must be text")
+            picture_prompt = ""
+        picture_stdin = data.get("picture_stdin", "")
+        if picture_stdin and picture_stdin not in PICTURE_STDIN:
+            warnings.append(f"Agent '{name}': picture_stdin can be {', '.join(PICTURE_STDIN)}")
+            picture_stdin = ""
         model = data.get("model", "")
         if model and not (isinstance(model, str) and (model in ALIASES or valid_model_id(model))):
             warnings.append(f"Agent '{name}': ignoring model {model!r}, which isn't a valid model name")
@@ -228,6 +237,9 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
             model_args=model_args,
             billing=billing,
             accepts=accepts,
+            picture_args=picture_args,
+            picture_prompt=picture_prompt,
+            picture_stdin=picture_stdin,
         )
 
     return configs, warnings

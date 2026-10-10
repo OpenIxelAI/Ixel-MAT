@@ -47,12 +47,17 @@ CLI_PRESETS = [
         # shows up word by word; plain text would only arrive at the end.
         # disableAllHooks: your own hooks and plugins' hooks (a session-start hook that adds
         # notes or a style to every session) would otherwise reach the panel member's prompt.
+        # Denying Read: with no tools at all, Claude Code still reads a file an @path in the question names
+        # (@~/.ssh/id_ed25519, written into a document you attach) and sends it along; this stops that.
         "args": ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-                 "--tools", "", "--strict-mcp-config", "--settings", '{"disableAllHooks": true}',
+                 "--tools", "", "--strict-mcp-config",
+                 "--settings", '{"disableAllHooks": true, "permissions": {"deny": ["Read"]}}',
                  "--no-session-persistence", "--append-system-prompt", PANEL_MEMBER],
         # The prompt on stdin (`claude -p` reads it there): an argument would show in `ps` to other
         # people on this computer, and could be too long for a command line
         "prompt_via": "stdin", "timeout": 300, "stdout_format": "claude-stream-json",
+        # Pictures go in the question's own message on stdin (--input-format stream-json)
+        "picture_stdin": "claude-stream-json",
         # An API key in the environment would be billed instead of the subscription
         # (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token` still gets through).
         "drop_env": [*OTHER_KEYS],
@@ -71,6 +76,8 @@ CLI_PRESETS = [
                  "--disable", "shell_tool", "--disable", "unified_exec", "--disable", "view_image",
                  "--disable", "multi_agent", "--disable", "goals", "-c", 'web_search="disabled"'],
         "prompt_via": "stdin", "output_flag": "-o", "timeout": 300,
+        # By name, in the run's own folder: --image splits a path at its commas
+        "picture_args": ["--image", "{name}"],
         "drop_env": [*OTHER_KEYS],
         "effort_args": ["-c", 'model_reasoning_effort="{effort}"'],
         "effort_levels": ["minimal", "low", "medium", "high", "xhigh"],
@@ -90,6 +97,8 @@ CLI_PRESETS = [
         "args": ["--skip-trust", "--approval-mode", "plan", "-e", "none",
                  "--allowed-mcp-server-names", "ixel-none", "-o", "text"],
         "prompt_via": "stdin", "timeout": 300,
+        # Gemini CLI reads a file @named in the question itself, and only one in its folder (the run's own)
+        "picture_prompt": "@{name} ",
         "drop_env": [*OTHER_KEYS],  # your Gemini API key goes only while it has no sign-in (gemini_key_env)
         "model_args": ["-m", "{model}"], "model_hint": "a model name such as gemini-2.5-pro",
     },
@@ -104,6 +113,7 @@ CLI_PRESETS = [
         "args": ["-s", "--no-custom-instructions", "--disable-builtin-mcps", "--no-auto-update",
                  "--stream", "off", "--available-tools=ixel_none", "--no-remote-export"],
         "prompt_via": "stdin", "timeout": 300,
+        "picture_args": ["--attachment", "{path}"],
         "drop_env": [*OTHER_KEYS, "COPILOT_ALLOW_ALL"],  # COPILOT_ALLOW_ALL: auto-approve tools, trust the folder
         "effort_args": ["--reasoning-effort", "{effort}"],
         "effort_levels": ["minimal", "low", "medium", "high", "xhigh", "max"],
@@ -115,10 +125,12 @@ CLI_PRESETS = [
         "install": "npm install -g opencode-ai",
         # --standalone: OpenCode 2 otherwise hands the question to its background service, which
         # runs with your own settings, so the locked-down agent below wouldn't exist there.
-        "args": ["run", "--standalone", "--agent", "ixel"],
+        # --title: otherwise OpenCode asks the model again, for a title for the session (with the
+        # question, and any pictures, in it)
+        "args": ["run", "--standalone", "--title", "Ixel", "--agent", "ixel"],
         # OpenCode 1 starts a server of its own every time and has no --standalone; its --pure leaves
         # out plugins you installed
-        "args_by_version": {"1": ["run", "--pure", "--agent", "ixel"]},
+        "args_by_version": {"1": ["run", "--pure", "--title", "Ixel", "--agent", "ixel"]},
         # Whatever args you give it yourself: without --standalone, OpenCode 2's background service has no
         # locked-down agent, and would answer with its own one and your tools. Each version's flag is one the
         # other refuses, so args picked for a version Ixel only thinks is installed fail instead of running
@@ -126,6 +138,7 @@ CLI_PRESETS = [
         # Like Claude Code's: on stdin, out of `ps` and never too long. `opencode run` reads stdin
         # whenever it isn't a terminal, and uses it as the message.
         "prompt_via": "stdin", "timeout": 300,
+        "picture_args": ["-f", "{path}"],
         # OPENCODE_DISABLE_MODELS_FETCH: never fetch OpenCode's model catalog (models.opencode.ai, models.dev
         # on older versions); it uses the copy it already has, or the one built into it
         "env": {"OPENCODE_CONFIG_CONTENT": _OPENCODE_LOCKDOWN, "OPENCODE_DISABLE_AUTOUPDATE": "1",
@@ -137,7 +150,8 @@ CLI_PRESETS = [
 
 # Fields a preset supplies; an agent's own config overrides any of them.
 PRESET_FIELDS = ("command", "args", "args_by_version", "prompt_via", "output_flag", "stdout_format", "timeout",
-                 "env", "drop_env", "effort_args", "effort_levels", "model_args")
+                 "env", "drop_env", "effort_args", "effort_levels", "model_args", "picture_args", "picture_prompt",
+                 "picture_stdin")
 PRESETS_BY_ID = {p["id"]: p for p in CLI_PRESETS}
 # Fields that describe a preset for people (setup, `ixel model`) and never reach an agent's config.
 PRESET_ABOUT = ("id", "why", "install", "free", "free_then", "model_hint")

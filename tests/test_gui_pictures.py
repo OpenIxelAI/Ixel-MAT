@@ -163,3 +163,102 @@ def test_pictures_are_gone_when_ixel_stops():
     assert run_with_client(gui, scenario) == 1
     assert not gui.pictures._items
 
+
+
+# ── Documents read into the attached text ─────────────────────────────────
+
+DOC_AUTH = {**AUTH, "Content-Type": "application/octet-stream"}
+
+
+def test_a_document_is_read_into_text_with_its_pictures_numbered_after_the_trays():
+    import base64
+
+    import doc_samples
+    gui, _ = make_gui()
+
+    async def scenario(client):
+        resp = await client.post("/api/documents?name=talk.pptx&first=3&fit=6", headers=DOC_AUTH,
+                                 data=doc_samples.pptx(picture=doc_samples.png()))
+        return resp.status, await resp.json()
+
+    status, data = run_with_client(gui, scenario)
+    assert status == 200 and data["name"] == "talk.pptx" and data["kind"] == "PowerPoint deck"
+    assert "pH 7 at 24.5 mL" in data["text"] and "[Picture 3]" in data["text"]
+    [picture] = data["pictures"]
+    assert picture["type"] == "image/png" and base64.b64decode(picture["data"]) == doc_samples.png()
+    assert not gui.pictures._items  # the page makes it smaller and attaches it like any other
+
+
+def test_a_document_keeps_to_the_room_left_in_the_attached_text():
+    gui, _ = make_gui()
+
+    async def scenario(client):
+        resp = await client.post("/api/documents?name=notes.txt&room=2000", headers=DOC_AUTH,
+                                 data=("line of text " * 20 + "\n").encode() * 100)
+        return await resp.json()
+
+    data = run_with_client(gui, scenario)
+    assert len(data["text"]) <= 2000 and "left out" in data["text"] and data["notes"]
+
+
+@pytest.mark.parametrize("headers, data, status, says", [
+    (DOC_AUTH, b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 600, 400, "Save it as"),
+    (DOC_AUTH, b"\x7fELF\0\0binary", 400, ""),
+    ({**AUTH, "Content-Type": "application/json"}, b"{}", 415, ""),
+    ({"Content-Type": "application/octet-stream"}, b"text", 401, ""),
+    ({**DOC_AUTH, "Origin": "https://evil.example"}, b"text", 403, ""),
+])
+def test_only_a_readable_document_from_this_page_is_read(headers, data, status, says):
+    gui, _ = make_gui()
+
+    async def scenario(client):
+        resp = await client.post("/api/documents?name=old.doc", headers=headers, data=data)
+        return resp.status, await resp.json()
+
+    got, body = run_with_client(gui, scenario)
+    assert got == status and says in body.get("error", "")
+
+
+def test_a_document_over_the_limit_is_refused_while_its_read(monkeypatch):
+    from ixel_mat import documents
+    monkeypatch.setattr(documents, "MAX_FILE_BYTES", 1000)
+    gui, _ = make_gui()
+
+    async def chunks():  # no Content-Length: only counting while reading catches it
+        for _ in range(20):
+            yield b"a" * 100
+
+    async def scenario(client):
+        said = await client.post("/api/documents?name=a.txt", headers=DOC_AUTH, data=b"a" * 1001)
+        streamed = await client.post("/api/documents?name=a.txt", headers=DOC_AUTH, data=chunks())
+        return said.status, streamed.status
+
+    assert run_with_client(gui, scenario) == (413, 413)
+
+
+def test_documents_get_a_question_about_documents():
+    gui, (seeing, _) = make_gui()
+
+    async def scenario(client):
+        resp = await client.post("/api/review", headers=JSON_AUTH, data=json.dumps(
+            {"question": "", "mode": "quick", "documents": True,
+             "material": "=== lab.docx (Word document) ===\nWe used 0.100 M HCl."}))
+        return resp.status, await read_events(resp)
+
+    status, events = run_with_client(gui, scenario)
+    result = events[-1]["data"]["result"]
+    assert status == 200 and result["question"].startswith("Read what's attached and check it")
+    assert result["material"]["title"] == "what the user attached"
+    assert "We used 0.100 M HCl." in seeing.calls[0][0]
+
+
+@pytest.mark.parametrize("name", [".env", "id_ed25519", "credentials.json", "prod.pem"])
+def test_a_file_of_keys_is_never_read(name):
+    gui, _ = make_gui()
+
+    async def scenario(client):
+        resp = await client.post(f"/api/documents?name={name}", headers=DOC_AUTH, data=b"DB_PASSWORD=hunter2\n")
+        return resp.status, await resp.json()
+
+    status, data = run_with_client(gui, scenario)
+    assert status == 400 and "keys or logins" in data["error"] and "hunter2" not in json.dumps(data)

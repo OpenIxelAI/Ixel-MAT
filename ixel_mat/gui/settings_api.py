@@ -162,8 +162,8 @@ def snapshot(settings, version: str | None = None) -> dict:
             # A model server of your own has no default to fall back on: a model has to be named
             "needs_model": cfg.type == "http" and not _follows_newest(cfg),
             "on_panel": panel is None or name in panel, "in_file": name in raw,
-            # Pictures go only to models Ixel calls itself (never to a program such as Claude Code)
-            "can_see": cfg.type == "http", "pictures": cfg.sees_pictures,
+            # Models Ixel calls itself, and programs that take pictures (Claude Code, Codex, Gemini CLI…)
+            "can_see": cfg.can_see_pictures, "pictures": cfg.sees_pictures,
             # A model server on your own computers: its address can change here, and it can be taken off
             "server": _server_info(cfg) if own_server(cfg, raw.get(name, {})) else None,
             # Answers with Private on: a question to it stays on your computers
@@ -491,9 +491,8 @@ def plan_change(settings, section: str, values: Any, agent: Any = None) -> tuple
                 cfg = settings.agent_configs[agent]
                 if not isinstance(value, bool):
                     raise SettingsError("Seeing pictures is on or off.")
-                if cfg.type != "http":
-                    raise SettingsError(f"{cfg.label} is a program Ixel starts; pictures only go to models it "
-                                        "calls itself.")
+                if not cfg.can_see_pictures:
+                    raise SettingsError(f"{cfg.label} is a program Ixel can't give pictures to.")
                 others = [kind for kind in (cfg.accepts or []) if kind != "image"]
                 out["accepts"] = (["image"] if value else []) + others
             else:

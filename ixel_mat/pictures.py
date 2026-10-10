@@ -7,7 +7,10 @@ read the size of, takes out any metadata still in it (EXIF and GPS, XMP, comment
 times), drops anything after the end of the image, and keeps it in memory only: for 30 minutes, at
 most 64 MB in all, gone when Ixel stops. Nothing is written to disk.
 
-Only HTTP models marked as seeing pictures get them; programs (Claude Code, Codex…) never do.
+They go to the models that see pictures (AgentConfig.sees_pictures): HTTP models whose API takes them,
+and the subscription programs (Claude Code, Codex, Gemini CLI, Copilot, OpenCode), each the way it takes
+them, through your sign-in and with no API key. A program gets them as files in its run's own temp folder,
+which goes when the run ends. The rest are told there's a picture they can't see.
 """
 from __future__ import annotations
 

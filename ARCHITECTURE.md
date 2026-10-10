@@ -32,8 +32,9 @@ MCP plugin. The engine doesn't know which one is calling.
 | `ixel_mat/review_ui.py` | Rich rendering: the live progress view (a finished round is printed into the terminal's history, so only the running one is live), answer panels, scoreboard, verdict, saves |
 | `ixel_mat/stats.py` | Saver-mode saves counter, streaks, achievements, how the big model's first look went, and what reviews cost by month (`~/.config/ixel-mat/stats.json`) |
 | `ixel_mat/usage.py` | Token counts each transport reports (`Usage`), how each agent is billed, Claude's prices and `[pricing]`, a run's cost (`CallUsage`, `totals`) and saver mode's saving |
-| `ixel_mat/material.py` | Code for the panel to review: a git diff or chosen files, read once and read-only, with the secret, size and hidden-character checks |
-| `ixel_mat/pictures.py` | Pictures attached in the app: PNG or JPEG only, metadata taken out (`read_picture`), kept in memory for 30 minutes (`PictureStore`) |
+| `ixel_mat/material.py` | What a question is about: a git diff or chosen files (code, documents, pictures), read once and read-only, with the secret, size and hidden-character checks |
+| `ixel_mat/documents.py` | Documents read into text and pictures on this computer (`read_document`): Word, Excel, PowerPoint and OpenDocument with the standard library's zip and XML readers, PDF with pypdf, RTF, web pages and text; size, time, zip and XML-entity limits, hidden text marked, nothing in them followed |
+| `ixel_mat/pictures.py` | Pictures attached to a question: PNG or JPEG only, metadata taken out (`read_picture`), kept in memory for 30 minutes (`PictureStore`) |
 | `ixel_mat/sound.py` | Sound recorded or attached in the app, written out by OpenAI or Groq (`pick_provider`, `transcribe`); never kept |
 | `ixel_mat/triage.py` | Optional triage (your own model or TypeSafe's decision API): auto mode, skipping agreed reviews, saver's gate |
 | `ixel_mat/gui/` | `ixel gui`: an aiohttp server on 127.0.0.1 and a dependency-free HTML/JS/CSS app; `window.py` is `ixel app`, which shows it in an Edge or Chrome app window, or the native windows: `macos/` (Ixel.app, Swift) and `linux_window.py` (GTK), which run `ixel app --host` |
@@ -158,11 +159,31 @@ only see the question; `ReviewResult.material` records its title, files and size
 secret-looking material before any model is called. Every front end goes through `code_for_review()`, which
 does both and fills in the default question when there's code and no question.
 
+**Documents:** `read_files` reads a document (`documents.is_document`: .docx, .xlsx, .pptx, .odt, .pdf,
+.rtf…) into its text with `documents.read_document`, in what room is left of `MAX_MATERIAL_CHARS` once the
+code files and pictures named with it are counted (as the models see it, hidden characters marked), under a
+`=== name (kind) ===` line, and a picture file (.png, .jpg) with `read_picture`. A web page named with
+`--file` is code, kept as written; dropped in the app, it's read as a page. A document's own pictures
+become `Material.pictures` (`documents.pictures_of`: PNG and JPEG, numbered `[Picture N]` in the text as
+they're sent), and `run_review` and `ask` send them first, before the question's own. The app posts a
+document to `POST /api/documents` (application/octet-stream, a counted 50 MB cap; `?room=`, `?first=` and
+`?fit=` say how much text and how many pictures still fit), which returns its text, for the page to put in
+the attached text, and its pictures (`documents.numbered`), which the page makes smaller and attaches like
+any other. Old Office files (.doc, .xls, .ppt) are refused with a word on saving them in the new format,
+and so is a file whose name says it holds keys (`credential_file`). A file that can't be read for any other
+reason (damaged, nested too deeply, an XML encoding Python lacks) is a `DocumentError`, never a crash.
+
 **Pictures:** `run_review(…, pictures=[Picture])` gives them to every call to an agent whose
-`AgentConfig.sees_pictures` (HTTP agents only: `accepts`, else the four big APIs); the others' prompts start
-by saying there are pictures they can't see. `HttpAgent` sends them as OpenAI `image_url` parts or Anthropic
-image blocks, and when the API refuses them (400, 413, 415, 422) asks again without them, for the rest of
-the run. The app uploads each one to `POST /api/pictures` (its own body, read with a counted 3.9 MB cap; every
+`AgentConfig.sees_pictures` (`accepts`, else for an HTTP agent the four big APIs, and for a program one whose
+config says how it takes pictures and that runs in its own temp folder); the others' prompts start by saying
+there are pictures they can't see. `HttpAgent` sends them as OpenAI `image_url` parts or Anthropic image
+blocks, and when the API refuses them (400, 413, 415, 422) asks again without them, for the rest of the run.
+`OneShotAgent` gives them to the program as its preset says: written into the run's temp folder
+(`ixel-picture-1.png`…, owner-only, removed with the folder) and named by `picture_args` once per picture
+(Codex `--image NAME`, Copilot `--attachment PATH`, OpenCode `-f PATH`) or `picture_prompt` before the
+question (Gemini CLI's `@NAME`), or with no file at all by `picture_stdin = "claude-stream-json"` (Claude
+Code: `--input-format stream-json`, with the pictures as image blocks in the question's message). `tests/test_cli_presets_live.py` checks each
+program's picture reaches the model with the program still answer-only. The app uploads each one to `POST /api/pictures` (its own body, read with a counted 3.9 MB cap; every
 other route keeps 512 KB) and names their ids in `/api/review`.
 
 **Sound:** no model hears sound. The app posts it to `POST /api/sound` (application/octet-stream, read with a

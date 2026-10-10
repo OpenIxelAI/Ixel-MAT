@@ -804,8 +804,9 @@ function pictures() {
     seeing.length
       ? el("div", { class: "set-row set-many", role: "group", "aria-label": "Models that see pictures" },
         el("span", { class: "set-text" }, el("span", { class: "set-label" }, "Models that see pictures"),
-          el("small", {}, "Pictures you attach in Ask go only to these. Programs such as Claude Code and Codex never " +
-            "get them. Turn one off if its model only reads text.")),
+          el("small", {}, "Pictures you attach in Ask, and the ones in documents, go only to these. Claude Code, " +
+            "Codex, Gemini CLI, Copilot and OpenCode get them through your subscription, with no API key. " +
+            "Turn one off if its model only reads text.")),
         el("span", { class: "set-checks" }, seeing.map((a) => el("label", { class: "set-check" },
           checkbox(`agent:${a.name}:pictures`, a.pictures,
             (value) => save("images", { section: "agent", agent: a.name, values: { pictures: value } }),

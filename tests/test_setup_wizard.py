@@ -95,7 +95,8 @@ def test_cli_presets_are_answer_only_and_never_bypass_safety():
     assert claude["args"][claude["args"].index("--tools") + 1] == ""  # all tools off
     assert "--strict-mcp-config" in claude["args"] and claude["prompt_via"] == "stdin"
     # Hooks (yours, or a plugin's) can't add to a panel member's prompt
-    assert json.loads(claude["args"][claude["args"].index("--settings") + 1]) == {"disableAllHooks": True}
+    assert json.loads(claude["args"][claude["args"].index("--settings") + 1]) == {
+        "disableAllHooks": True, "permissions": {"deny": ["Read"]}}  # Read: a file an @path in the question names
     assert "ANTHROPIC_API_KEY" in claude["drop_env"]  # bill the subscription, not a stray key
     codex = next(p for p in wizard.CLI_PRESETS if p["id"] == "codex")
     assert codex["args"][codex["args"].index("--sandbox") + 1] == "read-only"

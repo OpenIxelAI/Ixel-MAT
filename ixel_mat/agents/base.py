@@ -32,6 +32,8 @@ MEDIA = ("image",)
 # APIs whose current models all take pictures; an agent on one of them sees pictures unless its
 # `accepts` says otherwise. A local or custom server only does when its `accepts` says so.
 PICTURE_PROVIDERS = ("anthropic", "openai", "xai", "gemini")
+# How a command-line agent can be given pictures on stdin, in the question's own message (picture_stdin)
+PICTURE_STDIN = ("claude-stream-json",)
 
 
 def is_loopback_host(host: str | None) -> bool:
@@ -181,6 +183,14 @@ class AgentConfig:
     # What it takes besides text: ["image"], [] for text only; None = what its API is known to take
     accepts: list[str] | None = None
 
+    # How a command-line agent is given pictures, which are written to its run's own temp folder (workdir
+    # "temp") as ixel-picture-1.png…: picture_args after its arguments, once per picture ("{path}" is the
+    # picture's full path, "{name}" its file name), picture_prompt before the question, once per picture
+    # ("@{name} "), or picture_stdin, the question and pictures in one message on stdin (one of PICTURE_STDIN)
+    picture_args: list[str] | None = None
+    picture_prompt: str = ""
+    picture_stdin: str = ""
+
     @property
     def own_timeout(self) -> float | None:
         """The timeout this agent sets for itself, if it sets one."""
@@ -196,9 +206,20 @@ class AgentConfig:
         return self.own_timeout or UNSET_TRANSPORT_TIMEOUT
 
     @property
+    def can_see_pictures(self) -> bool:
+        """Whether pictures could go to it at all, so seeing them can be turned on or off: an HTTP agent, or
+        a program whose config says how to give it pictures, running in its own temp folder."""
+        if self.type == "oneshot":
+            return bool(self.picture_args or self.picture_prompt or self.picture_stdin) and self.workdir == "temp"
+        return self.type == "http"
+
+    @property
     def sees_pictures(self) -> bool:
-        """Whether pictures attached to a question are sent to it. Only HTTP agents: a program
-        (Claude Code, Codex…) never gets them."""
+        """Whether pictures attached to a question are sent to it: an HTTP agent on an API that takes them,
+        or a program (Claude Code, Codex…) whose config says how to give it pictures, running in its own
+        temp folder. `accepts` turns that on or off."""
+        if self.type == "oneshot":
+            return self.can_see_pictures and (self.accepts is None or "image" in self.accepts)
         if self.type != "http":
             return False
         if self.accepts is not None:
