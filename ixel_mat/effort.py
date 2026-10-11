@@ -8,8 +8,8 @@ last rule covers the models that come out after that. A level a model doesn't ta
 does (minimal on GPT-6 is sent as low), and a model that takes none (Claude Haiku 4.5) gets none sent.
 
 Programs are told what the program itself takes (Claude Code: low to max). Codex hands the level straight to
-OpenAI, and Grok Build to xAI, so they get the levels their model takes as well. Gemini CLI and OpenCode take
-none from Ixel.
+OpenAI, and Grok Build to xAI, so they get the levels their model takes as well. Gemini CLI takes none from
+Ixel; OpenCode gets the level as the model's #variant, for the providers whose models Ixel knows.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import os
 import re
 
 from ixel_mat.models import ALIASES, provider_for_url
+from ixel_mat.presets import PRESETS_BY_ID
 
 UP_TO_MAX = ("low", "medium", "high", "xhigh", "max")
 UP_TO_XHIGH = ("low", "medium", "high", "xhigh")
@@ -73,6 +74,13 @@ NEWEST = {"latest": {"anthropic": "claude-opus-5-5", "openai": "gpt-6-astra", "g
 # Programs that hand the level straight to a company's API, and the model they use when given none
 PASSES_ON = {"codex": ("openai", "gpt-6"), "grok": ("xai", "grok-4.7")}
 
+# OpenCode providers whose models Ixel knows, and the company whose rules apply to them
+OPENCODE_PROVIDERS = {"anthropic": "anthropic", "openai": "openai", "xai": "xai", "google": "gemini"}
+
+# Each level as people read it
+LABELS = {"minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high",
+          "max": "Max", "ultra": "Ultra", "none": "None"}
+
 
 def model_levels(company: str | None, model: str) -> tuple[str, ...]:
     """The levels a model takes on its API, in Ixel's names; () when it takes none."""
@@ -97,7 +105,7 @@ def agent_levels(cfg, model: str | None = None) -> tuple[str, ...]:
     model = cfg.model if model is None else model
     if cfg.type == "http":
         return model_levels(provider_for_url(cfg.url), model)
-    if cfg.type != "oneshot" or not cfg.effort_args:
+    if cfg.type != "oneshot" or not (cfg.effort_args or cfg.effort_in_model):
         return NONE
     from ixel_mat.agents.base import EFFORT_LEVELS  # the agents package imports this module
     takes = tuple(level for level in EFFORT_LEVELS if level in (cfg.effort_levels or EFFORT_LEVELS))
@@ -106,7 +114,36 @@ def agent_levels(cfg, model: str | None = None) -> tuple[str, ...]:
         company, default = passes_on
         theirs = model_levels(company, model or default)
         takes = tuple(level for level in takes if level in theirs)
+    if cfg.effort_in_model:
+        if not model or "#" in model:  # no model to put it in, or the model names its own variant
+            return NONE
+        if program_name(cfg.command) == "opencode":
+            provider, sep, bare = model.partition("/")
+            company = OPENCODE_PROVIDERS.get(provider)
+            if not sep or company is None:
+                return NONE
+            theirs = model_levels(company, bare)
+            return tuple(level for level in takes if level in theirs)
     return takes
+
+
+def native_levels(program: str, model: str | None, company: str | None = None) -> list[dict]:
+    """The levels a program (a preset id) or an API agent ("http", with its provider as company) can be given
+    for model, lowest first, as [{"value": "xhigh", "label": "Extra high"}, ...]; [] when none."""
+    # The sibling task "Native effort levels" owns the fuller per-program version of this; keep it small
+    if program == "http":
+        levels = model_levels(company, model or "")
+    else:
+        preset = PRESETS_BY_ID.get(program)
+        if preset is None:
+            return []
+        from ixel_mat.agents.base import AgentConfig  # the agents package imports this module
+        cfg = AgentConfig(name=program, label=preset["label"], type="oneshot", command=preset["command"],
+                          model=model or "", effort_args=preset.get("effort_args"),
+                          effort_levels=preset.get("effort_levels"),
+                          effort_in_model=preset.get("effort_in_model", ""))
+        levels = agent_levels(cfg)
+    return [{"value": v, "label": LABELS.get(v, v.capitalize())} for v in levels]
 
 
 def to_send(levels: tuple[str, ...], wanted: str) -> str | None:

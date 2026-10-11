@@ -367,13 +367,20 @@ class OneShotAgent(BaseAgent):
         already written to the run's folder, given to the program as its config says. prompt_file: the file
         the question (with what pictures add to it) is already written to, for prompt_via "file"."""
         cmd = [self.config.command] + list((self.config.args or []) if args is None else args)
+        # The nearest level the program (and, for Codex, its model) takes, or none when it takes none
+        level = (to_send(agent_levels(self.config), effort)
+                 if (self.config.effort_args or self.config.effort_in_model) else None)
         if self.config.model and self.config.model_args:
             if not valid_model_id(self.config.model):  # never something the CLI could read as a flag
                 raise ValueError(f"'{self.name}': {self.config.model!r} isn't a valid model name")
-            cmd += [a.replace("{model}", self.config.model) for a in self.config.model_args]
-        # The nearest level the program (and, for Codex, its model) takes, or none when it takes none
-        level = to_send(agent_levels(self.config), effort) if self.config.effort_args else None
-        if level:
+            model = self.config.model
+            # OpenCode's #variant: the level goes inside the model name; a model naming its own is sent as it is
+            if level and self.config.effort_in_model and "#" not in model:
+                model = self.config.effort_in_model.replace("{model}", model).replace("{effort}", level)
+                if not valid_model_id(model):  # effort_in_model is config text: check what it made as well
+                    raise ValueError(f"'{self.name}': {model!r} isn't a valid model name")
+            cmd += [a.replace("{model}", model) for a in self.config.model_args]
+        if level and self.config.effort_args:
             cmd += [a.replace("{effort}", level) for a in self.config.effort_args]
         if output_file and self.config.output_flag:
             cmd += [self.config.output_flag, output_file]

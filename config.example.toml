@@ -112,7 +112,8 @@ color = "yellow"
 #             current, or name one (Claude Code: opus, sonnet, haiku…)
 #   effort    as above. Claude Code, Codex, Copilot and Grok Build take it (a
 #             level the CLI doesn't have is sent as the nearest one it does);
-#             Gemini CLI and OpenCode have no such setting, so it's not sent
+#             OpenCode gets it as the model's #variant (anthropic/…#high), for
+#             the providers Ixel knows; Gemini CLI has no such setting
 #   timeout   seconds per call (the presets: 300, in a review too)
 #   label     the name shown on the panel
 #   billing   "api" if you signed the CLI in with an API key, not a subscription
