@@ -177,6 +177,9 @@ class AgentConfig:
     effort_levels: list[str] | None = None  # levels it accepts; others map to the nearest one
     model_args: list[str] | None = None     # how the CLI takes a model: ["--model", "{model}"];
                                             # with no model set, the CLI uses its own (current) default
+    effort_in_model: str = ""  # how a CLI takes the level inside the model name instead of a flag, e.g.
+                               # "{model}#{effort}" (OpenCode's #variant); used only when a model is set and a
+                               # level is sent; a model that already names its own #variant is sent as it is
 
     # How its calls are paid for: "api", "plan", "local" or "unknown" (usage.py); "" = guess
     billing: str = ""

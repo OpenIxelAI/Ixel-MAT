@@ -169,7 +169,13 @@ CLI_PRESETS = [
         # on older versions); it uses the copy it already has, or the one built into it
         "env": {"OPENCODE_CONFIG_CONTENT": _OPENCODE_LOCKDOWN, "OPENCODE_DISABLE_AUTOUPDATE": "1",
                 "OPENCODE_DISABLE_MODELS_FETCH": "1"},
-        "model_args": ["-m", "{model}"], "model_hint": "provider/model, e.g. anthropic/claude-opus-5-5",
+        # OpenCode's -m takes provider/model#variant, and the variant is its thinking level. Variants differ per
+        # provider and model, so Ixel offers the generic low/medium/high only for providers whose models it
+        # knows (effort.OPENCODE_PROVIDERS), none for the others, and none when the model carries its own #variant
+        "effort_in_model": "{model}#{effort}", "effort_levels": ["low", "medium", "high"],
+        "model_args": ["-m", "{model}"],
+        "model_hint": "provider/model, e.g. anthropic/claude-opus-5-5 (a #variant you add yourself, such as #max, "
+                      "is sent as it is)",
     },
     {
         "id": "grok_build", "label": "Grok Build", "command": "grok",
@@ -232,8 +238,8 @@ CLI_PRESETS = [
 
 # Fields a preset supplies; an agent's own config overrides any of them.
 PRESET_FIELDS = ("command", "args", "args_by_version", "prompt_via", "output_flag", "stdout_format", "timeout",
-                 "env", "drop_env", "effort_args", "effort_levels", "model_args", "picture_args", "picture_prompt",
-                 "picture_stdin")
+                 "env", "drop_env", "effort_args", "effort_levels", "effort_in_model", "model_args", "picture_args",
+                 "picture_prompt", "picture_stdin")
 PRESETS_BY_ID = {p["id"]: p for p in CLI_PRESETS}
 # Fields that describe a preset for people (setup, `ixel model`) and never reach an agent's config.
 PRESET_ABOUT = ("id", "why", "install", "free", "free_then", "model_hint", "warning")

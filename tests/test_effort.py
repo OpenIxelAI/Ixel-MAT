@@ -4,7 +4,7 @@ import pytest
 from ixel_mat.agents.base import AgentConfig
 from ixel_mat.agents.oneshot import OneShotAgent
 from ixel_mat.effort import (LOW_TO_HIGH, MINIMAL_TO_HIGH, NONE, UP_TO_MAX, UP_TO_XHIGH, agent_levels, model_levels,
-                             to_send)
+                             native_levels, to_send)
 from ixel_mat.presets import PRESETS_BY_ID
 
 
@@ -80,7 +80,8 @@ def test_a_level_the_model_doesnt_take_is_sent_as_the_nearest_or_not_at_all():
 
 def _preset(pid, **extra):
     preset = PRESETS_BY_ID[pid]
-    fields = {k: preset[k] for k in ("command", "args", "effort_args", "effort_levels", "model_args") if k in preset}
+    fields = {k: preset[k] for k in ("command", "args", "effort_args", "effort_levels", "effort_in_model", "model_args")
+              if k in preset}
     return AgentConfig(name=pid, label=preset["label"], type="oneshot", **{**fields, **extra})
 
 
@@ -88,7 +89,7 @@ def test_programs_take_their_own_levels_and_codex_its_models_too():
     assert agent_levels(_preset("claude_code")) == UP_TO_MAX
     assert agent_levels(_preset("antigravity")) == UP_TO_MAX          # agy's --effort takes low to max (unverified)
     assert agent_levels(_preset("gemini_cli")) == NONE                # no effort flag
-    assert agent_levels(_preset("opencode")) == NONE
+    assert agent_levels(_preset("opencode")) == NONE                  # no model, so nowhere to put a #variant
     # Codex hands the level to OpenAI: GPT-6 (its default) has no minimal, GPT-5 no xhigh, GPT-4.1 none
     assert agent_levels(_preset("codex")) == UP_TO_XHIGH
     assert agent_levels(_preset("codex", model="gpt-5")) == MINIMAL_TO_HIGH
@@ -124,3 +125,36 @@ def test_an_api_model_is_judged_by_the_model_it_resolved_to():
     cfg = AgentConfig(name="a", label="A", type="http", url="https://api.anthropic.com/v1/messages", model="latest")
     assert agent_levels(cfg) == UP_TO_MAX
     assert agent_levels(cfg, "claude-haiku-4-5") == NONE
+
+
+def test_opencode_is_given_the_level_as_its_models_variant():
+    assert agent_levels(_preset("opencode", model="anthropic/claude-opus-5-5")) == LOW_TO_HIGH
+    assert agent_levels(_preset("opencode", model="openai/gpt-5.5")) == LOW_TO_HIGH
+    assert agent_levels(_preset("opencode", model="anthropic/claude-haiku-4-5")) == NONE       # takes no thinking
+    assert agent_levels(_preset("opencode", model="ollama/llama3.3")) == NONE                  # variants unknown
+    assert agent_levels(_preset("opencode", model="opencode/big-pickle")) == NONE              # variants unknown
+    assert agent_levels(_preset("opencode", model="anthropic/claude-opus-5-5#max")) == NONE   # names its own
+
+    def model_arg(effort, **extra):
+        cmd, _ = OneShotAgent(_preset("opencode", **extra))._build_command("q", effort=effort)
+        assert "--effort" not in cmd
+        return cmd[cmd.index("-m") + 1]
+
+    assert model_arg("high", model="anthropic/claude-opus-5-5") == "anthropic/claude-opus-5-5#high"
+    assert model_arg("max", model="anthropic/claude-opus-5-5") == "anthropic/claude-opus-5-5#high"  # nearest it offers
+    assert model_arg("", model="anthropic/claude-opus-5-5") == "anthropic/claude-opus-5-5"
+    assert model_arg("high", model="anthropic/claude-opus-5-5#max") == "anthropic/claude-opus-5-5#max"  # your own stays
+    assert model_arg("high", model="ollama/llama3.3") == "ollama/llama3.3"
+
+
+def test_native_levels_names_the_levels_in_the_providers_own_words():
+    assert native_levels("opencode", "anthropic/claude-opus-5-5") == [
+        {"value": "low", "label": "Low"}, {"value": "medium", "label": "Medium"}, {"value": "high", "label": "High"}]
+    assert native_levels("opencode", "ollama/llama3.3") == []
+    assert native_levels("opencode", None) == []
+    assert [lv["value"] for lv in native_levels("claude_code", None)] == list(UP_TO_MAX)
+    assert native_levels("claude_code", None)[3]["label"] == "Extra high"
+    assert native_levels("gemini_cli", "gemini-3.1-pro") == []
+    assert native_levels("http", "claude-haiku-4-5", company="anthropic") == []
+    assert [lv["value"] for lv in native_levels("http", "gpt-5", company="openai")] == list(MINIMAL_TO_HIGH)
+    assert native_levels("nobody", "x") == []

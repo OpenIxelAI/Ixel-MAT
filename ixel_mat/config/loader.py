@@ -162,6 +162,11 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
         drop_env = _str_list(data, "drop_env", name, warnings)
         effort_args = _str_list(data, "effort_args", name, warnings)
         effort_levels = _str_list(data, "effort_levels", name, warnings)
+        effort_in_model = data.get("effort_in_model", "")
+        if effort_in_model and not (isinstance(effort_in_model, str)
+                                    and "{model}" in effort_in_model and "{effort}" in effort_in_model):
+            warnings.append(f"Agent '{name}': effort_in_model must be text with {{model}} and {{effort}} in it")
+            effort_in_model = ""
         model_args = _str_list(data, "model_args", name, warnings)
         accepts = _str_list(data, "accepts", name, warnings)
         if accepts and any(kind not in MEDIA for kind in accepts):
@@ -234,6 +239,7 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
             drop_env=drop_env,
             effort_args=effort_args,
             effort_levels=effort_levels,
+            effort_in_model=effort_in_model,
             model_args=model_args,
             billing=billing,
             accepts=accepts,
