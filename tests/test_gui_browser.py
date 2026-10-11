@@ -642,6 +642,7 @@ class FakeBoard:
         self.actions = []
         self.refuse = {}   # op → the error Handoff gives for it
         self.slow = 0.0    # seconds each action takes, as a real `handoff api` start does
+        self.slow_levels = 0.0  # seconds a model's levels take to come back
         self.spent = None  # what every run on the board cost, from a Handoff that says
         self.usage = None  # and model by model
         self.tasks = {
@@ -702,6 +703,7 @@ class FakeBoard:
         if url.path == "/api/board/task":
             return reply(self.detail(query["task"]))
         if url.path == "/api/board/levels":  # (codex hands the level to OpenAI: older models take fewer)
+            time.sleep(self.slow_levels)
             if query.get("agent") != "codex":
                 return reply({"levels": None})
             return reply({"levels": ["low", "medium", "high"] if query.get("model") == "gpt-5.1"
@@ -958,6 +960,38 @@ def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_
     wait_until(page, "!document.querySelector('.needs')")
     approve = [args for op, args in fake.actions if op == "approve"][-1]
     assert approve["models"] == ["gpt-5.1"] and approve["efforts"] == {"gpt-5.1": "high"}
+
+    # A model typed just before pressing the button: the level picked for the one before it, which this one doesn't
+    # take, isn't sent with it
+    fake.tasks["T-7"]["run"] = None
+    fake.slow_levels = 0.5
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-7]")
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "one")
+    page.fill("[data-key=needs-model-0]", "gpt-5.5")
+    wait_until(page, "document.querySelectorAll('[data-key=needs-effort-0] option').length === 5")
+    page.select_option("[data-key=needs-effort-0]", "xhigh")
+    page.fill("[data-key=needs-model-0]", "gpt-5.1")
+    page.press("[data-key=needs-model-0]", "Enter")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["models"] == ["gpt-5.1"] and "efforts" not in approve
+    fake.slow_levels = 0
+
+    # No model named: it says so, and nothing is sent
+    fake.tasks["T-7"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-7]")
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "one")
+    page.fill("[data-key=needs-model-0]", "")
+    sent = len(fake.actions)
+    page.click(".needs button[type=submit]")
+    page.wait_for_selector(".board-notice.error")
+    assert "Name a model to run it on, or pick codex's own model." in page.inner_text(".board-notice.error")
+    assert len(fake.actions) == sent and page.input_value("[data-key=needs-model-0]") == ""
+    page.click("[data-key=needs-cancel]")
 
     # An answer names no model, and the choice is hidden
     fake.tasks["T-6"]["run"] = None
