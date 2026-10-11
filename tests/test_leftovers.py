@@ -81,7 +81,8 @@ def test_the_tests_never_look_in_your_own_folders(tmp_path_factory):
         assert all(base in place.parents for place in (*where.gemini, where.copilot, *where.opencode, where.grok))
 
 
-@pytest.mark.parametrize("command", ["claude", "codex", "hermes", sys.executable, "/opt/bin/ixel-own-cli"])
+# Where Antigravity keeps a question is unverified, so nothing is cleaned up after it yet
+@pytest.mark.parametrize("command", ["claude", "codex", "hermes", "agy", sys.executable, "/opt/bin/ixel-own-cli"])
 def test_only_the_clis_that_keep_questions_are_cleaned_up_after(command, tmp_path):
     assert leftovers.prepare(command, [], _run_folder(tmp_path), _env(tmp_path)) is None
 

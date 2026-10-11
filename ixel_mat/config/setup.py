@@ -287,6 +287,8 @@ def _ask_model(models: list[str], default: str = "latest") -> str:
 # Flags verified against `claude --help` (Claude Code 2.1) and `codex exec --help`.
 # Both run answer-only: no tools / read-only sandbox, in a fresh empty folder,
 # with no MCP servers loaded (so a panel member can't call Ixel back and loop).
+# A preset with a "warning" (Antigravity) is opt-in: its warning is shown first and
+# the answer defaults to No. The warning never goes into the config.
 def _configure_cli_agents(taken_ids: set[str]) -> list[dict]:
     found = [p for p in CLI_PRESETS if find_on_path(p["command"])]
     if not found:
@@ -302,6 +304,10 @@ def _configure_cli_agents(taken_ids: set[str]) -> list[dict]:
         if preset["id"] == "opencode" and _opencode_only_free():
             # Every question would come back turned down, so it's left off unless you say otherwise
             console.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{OPENCODE_ONLY_FREE}[/]")
+            add = False
+        if preset.get("warning"):
+            # Opt-in: only if you say yes, having read why it might not be wise
+            console.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{safe_markup(preset['warning'])}[/]")
             add = False
         if Confirm.ask(f"  [{C['moon']}]Add {preset['label']} to the panel?[/] "
                        f"[{C['dim']}]({preset['why']})[/]", default=add):
@@ -349,7 +355,9 @@ def _suggest_more_members(agents: list[dict]) -> None:
     else:
         console.print(f"  [{C['dim']}]With two models, a disagreement is a tie. A third member gives a majority.[/]\n")
     taken = {a.get("preset") or a.get("id") for a in agents}
-    missing = [p for p in CLI_PRESETS if p["id"] not in taken and not find_on_path(p["command"])]
+    # Opt-in presets (a "warning") are never suggested, and have no install line
+    missing = [p for p in CLI_PRESETS
+               if p["id"] not in taken and not p.get("warning") and not find_on_path(p["command"])]
     free = [(p["label"], f"{p['free'][0].upper()}{p['free'][1:]}. Install: {p['install']}, "
                          f"{p.get('free_then') or 'then run ' + p['command'] + ' once to sign in'}.")
             for p in missing if p.get("free")]

@@ -3,7 +3,7 @@ The Models list in Settings: what each model on your panel can be set to, so nob
 
 Each list comes from the company whenever Ixel can ask it. A model Ixel calls itself shows its API's own
 list, with the key it already uses. A program shows its company's list when Ixel has that company's key
-(Claude Code: Anthropic's, Codex: OpenAI's, Gemini CLI: Google's), OpenCode shows the models it already
+(Claude Code: Anthropic's, Codex: OpenAI's, Gemini CLI and Antigravity: Google's), OpenCode shows the models it already
 knows (`opencode models`, kept from fetching OpenCode's catalog), and a model server on your own computer
 shows what it has. Otherwise the list built in below is
 shown, and the page says so: it's a fallback that goes stale, while the live one doesn't.
@@ -52,7 +52,8 @@ PROGRAM_NAMES: dict[str, list[tuple[str, str]]] = {
     "copilot": [("auto", "Copilot picks")],
 }
 # The company whose model list a program can use
-PROGRAM_COMPANY = {"claude_code": "anthropic", "codex": "openai", "gemini_cli": "gemini", "grok_build": "xai"}
+PROGRAM_COMPANY = {"claude_code": "anthropic", "codex": "openai", "gemini_cli": "gemini", "grok_build": "xai",
+                   "antigravity": "gemini"}
 # Programs that list their own models: `opencode models` prints provider/model, one a line. Only run when
 # the agent's command is that program itself (a command such as npx would read "models" as a package to fetch).
 # It's run as for a question, so OpenCode lists what it already knows and never fetches its model catalog

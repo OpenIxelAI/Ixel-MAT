@@ -431,7 +431,7 @@ def test_pwd_names_the_folder_a_program_starts_in_in_full():
 
 def test_subscription_clis_never_see_other_vendors_keys():
     from ixel_mat.presets import OTHER_KEYS, PRESETS_BY_ID
-    for preset_id in ("claude_code", "codex", "gemini_cli", "copilot"):
+    for preset_id in ("claude_code", "codex", "gemini_cli", "copilot", "antigravity"):
         assert set(OTHER_KEYS) <= set(PRESETS_BY_ID[preset_id]["drop_env"]), preset_id
     assert {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "GROQ_API_KEY"} <= set(OTHER_KEYS)
     assert "GITHUB_TOKEN" not in OTHER_KEYS and "GH_TOKEN" not in OTHER_KEYS  # Copilot signs in with those
@@ -569,13 +569,24 @@ def test_grok_build_has_no_terminal_tool_by_either_name_and_never_waits_for_perm
     assert args[args.index("--permission-mode") + 1] == "dontAsk" and "bypassPermissions" not in args
 
 
+@pytest.mark.parametrize("says", ["Not logged in · Please run /login", "Invalid API key · Please run /login"])
+def test_antigravity_not_signed_in_is_said_plainly(monkeypatch, says):
+    from ixel_mat import presets
+    from ixel_mat.agents import oneshot
+    monkeypatch.setattr(oneshot, "preset_for", lambda command: presets.PRESETS_BY_ID["antigravity"])
+    script = f"import sys; sys.stderr.write({says!r}); sys.exit(1)"
+    with pytest.raises(RuntimeError) as failure:
+        _run(_ask_cli(_cli(script, prompt_via="stdin")))
+    assert str(failure.value) == presets.ANTIGRAVITY_SIGN_IN and len(str(failure.value)) <= 160
+
+
 def test_questions_reach_the_subscription_clis_on_stdin_not_on_their_command_line():
     # Another person on this computer can read any program's command line (`ps`). Grok Build doesn't read stdin:
     # its question goes in a file only you can read
     from ixel_mat.presets import CLI_PRESETS
     assert {p["id"]: p["prompt_via"] for p in CLI_PRESETS} == {
         "claude_code": "stdin", "codex": "stdin", "gemini_cli": "stdin", "copilot": "stdin", "opencode": "stdin",
-        "grok_build": "file"}
+        "grok_build": "file", "antigravity": "stdin"}
 
 
 def test_cli_agent_effort_flag_uses_the_nearest_supported_level():

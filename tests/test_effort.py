@@ -86,6 +86,7 @@ def _preset(pid, **extra):
 
 def test_programs_take_their_own_levels_and_codex_its_models_too():
     assert agent_levels(_preset("claude_code")) == UP_TO_MAX
+    assert agent_levels(_preset("antigravity")) == UP_TO_MAX          # agy's --effort takes low to max (unverified)
     assert agent_levels(_preset("gemini_cli")) == NONE                # no effort flag
     assert agent_levels(_preset("opencode")) == NONE
     # Codex hands the level to OpenAI: GPT-6 (its default) has no minimal, GPT-5 no xhigh, GPT-4.1 none
