@@ -27,14 +27,16 @@ const KIND_HINTS = {
   image: "makes pictures. Nothing in the project changes.",
 };
 // The models an edit can run on, by worker: suggestions (any model name can be typed), the one model a run starts on,
-// and the chain Claude's edits start with, biggest first: the biggest plans the steps and hands each one down to the
-// smallest that can do it well (Handoff's approve args.models, and args.efforts for how hard each one thinks)
+// and the chain Claude's edits start with, biggest first, each with its effort: the biggest plans the steps and hands
+// each one down to the smallest that can do it well (Handoff's approve args.models, and args.efforts). Fable plans at
+// low effort: its planning was three quarters of what a chain cost, and low effort plans well enough for most tasks.
 const CLAUDE_MODELS = [
   ["claude-fable-5-1", "Fable 5.1"], ["claude-opus-5-5", "Opus 5.5"], ["claude-sonnet-5-5", "Sonnet 5.5"],
   ["claude-haiku-5-5", "Haiku 5.5"],
 ];
 const WORKER_MODELS = {
-  claude: { suggest: CLAUDE_MODELS, one: "claude-opus-5-5", chain: ["claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5"] },
+  claude: { suggest: CLAUDE_MODELS, one: "claude-opus-5-5",
+    chain: [["claude-fable-5-1", "low"], ["claude-opus-5-5", ""], ["claude-haiku-5-5", ""]] },
   codex: { suggest: ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.5", "gpt-5.5-mini"].map((m) => [m, m]),
     one: "gpt-5.5", chain: [] },
 };
@@ -1130,7 +1132,7 @@ function runPicker(asked, agent, worker) {
     state.mode = mode.value;
     if (state.mode === "own") state.rows = [{ model: "", effort: state.rows[0] && !state.rows[0].model ? state.rows[0].effort : "" }];
     if (state.mode === "one" && (state.rows.length !== 1 || !state.rows[0].model)) state.rows = [{ model: names.one, effort: "" }];
-    if (state.mode === "chain" && state.rows.length < 2) state.rows = names.chain.map((model) => ({ model, effort: "" }));
+    if (state.mode === "chain" && state.rows.length < 2) state.rows = names.chain.map(([model, effort]) => ({ model, effort }));
     rows.replaceChildren(...state.rows.map((row, i) => {
       const parts = [];
       if (state.mode !== "own") {

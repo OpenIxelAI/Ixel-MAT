@@ -893,6 +893,7 @@ def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_
     page.select_option("#needs-run-mode", "chain")
     assert [page.input_value(f"[data-key=needs-model-{i}]") for i in range(3)] == [
         "claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5"]
+    assert page.input_value("[data-key=needs-effort-0]") == "low"  # Fable plans at low effort, unless you say
     efforts = page.locator("[data-key=needs-effort-0] option").all_inner_texts()
     assert efforts == ["Default effort", "Low effort", "Medium effort", "High effort", "Extra high effort", "Max effort"]
     page.select_option("[data-key=needs-effort-0]", "max")
