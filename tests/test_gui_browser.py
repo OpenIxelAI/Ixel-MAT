@@ -1610,7 +1610,7 @@ def test_settings_effort_follows_the_model_latest_is_now(tmp_path, browser):
 
         # Latest is GPT-6 Astra now: low to max, and the minimal saved before is sent as low
         page.wait_for_selector('[data-key="agent:gpt:model"] option:text("Latest (gpt-6-astra)")', state="attached")
-        levels(["Default", "Low", "Medium", "High", "Xhigh", "Max", "Minimal (sent as Low)"])
+        levels(["Default", "Low", "Medium", "High", "Extra high", "Max", "Minimal (sent as Low)"])
         assert effort.input_value() == "minimal"
         # GPT-5 takes minimal to high
         setting(page, "agent:gpt:model").select_option("gpt-5")
@@ -1619,7 +1619,7 @@ def test_settings_effort_follows_the_model_latest_is_now(tmp_path, browser):
         # Latest fast is GPT-6.1 Sol now, which takes low to max again
         setting(page, "agent:gpt:model").select_option("latest-fast")
         wait_for_file(path, 'model = "latest-fast"')
-        levels(["Default", "Low", "Medium", "High", "Xhigh", "Max", "Minimal (sent as Low)"])
+        levels(["Default", "Low", "Medium", "High", "Extra high", "Max", "Minimal (sent as Low)"])
         assert not errors and not violations, (errors, violations)
 
 
