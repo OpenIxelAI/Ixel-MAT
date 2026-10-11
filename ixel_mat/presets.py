@@ -106,7 +106,8 @@ CLI_PRESETS = [
         "picture_args": ["--image", "{name}"],
         "drop_env": [*OTHER_KEYS],
         "effort_args": ["-c", 'model_reasoning_effort="{effort}"'],
-        "effort_levels": ["minimal", "low", "medium", "high", "xhigh"],
+        # Every level any Codex model takes; which of them a model takes is in effort.py (from Codex's models cache)
+        "effort_levels": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         "model_args": ["-m", "{model}"], "model_hint": "a model name such as gpt-5.5",
     },
     {

@@ -14,6 +14,7 @@ Keys are write-only: the page can save, replace or remove one (only names Ixel k
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 from pathlib import Path
@@ -156,12 +157,14 @@ def snapshot(settings, version: str | None = None) -> dict:
     panel = set(settings.review.agents) if settings.review.agents else None
     agents = []
     for name, cfg in settings.agent_configs.items():
-        levels = effort.agent_levels(cfg)
+        choices = effort.agent_choices(cfg)
+        levels = tuple(c["value"] for c in choices)
         program = settings.program_of(name)
         agents.append({
             "name": name, "label": cfg.label, "kind": _kind(cfg), "model": raw.get(name, {}).get("model", "") or "",
-            # Only the levels this model (or program) takes; one set before that it doesn't is sent as the nearest
-            "effort": cfg.effort or "", "has_effort": bool(levels), "efforts": list(levels),
+            # Only the levels this model (or program) takes, in its provider's own names ("levels": {value, label});
+            # one set before that it doesn't is sent as the nearest
+            "effort": cfg.effort or "", "has_effort": bool(levels), "efforts": list(levels), "levels": choices,
             "effort_sent": effort.to_send(levels, cfg.effort) or "", "effort_note": _effort_note(cfg, levels),
             # A model server of your own has no default to fall back on: a model has to be named
             "needs_model": cfg.type == "http" and not _follows_newest(cfg),
@@ -402,9 +405,7 @@ def _effort_note(cfg, levels) -> str:
     """Why there's no Effort to pick, when there isn't."""
     if levels or cfg.type not in ("http", "oneshot"):
         return ""
-    if cfg.type == "oneshot":
-        return f"{cfg.label} doesn't take an effort level from Ixel; it thinks as it's set up to."
-    return f"{cfg.model or cfg.label} has no effort setting, so Ixel sends none."
+    return effort.why_none(cfg) + "."
 
 
 def _sound(settings) -> dict:
@@ -482,7 +483,19 @@ def plan_change(settings, section: str, values: Any, agent: Any = None) -> tuple
                 else:
                     raise SettingsError(f"{value!r} isn't a model name.")
             elif key == "effort":
-                out["effort"] = edit.REMOVE if value in ("", None) else _choice(value, EFFORT_LEVELS, "Effort")
+                if value in ("", None, "default"):
+                    out["effort"] = edit.REMOVE
+                    continue
+                cfg = settings.agent_configs[agent]
+                if isinstance(values.get("model"), str):  # set with a new model: the levels that one takes
+                    cfg = dataclasses.replace(cfg, model="" if values["model"] in ("", "default") else values["model"])
+                takes = [c["value"] for c in effort.agent_choices(cfg)]
+                if isinstance(value, str) and value in takes:
+                    out["effort"] = value
+                elif not takes:
+                    raise SettingsError(effort.why_none(cfg) + ".")
+                else:
+                    raise SettingsError(f"{cfg.label} doesn't take {value!r}; it takes: {', '.join(takes)}.")
             elif key == "url":
                 cfg = settings.agent_configs[agent]
                 if not own_server(cfg, _raw_agents(settings)[agent]):

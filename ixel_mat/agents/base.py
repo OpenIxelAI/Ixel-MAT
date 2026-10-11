@@ -27,7 +27,8 @@ PROMPT_MODES = ("flag", "arg", "stdin", "auto", "file")
 # How a CLI prints its answer: plain text, or Claude Code's stream-json events (which let the
 # answer be shown as it's written)
 STDOUT_FORMATS = ("text", "claude-stream-json")
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# Ixel's scale, lowest first: ultra is Codex's own top level, past max
+EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 # What an agent can take besides text (`accepts = ["image"]`)
 MEDIA = ("image",)
 # APIs whose current models all take pictures; an agent on one of them sees pictures unless its
@@ -157,7 +158,8 @@ class AgentConfig:
     # Per-call timeout in seconds (0 = DEFAULT_TIMEOUT)
     timeout: float = 0.0
 
-    # Thinking level: minimal | low | medium | high | xhigh | max
+    # Thinking level: minimal | low | medium | high | xhigh | max | ultra (each program is offered its
+    # provider's own levels for its model: effort.py)
     effort: str = ""
 
     # Command-line agents
