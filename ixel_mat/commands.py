@@ -35,6 +35,8 @@ COMMANDS = [
     CommandDef('status', 'Single-screen health dashboard for providers, agents, and secrets', 'cli', 'ixel status'),
     CommandDef('model', "See each agent's model, or change one (latest = always the newest)", 'cli',
                'ixel model [agent] [model]', aliases=('models',)),
+    CommandDef('effort', "See each agent's thinking level and the levels it takes, or change one", 'cli',
+               'ixel effort [agent] [level]'),
     CommandDef('config', 'Show resolved config, tokens, validation status', 'cli', 'ixel config', aliases=('cfg',)),
     CommandDef('agents', 'List agents + test connectivity', 'cli', 'ixel agents'),
     CommandDef('doctor', 'Check each part of Ixel; --check tests your models too', 'cli', 'ixel doctor [--check] [--json]'),
