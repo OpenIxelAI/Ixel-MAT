@@ -933,6 +933,19 @@ def test_switching_antigravity_on_writes_the_panel_out_in_full(config, antigravi
     assert not {a["name"]: a for a in snapshot()["agents"]}["anti"]["on_panel"]
 
 
+def test_saver_drafts_with_antigravity_only_once_it_is_switched_on(config, antigravity):
+    # With no [saver] drafters, every model but the verifier drafts: not an opt-in one you haven't switched on,
+    # since every question and its code would go to it
+    config.write_text(SUBSCRIPTIONS + '\n[saver]\nverifier = "claude"\n', encoding="utf-8")
+    drafters = list(load_settings().saver_configs())
+    assert drafters == ["gpt", "local", "grok", "claude"]
+    assert change("panel", {"on": ["claude", "gpt", "local", "grok", "anti"]})[0] == 200
+    assert "anti" in load_settings().saver_configs()
+    # Named as a drafter by hand, it drafts: that's switching it on too
+    config.write_text(SUBSCRIPTIONS + '\n[saver]\nverifier = "claude"\ndrafters = ["anti", "gpt"]\n', encoding="utf-8")
+    assert list(load_settings().saver_configs()) == ["anti", "gpt", "claude"]
+
+
 def test_grok_build_and_antigravity_pick_from_their_companies_lists(config, antigravity, asked, monkeypatch):
     from ixel_mat.gui import model_choices
     config.write_text(SUBSCRIPTIONS, encoding="utf-8")

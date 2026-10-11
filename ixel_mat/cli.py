@@ -1158,9 +1158,11 @@ def cmd_image(argv: list[str]) -> int:
             size = None
         prompt, writer = description.strip(), None
         if material is not None:
-            # With Private on, only a model of yours reads your files (the description still goes out)
+            # With Private on, only a model of yours reads your files (the description still goes out). Picked
+            # for you, never an opt-in program (Antigravity) you haven't switched on; --writer can name it
             writer = images.pick_writer({name: cfg for name, cfg in settings.agent_configs.items()
-                                         if settings.yours(name)}, provider, args.writer, private=settings.private)
+                                         if settings.yours(name) and (args.writer or settings.opted_in(name))},
+                                        provider, args.writer, private=settings.private)
             out.print(f"  [{C['dim']}]{safe_markup(writer.label)} is reading {safe_markup(material.title)} "
                       f"({safe_markup(material.summary())}) to describe the picture…[/]")
             prompt = asyncio.run(images.describe(writer, description, material))

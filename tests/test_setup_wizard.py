@@ -225,6 +225,52 @@ def test_antigravity_is_off_unless_you_say_yes_and_comes_with_its_warning(monkey
     assert 'preset = "antigravity"' in toml and ANTIGRAVITY_WARNING not in toml
 
 
+def test_saying_yes_to_antigravity_puts_it_on_the_panel_and_a_kept_one_stays_off():
+    from ixel_mat.runtime import settings_from
+    claude = {"id": "claude_code", "preset": "claude_code", "type": "oneshot", "label": "Claude Code"}
+    anti = {"id": "antigravity", "preset": "antigravity", "type": "oneshot", "label": "Antigravity"}
+    gpt = {"id": "gpt", "type": "http", "url": "https://api.openai.com/v1/chat/completions", "model": "gpt-5"}
+
+    def panel(toml):
+        config = tomllib.loads(toml)
+        return config, list(settings_from(config).panel_configs())
+
+    # No [review] agents list would mean every model but Antigravity: the panel is written out in full
+    config, on = panel(wizard._build_toml([claude, anti]))
+    assert config["review"]["agents"] == ["claude_code", "antigravity"] and on == ["claude_code", "antigravity"]
+    # One kept from the file, not asked about this time, stays off; a model added beside it goes on the panel
+    kept = tomllib.loads(wizard._build_toml([claude]))
+    kept["agents"]["antigravity"] = {"preset": "antigravity", "type": "oneshot"}
+    config, on = panel(wizard._build_toml([claude, anti, gpt], existing=kept))
+    assert "agents" not in config.get("review", {}) and on == ["claude_code", "gpt"]
+    # Asked again and you say yes: on the panel
+    config, on = panel(wizard._build_toml([claude, {**anti, "_asked": True}], existing=kept))
+    assert on == ["claude_code", "antigravity"]
+    # An old list naming no model the file had (empty, or only ones since gone) was read as no list: so it is here
+    for listed in ([], ["opus"]):
+        old = {**tomllib.loads(wizard._build_toml([claude])), "review": {"agents": listed}}
+        config, on = panel(wizard._build_toml([claude, anti], existing=old))
+        assert on == ["claude_code", "antigravity"]
+
+
+def test_triage_doesnt_pick_antigravity_to_decide_unless_you_do(monkeypatch):
+    claude, anti = {"id": "claude_code", "preset": "claude_code"}, {"id": "antigravity", "preset": "antigravity"}
+    monkeypatch.setattr(wizard.Confirm, "ask", lambda *a, **k: True if "triage" in str(a[0]) else k.get("default"))
+    defaults = []
+
+    def prompt(question, **k):
+        if "Who decides" in str(question):
+            return "model"
+        defaults.append(k.get("default"))
+        return k.get("default") or k["choices"][0]
+
+    monkeypatch.setattr(wizard.Prompt, "ask", prompt)
+    assert wizard._configure_triage([claude, anti], {"mode": "review"})["agent"] == "claude_code"
+    assert defaults == ["claude_code"]  # it would see every question; it's still one of the choices
+    wizard._configure_triage([anti, {"id": "anti2", "command": "agy"}], {"mode": "review"})
+    assert defaults[-1] is None  # nothing but opt-in programs: no default, so you pick
+
+
 def test_opencode_with_only_its_own_models_is_left_off_unless_you_say(monkeypatch):
     # Its free models answer only inside OpenCode: every question would come back turned down
     monkeypatch.setattr(wizard, "find_on_path", lambda cmd: "/usr/bin/opencode" if cmd == "opencode" else None)

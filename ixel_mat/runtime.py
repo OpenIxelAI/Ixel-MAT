@@ -18,13 +18,11 @@ from ixel_mat.local_models import stays_on_your_computers
 from ixel_mat.material import mask_secrets
 from ixel_mat.triage import DEPTH_WHY, TriageDecision, TriageSettings, make_triage, parse_triage_settings
 from ixel_mat.modes.review import ESCALATE_POLICIES, ON_WRONG_POLICIES, ReviewMode
+from ixel_mat.presets import OFF_BY_DEFAULT
 from ixel_mat.usage import Price, billing_for, parse_pricing
 
 CONNECT_TIMEOUT = 30.0
 
-# Programs that sit out of the panel until switched on in Settings or named in [review] agents: the opt-in
-# presets, the ones with a "warning" (Antigravity: Google's terms may restrict using it from other tools)
-OFF_BY_DEFAULT = frozenset({"antigravity"})
 
 
 # "Auto": Triage (see triage.py) picks quick, review or deep for each question
@@ -110,6 +108,11 @@ class Settings:
         """Whether this agent sits out of the panel unless [review] agents names it."""
         return self.program_of(name) in OFF_BY_DEFAULT
 
+    def opted_in(self, name: str) -> bool:
+        """Whether a default that means "every agent" takes this one: any agent but an off-by-default program,
+        which only once it's switched on (named in [review] agents)."""
+        return not self.off_by_default(name) or name in (self.review.agents or ())
+
     def _panel(self) -> dict[str, AgentConfig]:
         if not self.review.agents:
             return {n: c for n, c in self.agent_configs.items() if not self.off_by_default(n)}
@@ -159,7 +162,9 @@ class Settings:
     def saver_configs(self) -> dict[str, AgentConfig]:
         """Drafters plus the verifier, for saver mode."""
         verifier = self.verifier
-        drafters = self.saver.drafters or [n for n in self.agent_configs if n != self.saver.verifier]
+        # Unset: every agent but the verifier, less an opt-in program (Antigravity) you haven't switched on
+        drafters = self.saver.drafters or [n for n in self.agent_configs
+                                           if n != self.saver.verifier and self.opted_in(n)]
         names = [n for n in drafters if n != verifier and self.yours(n)] + ([verifier] if verifier else [])
         return {n: self.agent_configs[n] for n in names if n in self.agent_configs}
 

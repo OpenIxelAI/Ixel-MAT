@@ -1610,7 +1610,7 @@ def test_settings_effort_follows_the_model_latest_is_now(tmp_path, browser):
 
         # Latest is GPT-6 Astra now: low to max, and the minimal saved before is sent as low
         page.wait_for_selector('[data-key="agent:gpt:model"] option:text("Latest (gpt-6-astra)")', state="attached")
-        levels(["Default", "Low", "Medium", "High", "Xhigh", "Max", "Minimal (sent as Low)"])
+        levels(["Default", "Low", "Medium", "High", "Extra high", "Max", "Minimal (sent as Low)"])
         assert effort.input_value() == "minimal"
         # GPT-5 takes minimal to high
         setting(page, "agent:gpt:model").select_option("gpt-5")
@@ -1619,7 +1619,7 @@ def test_settings_effort_follows_the_model_latest_is_now(tmp_path, browser):
         # Latest fast is GPT-6.1 Sol now, which takes low to max again
         setting(page, "agent:gpt:model").select_option("latest-fast")
         wait_for_file(path, 'model = "latest-fast"')
-        levels(["Default", "Low", "Medium", "High", "Xhigh", "Max", "Minimal (sent as Low)"])
+        levels(["Default", "Low", "Medium", "High", "Extra high", "Max", "Minimal (sent as Low)"])
         assert not errors and not violations, (errors, violations)
 
 
@@ -1826,6 +1826,28 @@ def test_settings_a_refused_change_drops_only_file_changes_and_shows_the_file(se
     page.wait_for_selector('[data-note="key:OPENAI_API_KEY"]:has-text("Removed")')
     wait_until(page, "document.activeElement.dataset.key === 'key:OPENAI_API_KEY:value'")
     assert not errors, errors
+
+
+def test_settings_antigravity_doesnt_draft_for_saver_until_it_is_switched_on(tmp_path, browser):
+    home = tmp_path / "home"
+    path = home / ".config" / "ixel-mat" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(SETTINGS_TOML + '\n[agents.anti]\npreset = "antigravity"\n\n[saver]\nverifier = "claude"\n',
+                    encoding="utf-8")
+    with launch_gui(home, {"IXEL_TEST_PANEL_KEY": "sk-test"}) as url:
+        page, errors, _ = open_settings(browser, url)
+        assert not setting(page, "agent:anti:on").is_checked()
+        assert not setting(page, "saver:draft:anti").is_checked() and setting(page, "saver:draft:gemini").is_checked()
+        setting(page, "saver:draft:gemini").uncheck()
+        wait_for_file(path, 'drafters = ["gpt"]')
+        # Ticked back, the drafters are the usual ones again: no list, so Antigravity still sits out
+        setting(page, "saver:draft:gemini").check()
+        deadline = time.monotonic() + 10
+        while "drafters" in path.read_text(encoding="utf-8"):
+            assert time.monotonic() < deadline, path.read_text(encoding="utf-8")
+            time.sleep(0.05)
+        assert not setting(page, "saver:draft:anti").is_checked()
+        assert not errors, errors
 
 
 def test_settings_saver_drafters_labels_time_limit_and_asks_warning(tmp_path, browser):
