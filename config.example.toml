@@ -136,7 +136,9 @@ preset = "opencode"
 
 # Grok Build (`grok`), signed in with your xAI account (SuperGrok)
 # (`grok login`). Each question runs in a home folder of its own, so your Grok
-# Build config, MCP servers, hooks, skills and sessions stay out of it.
+# Build config, MCP servers, hooks, skills and sessions stay out of it. A review
+# of a diff can take Grok Build several minutes, so Ixel waits up to 15 minutes
+# for it and, unless you set an effort for it, asks it at low.
 [agents.grok_build]
 preset = "grok_build"
 
