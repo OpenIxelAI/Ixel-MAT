@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ixel_mat.agent.sandbox import is_shell_or_interpreter
+from ixel_mat.agent.tools import is_secret_name
 from ixel_mat.config import secrets as _secrets
 from ixel_mat.config.secrets import write_private_file
 
@@ -192,6 +193,21 @@ class AgentStore:
 
     # ── Skills ───────────────────────────────────────────────────────────────
 
+    def _skill_path(self, name: str) -> Path:
+        """A skill's real SKILL.md, confined to skills/ even when a downloaded skill contains symlinks."""
+        if not _safe_component(name):
+            raise KeyError(f"no skill named {str(name)[:60]!r}; use a name from the skill index")
+        try:
+            base = self.root.resolve() / "skills"
+            skill = (base / name / "SKILL.md").resolve()
+            parts = skill.relative_to(base).parts
+        except (OSError, RuntimeError, ValueError):
+            raise KeyError(f"the skill {name!r} leads outside the skills folder") from None
+        if not parts or skill.name != "SKILL.md" or any(part.lower() == ".git" or is_secret_name(part)
+                                                       for part in parts):
+            raise KeyError(f"the skill {name!r} isn't a plain SKILL.md inside the skills folder")
+        return skill
+
     def skills(self) -> list[dict[str, str]]:
         """Each skill's name and description, sorted by name, from skills/*/SKILL.md (folders without one
         are skipped). The name is the folder's, which is what load_skill takes (the AgentSkills format has
@@ -203,13 +219,13 @@ class AgentStore:
         except OSError:
             return []
         for folder in folders:
-            skill = folder / "SKILL.md"
-            if not _safe_component(folder.name) or not skill.is_file():
-                continue
             try:
+                skill = self._skill_path(folder.name)
+                if not skill.is_file():
+                    continue
                 with skill.open("rb") as handle:
                     head = handle.read(MAX_SKILL_CHARS).decode("utf-8", errors="replace")
-            except OSError:
+            except (KeyError, OSError):
                 continue
             description = " ".join(_front_matter(head).get("description", "").split())
             if len(description) > MAX_SKILL_DESCRIPTION_CHARS:
@@ -219,9 +235,7 @@ class AgentStore:
 
     def load_skill(self, name: str) -> str:
         """A skill's whole SKILL.md (at most 64 KB), by its folder's exact name. KeyError when there's none."""
-        if not _safe_component(name):
-            raise KeyError(f"no skill named {str(name)[:60]!r}; use a name from the skill index")
-        skill = self.root / "skills" / name / "SKILL.md"
+        skill = self._skill_path(name)
         try:
             with skill.open("rb") as handle:
                 data = handle.read(MAX_SKILL_CHARS * 4 + 1)

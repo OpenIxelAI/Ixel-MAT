@@ -105,7 +105,8 @@ All JSON, behind the app's session token like every other route.
 - `POST /api/agent/decide` `{"id", "approve": true|false, "always": false}` → the run. `always` adds the
   command's argv to the allowlist (refused for shells and interpreters).
 - `POST /api/agent/stop` `{"id"}` → the run, `stopped`.
-- `GET /api/agent/runs` → `{"runs": [{"id", "goal", "status", "started"}]}`, newest first, at most 50.
+- `GET /api/agent/runs` → `{"runs": [{"id", "goal", "status", "started", "model", "workspace"}]}`, newest first,
+  at most 50.
 - `GET /api/agent/files` → `{"soul", "user", "memory", "skills": [{"name", "description"}]}`.
 - `PUT /api/agent/files` `{"name": "soul|user|memory", "text"}` → the same as GET.
 
