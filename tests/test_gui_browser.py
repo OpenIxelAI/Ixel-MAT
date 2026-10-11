@@ -1729,6 +1729,41 @@ MAKE = """([how, type, width, height]) => new Promise((done) => {
 READY = "document.querySelectorAll('#pic-list .pic').length === {n} && !document.querySelector('#pic-list .working')"
 
 
+def test_documents_are_read_into_the_attached_text_with_their_pictures(pictures_gui, browser):
+    import doc_samples
+    url, fake, path = pictures_gui
+    page = browser.new_page(viewport={"width": 1100, "height": 900})
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    open_app(page, url)
+    body = f'<w:p><w:r><w:t>We used 0.100 M HCl.</w:t></w:r></w:p><w:p>{doc_samples.word_picture("r1")}</w:p>'
+    page.set_input_files("#picture-file", files=[
+        {"name": "lab.docx", "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+         "buffer": doc_samples.docx(body, pictures={"r1": doc_samples.png()})},
+        {"name": "report.pdf", "mimeType": "application/pdf", "buffer": doc_samples.pdf()}])
+    wait_until(page, "document.querySelector('#material').value.includes('=== report.pdf (PDF) ===')")
+    wait_until(page, READY.format(n=1))  # the picture in the Word document, in the tray like any other
+    text = page.input_value("#material")
+    assert text.startswith("=== lab.docx (Word document) ===\nWe used 0.100 M HCl.\n\n[Picture 1]\n\n"), text
+    assert "--- Page 1 ---\nLab report page one" in text
+    assert page.locator("#attach").is_visible()
+    # An old Word file says how to attach it, and nothing else changes
+    page.set_input_files("#picture-file", files=[{"name": "old.doc", "mimeType": "application/msword",
+                                                  "buffer": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 600}])
+    wait_until(page, "document.querySelector('#notice').textContent.includes('Save it as .docx')")
+    assert page.input_value("#material") == text
+
+    page.click(".modes button[data-mode=quick]")
+    page.click("#ask")  # no question: the panel is asked to check what's attached
+    page.wait_for_selector(".verdict", timeout=30_000)
+    assert page.input_value("#material") == "" and page.locator("#pic-tray").is_hidden()
+    seen = [r.body["messages"][0]["content"] for r in fake.requests if r.body["model"] == "m-gpt"]
+    first = next(c for c in seen if isinstance(c, list))
+    assert [p["type"] for p in first] == ["text", "image_url"]
+    assert "We used 0.100 M HCl." in first[0]["text"] and "Read what's attached and check it" in first[0]["text"]
+    assert not errors
+
+
 def png_size(data_url):
     import base64
     import struct

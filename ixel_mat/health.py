@@ -33,7 +33,8 @@ PROGRAM_TIMEOUT = 8.0   # `codex --version` on a cold Windows start, with the an
 PROBE_TIMEOUT = 25.0    # all of "Check now" together
 MAX_DETAIL = 300
 # What Ixel MAT needs installed (pyproject.toml's dependencies, by the name Python imports)
-PACKAGES = ("rich", "prompt_toolkit", "websockets", "cryptography", "aiohttp", "anthropic", "mcp", "keyring")
+PACKAGES = ("rich", "prompt_toolkit", "websockets", "cryptography", "aiohttp", "anthropic", "mcp", "keyring",
+            "pypdf")
 BROWSER_NAMES = {"msedge": "Microsoft Edge", "chrome": "Google Chrome", "microsoft-edge": "Microsoft Edge",
                  "microsoft-edge-stable": "Microsoft Edge", "google-chrome": "Google Chrome",
                  "google-chrome-stable": "Google Chrome", "chromium": "Chromium", "chromium-browser": "Chromium",

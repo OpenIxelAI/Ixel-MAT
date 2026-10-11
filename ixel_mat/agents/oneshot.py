@@ -282,6 +282,26 @@ def _own_error(stderr: str, *prompts: str | bytes | None) -> str:
     return "\n".join(lines[last_error:][-ERROR_LINES:])
 
 
+def _write_pictures(folder: str, pictures) -> list[tuple[str, object]]:
+    """Each picture in the run's own folder (removed with it), for the program to read: only its owner can."""
+    written = []
+    for i, picture in enumerate(pictures, 1):
+        path = os.path.join(folder, f"ixel-picture-{i}.{'jpg' if picture.media_type == 'image/jpeg' else 'png'}")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(picture.data)
+        written.append((path, picture))
+    return written
+
+
+def _claude_message(message: str, pictures) -> bytes:
+    """Claude Code's --input-format stream-json: one message from the user, with the pictures and the question."""
+    content = [{"type": "image", "source": {"type": "base64", "media_type": picture.media_type,
+                                            "data": picture.base64()}} for _, picture in pictures]
+    content.append({"type": "text", "text": message})
+    return (json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n").encode("utf-8")
+
+
 class OneShotAgent(BaseAgent):
     """
     Runs a fresh subprocess per message, with the question on its stdin unless its config's prompt_via
@@ -315,10 +335,13 @@ class OneShotAgent(BaseAgent):
         """Send and return full response. Used by /full mode.
         effort= overrides the agent's thinking level for this call. on_text= gets the answer as
         it's written, and on_usage= its tokens and cost, from CLIs that print those
-        (stdout_format "claude-stream-json"); other kwargs are ignored.
+        (stdout_format "claude-stream-json"). pictures= go along when its config says how
+        (AgentConfig.sees_pictures); other kwargs are ignored.
         """
+        pictures = tuple(kwargs.get("pictures") or ()) if self.config.sees_pictures else ()
         return await self._run_command(message, effort=kwargs.get("effort") or self.config.effort,
-                                       on_text=kwargs.get("on_text"), on_usage=kwargs.get("on_usage"))
+                                       on_text=kwargs.get("on_text"), on_usage=kwargs.get("on_usage"),
+                                       pictures=pictures)
 
     async def listen(self, callback: Callable[[str], Awaitable[None]]) -> None:
         """Register callback and block while 'connected'."""
@@ -338,7 +361,11 @@ class OneShotAgent(BaseAgent):
         return await version_args(self.config, env)
 
     def _build_command(self, message: str, output_file: str | None = None, effort: str = "",
-                       args: list[str] | None = None, prompt_file: str | None = None) -> tuple[list[str], bytes | None]:
+                       args: list[str] | None = None, pictures: list[tuple[str, object]] | None = None,
+                       prompt_file: str | None = None) -> tuple[list[str], bytes | None]:
+        """The command line and stdin for one question. pictures: (path, pictures.Picture) for each picture,
+        already written to the run's folder, given to the program as its config says. prompt_file: the file
+        the question (with what pictures add to it) is already written to, for prompt_via "file"."""
         cmd = [self.config.command] + list((self.config.args or []) if args is None else args)
         if self.config.model and self.config.model_args:
             if not valid_model_id(self.config.model):  # never something the CLI could read as a flag
@@ -350,6 +377,13 @@ class OneShotAgent(BaseAgent):
             cmd += [a.replace("{effort}", level) for a in self.config.effort_args]
         if output_file and self.config.output_flag:
             cmd += [self.config.output_flag, output_file]
+        if pictures:
+            if self.config.picture_stdin == "claude-stream-json":
+                return cmd + ["--input-format", "stream-json"], _claude_message(message, pictures)
+            for path, _ in pictures:
+                cmd += [a.replace("{path}", path).replace("{name}", os.path.basename(path))
+                        for a in self.config.picture_args or []]
+            message = self._with_picture_prompt(message, pictures)
         mode = self.config.prompt_via
         if mode == "file":
             if not prompt_file:
@@ -372,15 +406,26 @@ class OneShotAgent(BaseAgent):
             cmd += ["--resume", self.config.last_session_id]
         return cmd, None
 
+    def _with_picture_prompt(self, message: str, pictures: list[tuple[str, object]] | None) -> str:
+        """The question with picture_prompt before it, once per picture ("@{name} " for Gemini CLI)."""
+        if not (pictures and self.config.picture_prompt):
+            return message
+        return "".join(self.config.picture_prompt.replace("{name}", os.path.basename(path))
+                       .replace("{path}", path) for path, _ in pictures) + "\n\n" + message
+
     async def _run_command(self, message: str, effort: str = "",
                            on_text: Callable[[str], Awaitable[None]] | None = None,
-                           on_usage: OnUsage | None = None) -> str:
+                           on_usage: OnUsage | None = None, pictures: tuple = ()) -> str:
         """Run the command once for this message and return its answer."""
         env = cli_env(self.config)
         args = await self._args(env)
         preset_id = preset_for(self.config.command).get("id", "")
         message = safe_question(preset_id, message)  # Grok Build: no @ it would read a file for
         cwd, remove_cwd = prepare_workdir(self.config.workdir)
+        if pictures and not remove_cwd:  # only ever into a folder of the run's own, removed after it
+            remove_workdir(cwd, remove_cwd)
+            raise RuntimeError(f"'{self.name}': pictures go only to a program that runs in its own temp folder "
+                               '(workdir = "temp").')
         # Gemini CLI, Copilot and OpenCode save the question and answer under your home folder: what a run in
         # Ixel's own temp folder left is taken away after it. Grok Build gets a home of its own (leftovers.py)
         run = leftovers.prepare(self.config.command, args, cwd if remove_cwd else None, env)
@@ -392,14 +437,20 @@ class OneShotAgent(BaseAgent):
             output_dir = cwd if remove_cwd else tempfile.mkdtemp(prefix="ixel-out-")
             output_file = os.path.join(output_dir, "answer.txt")
         try:
-            if self.config.prompt_via == "file":
-                prompt_file = _write_prompt_file(message)  # outside the folder the CLI runs in
-            cmd, stdin_data = self._build_command(message, output_file, effort, args, prompt_file)
+            if pictures and self.config.picture_stdin:  # in the question's own message: no files
+                written = [("", picture) for picture in pictures]
+            else:
+                written = _write_pictures(cwd, pictures) if pictures else None
+            if self.config.prompt_via == "file":  # outside the folder the CLI runs in
+                prompt_file = _write_prompt_file(
+                    message if self.config.picture_stdin else self._with_picture_prompt(message, written))
+            cmd, stdin_data = self._build_command(message, output_file, effort, args, pictures=written,
+                                                  prompt_file=prompt_file)
             try:
                 cmd = resolve_argv(cmd)
             except FileNotFoundError:
                 raise RuntimeError(f"Command not found: {self.config.command}") from None
-        except (LaunchError, RuntimeError, ValueError, OSError):
+        except (LaunchError, OSError, RuntimeError, ValueError):
             if run:
                 run.drop()
             remove_workdir(cwd, remove_cwd)

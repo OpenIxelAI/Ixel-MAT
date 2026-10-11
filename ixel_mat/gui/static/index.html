@@ -100,9 +100,9 @@
           <textarea id="question" rows="1" spellcheck="false" autocomplete="off" writingsuggestions="false"
             placeholder="Ask the panel anything. Paste code, an error, or a decision you're weighing."></textarea>
           <div class="attach" id="attach" hidden>
-            <label for="material">Code to review <span>A diff, files or a document. Every model checks it, and follow-ups don't resend it.</span></label>
+            <label for="material">Attached text <span>Code, a diff, or the text of documents you attach (Word, PDF, Excel, PowerPoint), read on this computer. Every model checks it, and follow-ups don't resend it.</span></label>
             <textarea id="material" rows="6" spellcheck="false" autocomplete="off" writingsuggestions="false"
-              placeholder="Paste a diff (git diff), a file, or a document"></textarea>
+              placeholder="Paste a diff (git diff), a file or a document, or attach one with Files"></textarea>
           </div>
           <div class="pic-tray" id="pic-tray" hidden>
             <ul class="pics" id="pic-list" aria-label="Pictures for this question"></ul>
@@ -132,9 +132,10 @@
             <button type="button" class="attach-toggle" id="attach-toggle" aria-expanded="false" aria-controls="attach"
               title="Attach code for the panel to review" aria-label="Attach code"><i data-icon="code"></i><span>Code</span></button>
             <button type="button" class="attach-toggle" id="picture-add"
-              title="Attach pictures or a video (you can also paste or drop them)"
-              aria-label="Attach pictures or a video"><i data-icon="image"></i><span>Picture</span></button>
-            <input type="file" id="picture-file" accept="image/*,video/*" multiple hidden>
+              title="Attach documents (Word, PDF, Excel, PowerPoint, text), pictures or a video. You can also paste or drop them"
+              aria-label="Attach documents, pictures or a video"><i data-icon="file"></i><span>Files</span></button>
+            <input type="file" id="picture-file" multiple hidden
+              accept="image/*,video/*,.pdf,.docx,.docm,.dotx,.xlsx,.xlsm,.pptx,.ppsx,.odt,.ods,.odp,.rtf,.txt,.md,.csv,.tsv,.json,.xml,.html,.htm,.log,.doc,.xls,.ppt">
             <button type="button" class="attach-toggle" id="sound-add" aria-expanded="false" aria-controls="sound-bar"
               title="Record or attach sound (or a video's): it's written out into your question" aria-label="Sound"><i data-icon="mic"></i><span>Sound</span></button>
             <input type="file" id="sound-file" accept="audio/*,video/*,.m4a,.mp3,.wav,.webm,.ogg,.oga,.opus,.flac" hidden>

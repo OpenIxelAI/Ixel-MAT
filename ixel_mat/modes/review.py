@@ -1276,8 +1276,8 @@ async def run_review(
     this mode (runtime.choose_mode), reported with the rest.
     `material` is code (or any text) the question is about, shown to every model in every round;
     `pricing` adds to the built-in prices used for each call's cost (usage.py);
-    `pictures` (pictures.Picture) go with every call to the models that see pictures, and the
-    others are told there are pictures they can't see.
+    `pictures` (pictures.Picture) go with every call to the models that see pictures, after the
+    material's own (material.pictures), and the others are told there are pictures they can't see.
     """
     mode = ReviewMode(mode)
     if panel_depth() > 0:
@@ -1295,6 +1295,8 @@ async def run_review(
         verifier_agent = next((a for a in connected if a.name == verifier), None)
         connected = [a for a in connected if a is not verifier_agent]
     panel, extra = connected[:MAX_PANEL], connected[MAX_PANEL:]
+    if material is not None and material.pictures:  # picture files, and the pictures in documents, come first
+        pictures = (*material.pictures, *pictures)
     run = _Run(question, panel, mode, moderator, timeout, on_event, rng or random.SystemRandom(),
                verifier=verifier_agent, escalate=escalate if escalate in ESCALATE_POLICIES else "always",
                verifier_effort=verifier_effort, on_wrong=on_wrong if on_wrong in ON_WRONG_POLICIES else "send_back",

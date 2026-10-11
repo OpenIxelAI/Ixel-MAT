@@ -16,7 +16,9 @@ Ixel MAT puts the models you already use on one panel: Claude, GPT, Gemini, Grok
 or LM Studio, and your Claude Code, Codex, Gemini CLI, GitHub Copilot, OpenCode and Grok Build (SuperGrok)
 sign-ins. Each model answers
 on its own, grades the others' answers without knowing whose they are, and a moderator writes the verdict, with
-the mistakes the panel caught.
+the mistakes the panel caught. Attach Word, PDF, Excel or PowerPoint files and pictures: documents are read on
+your computer, and pictures go to the models that see them, your subscription sign-ins included (all but Grok
+Build), with no API key.
 
 **[ixelai.com/ixel-mat](https://ixelai.com/ixel-mat/)** · [Docs](https://ixelai.com/docs/) ·
 [Privacy](https://ixelai.com/docs/privacy/)

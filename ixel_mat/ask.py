@@ -7,6 +7,8 @@ up in Ixel: "gemini, make me a list of projects to check out", or "codex, review
 the next one answers (limits.py says what counts).
 The model gets the same answer-only prompt a panel member gets, and code or files you attach
 are fenced as material, so instructions inside them are something to read, not to follow.
+Pictures attached (picture files, and the ones in documents) go along to a model that sees pictures;
+one that doesn't is told they're there.
 """
 from __future__ import annotations
 
@@ -132,6 +134,17 @@ async def ask(cfg: AgentConfig, question: str, material: Material | None = None,
     if not is_ready(cfg):
         raise AskError(f"{cfg.label} has no API key yet. Run: ixel setup")
     prompt = build_prompt(question, material)
+    pictures = tuple(material.pictures) if material is not None else ()
+    notes = list(material.notes) if material is not None else []
+    extra = {}
+    if pictures and cfg.sees_pictures:
+        extra["pictures"] = pictures
+    elif pictures:
+        some = "a picture" if len(pictures) == 1 else f"{len(pictures)} pictures"
+        prompt = (f"[The user attached {some}, which you can't see. If the question depends on them, say so rather "
+                  "than guess.]\n\n") + prompt
+        notes.append(f"{cfg.label} can't see pictures, so the {some.removeprefix('a ')} went without "
+                     "(it was told they're there).")
     timeout = timeout or cfg.call_timeout
     agent = create_agent(cfg)
     reported: list[Usage] = []
@@ -149,7 +162,8 @@ async def ask(cfg: AgentConfig, question: str, material: Material | None = None,
                            f"{mask_secrets(str(exc), [cfg.token]) or type(exc).__name__}") from exc
         try:
             reply = await asyncio.wait_for(agent.send_and_receive(prompt, use_full_session=True,
-                                                                  on_usage=reported.append), timeout=timeout)
+                                                                  on_usage=reported.append, **extra),
+                                           timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise AskError(f"{cfg.label} didn't answer within {int(timeout)} seconds.") from exc
         except Exception as exc:  # noqa: BLE001
@@ -169,8 +183,7 @@ async def ask(cfg: AgentConfig, question: str, material: Material | None = None,
     return AskResult(agent=cfg.name, label=cfg.label, model=configured_model(agent), answer=answer,
                      ms=int((time.perf_counter() - started) * 1000),
                      usage=record.to_dict() if record is not None else None,
-                     material=material.to_dict() if material is not None else None,
-                     notes=list(material.notes) if material is not None else [])
+                     material=material.to_dict() if material is not None else None, notes=notes)
 
 
 async def ask_in_order(cfgs: list[AgentConfig], question: str, material: Material | None = None,

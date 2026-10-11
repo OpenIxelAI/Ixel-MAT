@@ -634,7 +634,7 @@ def cmd_review(argv: list[str]) -> int:
                     "and a moderator writes the verdict.",
     )
     parser.add_argument("question", nargs="*", help='the question; "-" (or piped input) reads it from stdin. '
-                                                    "With code to review it's optional")
+                                                    "With code or documents to review it's optional")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--mode", choices=MODE_CHOICES, help="default: [review] mode, else review")
     group.add_argument("--quick", dest="mode", action="store_const", const="quick", help="answers + verdict, no peer review")
@@ -650,7 +650,7 @@ def cmd_review(argv: list[str]) -> int:
     parser.add_argument("-c", "--continue", dest="follow_up", action="store_true",
                         help="a follow-up: the panel also sees your last few questions and its answers to them "
                              "(each kept for a day)")
-    code = parser.add_argument_group("code to review (read-only: nothing runs, nothing changes)")
+    code = parser.add_argument_group("code or documents to review (read-only: nothing runs, nothing changes)")
     diff = code.add_mutually_exclusive_group()
     diff.add_argument("--diff", action="store_true", help="your changes since the last commit (git diff HEAD)")
     diff.add_argument("--staged", action="store_true", help="only what you've staged (git diff --cached)")
@@ -661,7 +661,8 @@ def cmd_review(argv: list[str]) -> int:
                       help="with --base: what's committed on REF since it left the base (a pull request fetched "
                            "but not checked out); your own files and changes aren't read")
     code.add_argument("-f", "--file", dest="files", action="append", default=[], metavar="PATH",
-                      help="a file to review (repeat for more)")
+                      help="a file to review (repeat for more): code or text, a document (Word, PDF, Excel, "
+                           "PowerPoint, OpenDocument, RTF, a web page) or a picture (PNG or JPEG)")
     code.add_argument("--allow-secrets", action="store_true",
                       help="send it even if it looks like it holds a key (only if you're sure it doesn't)")
     parser.add_argument("--answers", action="store_true", help="show every answer in full")
@@ -790,13 +791,13 @@ def cmd_ask(argv: list[str]) -> int:
         description="One of your models answers, on its own: no panel, no review. "
                     "For a second opinion on the answer, use ixel review.")
     parser.add_argument("question", nargs="*", help='the question; "-" (or piped input) reads it from stdin. '
-                                                    "With code attached it's optional")
+                                                    "With code or documents attached it's optional")
     parser.add_argument("--agent", metavar="NAME", help="who answers: an agent's name or label, e.g. gemini or Grok. "
                                                         "Several, in order (codex,claude,local): when one is "
                                                         "out of usage, the next answers")
     parser.add_argument("--list", action="store_true", help="list the models you can ask, and stop")
     parser.add_argument("--timeout", type=float, help="seconds to wait for the answer")
-    code = parser.add_argument_group("code to attach (read-only: nothing runs, nothing changes)")
+    code = parser.add_argument_group("code or documents to attach (read-only: nothing runs, nothing changes)")
     diff = code.add_mutually_exclusive_group()
     diff.add_argument("--diff", action="store_true", help="your changes since the last commit (git diff HEAD)")
     diff.add_argument("--staged", action="store_true", help="only what you've staged (git diff --cached)")
@@ -807,7 +808,8 @@ def cmd_ask(argv: list[str]) -> int:
                       help="with --base: what's committed on REF since it left the base (a pull request fetched "
                            "but not checked out); your own files and changes aren't read")
     code.add_argument("-f", "--file", dest="files", action="append", default=[], metavar="PATH",
-                      help="a file to attach (repeat for more)")
+                      help="a file to attach (repeat for more): code or text, a document (Word, PDF, Excel, "
+                           "PowerPoint, OpenDocument, RTF, a web page) or a picture (PNG or JPEG)")
     code.add_argument("--allow-secrets", action="store_true",
                       help="send it even if it looks like it holds a key (only if you're sure it doesn't)")
     parser.add_argument("--json", action="store_true",
@@ -907,6 +909,8 @@ def cmd_ask(argv: list[str]) -> int:
     console.print(f"\n  [{C['gold']}]{safe_markup(result.label)}[/] [{C['dim']}]· {result.ms / 1000:.1f}s[/]\n")
     console.print(Text(sanitize_terminal_text(result.answer)))
     console.print()
+    for note in result.notes[len(material.notes) if material is not None else 0:]:  # the pictures, if it can't see
+        out.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{safe_markup(note)}[/]")
     return 0
 
 

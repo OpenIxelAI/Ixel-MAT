@@ -526,25 +526,29 @@ def test_without_its_model_triage_still_doesnt_go_to_typesafe(config):
     assert load_settings().triage.provider == "model"
 
 
-def test_which_models_see_pictures_can_be_switched_for_models_ixel_calls(config):
+def test_which_models_see_pictures_can_be_switched(config):
     agents = {a["name"]: a for a in snapshot()["agents"]}
     assert (agents["gpt"]["can_see"], agents["gpt"]["pictures"]) == (True, True)       # OpenAI: on unless turned off
     assert (agents["local"]["can_see"], agents["local"]["pictures"]) == (True, False)  # a local server: off
-    assert (agents["claude"]["can_see"], agents["claude"]["pictures"]) == (False, False)  # Claude Code: never
+    assert (agents["claude"]["can_see"], agents["claude"]["pictures"]) == (True, True)  # Claude Code: its login
 
     assert change("agent", {"pictures": True}, agent="local")[0] == 200
     assert loader.load_config()["agents"]["local"]["accepts"] == ["image"]
     assert change("agent", {"pictures": False}, agent="gpt")[0] == 200
     assert loader.load_config()["agents"]["gpt"]["accepts"] == []
+    assert change("agent", {"pictures": False}, agent="claude")[0] == 200
+    assert loader.load_config()["agents"]["claude"]["accepts"] == []
     agents = {a["name"]: a for a in snapshot()["agents"]}
-    assert agents["local"]["pictures"] and not agents["gpt"]["pictures"]
+    assert agents["local"]["pictures"] and not agents["gpt"]["pictures"] and not agents["claude"]["pictures"]
 
 
-@pytest.mark.parametrize("agent, value", [("claude", True), ("gpt", "yes"), ("gpt", 1)])
-def test_programs_never_see_pictures_and_the_switch_is_on_or_off(config, agent, value):
+@pytest.mark.parametrize("agent, value", [("mine", True), ("gpt", "yes"), ("gpt", 1)])
+def test_a_program_with_no_way_to_take_pictures_and_the_switch_is_on_or_off(config, agent, value):
+    text = CONFIG + '\n[agents.mine]\ntype = "oneshot"\nlabel = "Mine"\ncommand = "mycli"\n'
+    config.write_text(text, encoding="utf-8")
     status, data = change("agent", {"pictures": value}, agent=agent)
     assert status == 400 and data["error"]
-    assert config.read_text(encoding="utf-8") == CONFIG
+    assert config.read_text(encoding="utf-8") == text
 
 
 def test_the_sound_service_is_picked_and_its_keys_are_listed(config, monkeypatch):

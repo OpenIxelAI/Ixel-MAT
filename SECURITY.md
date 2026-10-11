@@ -121,7 +121,7 @@ files. Ixel uses them only to answer, and for each preset:
 
   | CLI | How |
   |---|---|
-  | Claude Code | `--tools ""` (no tools), `--strict-mcp-config` (none of your MCP servers) |
+  | Claude Code | `--tools ""` (no tools), `--strict-mcp-config` (none of your MCP servers), and Read denied in `--settings`: with no tools at all, Claude Code still reads a file an `@path` in the question names (`@~/.ssh/id_ed25519`, written into a document you attach) and sends it to the model, and the deny rule stops that |
   | Codex | `--ignore-user-config` (no MCP servers, plugins or hooks), shell/exec/image/sub-agent tools disabled, web search off, read-only sandbox |
   | Gemini CLI | plan (read-only) mode in a trusted empty folder, no extensions, no MCP servers. Plan mode still offers the model tools, among them reading files (in that empty folder), Google web search and web fetch; it blocks writes and shell commands, and the test below checks that |
   | Copilot | `--available-tools=ixel_none` (no tools), built-in MCP off, `COPILOT_ALLOW_ALL` removed |
@@ -158,6 +158,17 @@ files. Ixel uses them only to answer, and for each preset:
   `@` but Grok Build reads nothing, and takes the joiners out of the answer again, so code quoted back (a
   decorator) still runs. An `@` inside a word (an email address) is left as it is.
 - **A fresh empty folder** for every run, deleted afterwards (`workdir = "temp"`).
+- **Pictures through your sign-in, as files only that run can see.** A picture attached to a question
+  (or found in a document) goes to Claude Code inside the question's message on stdin
+  (`--input-format stream-json`), with no file written. For the others it's written into the run's own empty
+  folder as `ixel-picture-1.png`… (readable only by you) and given to the CLI its own way: Codex `--image`, Gemini CLI an `@` name in the question (it reads only files
+  in that folder), Copilot `--attachment`, OpenCode `-f`. The folder goes when the run ends, and what Gemini
+  CLI, Copilot and OpenCode save of the picture with the session is removed with the rest of the run (below).
+  Pictures go only to a CLI running in its own temp folder; one with a `workdir` of yours never gets any.
+  OpenCode sends a picture only to a model its catalog says takes them; others are told OpenCode left it out.
+  `--title Ixel` stops OpenCode asking the model a second time, for a title, with the question in it.
+  Grok Build is given no pictures: it has no way to take one that reaches the model as a picture (an `@`
+  name is left as text), so, like any model that doesn't see pictures, it's told there are some it can't see.
 - **Nothing of the question left in the CLI's own folders**, as far as each allows. Claude Code and Codex are
   told not to save the session (`--no-session-persistence`, `--ephemeral`). Grok Build keeps it in the home
   folder Ixel gives each run, which goes afterwards (above). Gemini CLI, Copilot and OpenCode have no such
@@ -180,9 +191,9 @@ files. Ixel uses them only to answer, and for each preset:
     (a random id), and Node's compile cache in the temp folder.
   - OpenCode: `~/.local/share/opencode/log/opencode.log`, which grows by about 11 KB a question (3.5 KB for
     OpenCode 1) with the folder's path, the session id and timings, never the question. OpenCode 2 deletes
-    the question's place in its queue itself, without overwriting it, so its text can stay in the database
-    file's free space until later use writes over it: nothing reads it there, but someone reading the file's
-    bytes could. OpenCode 1 also adds `$schema` to your `~/.config/opencode/opencode.json`, writes a
+    the question's place in its queue itself, without overwriting it, so its text (and any picture sent
+    with it) can stay in the database file's free space until later use writes over it: nothing reads it
+    there, but someone reading the file's bytes could. OpenCode 1 also adds `$schema` to your `~/.config/opencode/opencode.json`, writes a
     `.gitignore` beside it, leaves a lock folder in `~/.local/state/opencode/locks/`, and leaves a 5.5 MB
     library file in the temp folder each time it runs. OpenCode 2 leaves three library files of its own in
     the temp folder (on Linux `.bun-0-*.so` and `.bun-0-*.node`, 19.7 MB in all) and an empty `opencode`
@@ -400,6 +411,38 @@ ever uses an API that turns a string into HTML (`innerHTML`, `insertAdjacentHTML
   binary files, folders and files over 240 KB are refused. Lockfiles are left out of diffs and new files.
 - **Code isn't saved with the question.** Follow-ups (`--continue`, the browser's conversation) and
   triage see the question, not the code.
+
+### Documents and pictures you attach (`--file`, the app's Files button, dropping a file on Ask)
+
+- **Read on your computer, and nowhere else.** Word, Excel, PowerPoint and OpenDocument files are read with
+  Python's own zip and XML readers, PDFs with pypdf, RTF and web pages by Ixel itself. Only the text and the
+  pictures go to the models, as attached text and pictures, the same way as code: fenced as material to read,
+  never instructions, with hidden characters marked and the secret check applied. A file whose name says it
+  holds keys or logins (`.env`, `id_rsa`, `credentials.json`, `*.pem`…) is refused before it's read, in the
+  app as on the command line.
+- **Nothing in a document runs or is followed.** Macros, scripts, links, fields, embedded objects and
+  pictures stored outside the file are ignored; a web page's scripts, styles and hidden parts are left out.
+  Who wrote a document, when, and its other properties aren't read.
+- **Hidden text is shown as hidden.** Words a document hides (Word's hidden text, RTF's `\v`) come through as
+  `[hidden text: …]`, so a model can't be steered by instructions you can't see without being told they
+  were hidden. Deleted tracked changes are left out.
+- **Bounded.** Documents up to 50 MB; reading stops after 30 seconds; a zip with more than 10,000 parts or
+  more than 512 MB unpacked (counted as it unpacks, not as the zip claims), a part over 32 MB, XML that
+  declares entities (a "billion laughs") and parts nested more than 500 deep are refused; spreadsheet cells
+  past Excel's last column are ignored, and a PDF picture that would unpack to more than its size says is
+  left out unread; PDFs are read up to 2,000 pages. The text shares the 60,000 characters every model reads (what
+  doesn't fit is left out, and you're told), and a question takes at most 8 pictures, 20 MB in all. Locked
+  PDFs and old Office files (.doc, .xls, .ppt) are refused, with what to do instead.
+- **Pictures lose their metadata.** Every picture, attached or found in a document, is checked and
+  re-written without its EXIF (where a photo was taken, the camera), XMP, comments or text chunks before any
+  model gets it. The app also redraws each one at most 2048 pixels on a side. In the app, the document
+  goes to Ixel's own server on 127.0.0.1 (`/api/documents`, with the session token), which reads it in
+  memory and keeps nothing.
+
+**How it's checked:** `tests/test_documents.py` reads each kind, and checks hidden text is marked, deleted
+text and the author left out, a zip bomb, an entity bomb, a deeply nested file, a far-off spreadsheet cell
+and a PDF picture bomb handled, and cut text kept inside its limit, hidden characters counted;
+`tests/test_attachments.py` and `tests/test_gui_pictures.py` check the command line and the app.
 
 **How it's checked:** `tests/test_code_review.py` plants an fsmonitor, external diff, textconv filter,
 clean/smudge/process filter and pager in a repository's config and asserts none runs, checks that a
