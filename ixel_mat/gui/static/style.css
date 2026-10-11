@@ -1144,17 +1144,23 @@ details.original > summary:hover { color: var(--text-2); }
 .needs .kind span { display: flex; flex-direction: column; }
 .needs .kind small { color: var(--muted); font-size: 12px; }
 .needs-buttons, .dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; }
-.needs textarea, .needs select, .field input, .field textarea, .field select {
+.needs textarea, .needs select, .needs .pick-row input, .field input, .field textarea, .field select {
   width: 100%; padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: 8px;
   background: var(--sunken); color: var(--text); font: inherit; font-size: 13.5px; resize: vertical;
 }
 .needs select, .field select { height: 34px; padding: 0 8px; }
-.needs textarea:focus-visible, .needs select:focus-visible, .field input:focus-visible,
+.needs textarea:focus-visible, .needs select:focus-visible, .needs .pick-row input:focus-visible, .field input:focus-visible,
 .field textarea:focus-visible, .field select:focus-visible { outline: none; box-shadow: var(--ring); }
 
 .needs .model-row { display: flex; flex-direction: column; gap: 6px; }
 .needs .model-row[hidden] { display: none; }
 .needs .model-row small { color: var(--muted); font-size: 12px; }
+.needs .pick-rows { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.needs .pick-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; width: 100%; }
+.needs .pick-row input { flex: 1 1 180px; min-width: 0; height: 34px; }
+.needs .pick-row select { flex: 0 1 auto; width: auto; }
+.needs .pick-role { flex: 0 0 92px; color: var(--text-2); font-size: 12px; }
+.needs .pick-row .icon-only { padding: 4px 10px; line-height: 1; }
 .usage { width: 100%; border-collapse: collapse; font-size: 13px; }
 .usage th, .usage td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; font-weight: 400; }
 .usage th:first-child { text-align: left; color: var(--text); }

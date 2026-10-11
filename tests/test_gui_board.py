@@ -302,6 +302,18 @@ def test_without_handoff_the_page_says_how_to_add_it(project):
     assert (bs, board["code"]) == (404, "not_installed")
 
 
+def test_the_board_offers_only_the_effort_levels_a_codex_model_takes():
+    """Codex hands the level straight to OpenAI, so the Board asks which ones the model takes; Claude Code's own
+    levels stand for every Claude model."""
+    gui = gui_with(None)
+    (s1, older), (s2, newer), (s3, claude), (s4, unnamed) = get(
+        gui, "/api/board/levels?agent=codex&model=gpt-5.1", "/api/board/levels?agent=codex&model=gpt-5.5",
+        "/api/board/levels?agent=claude&model=claude-haiku-5-5", "/api/board/levels?agent=codex")
+    assert (s1, s2, s3, s4) == (200, 200, 200, 200)
+    assert older["levels"] == ["low", "medium", "high"] and newer["levels"] == ["low", "medium", "high", "xhigh"]
+    assert claude["levels"] is None and isinstance(unnamed["levels"], list)
+
+
 def test_a_handoff_too_old_for_the_board_says_update(project, fake):
     fake.answer("hello", {"stderr": "  Unknown command: api. Did you mean add?\n", "exit": 2})
     [(status, hello)] = get(gui_with(fake.command), "/api/board/hello")

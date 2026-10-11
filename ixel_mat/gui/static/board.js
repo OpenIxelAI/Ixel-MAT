@@ -26,18 +26,20 @@ const KIND_HINTS = {
   review: "reviews your changes. Nothing in the project changes.",
   image: "makes pictures. Nothing in the project changes.",
 };
-// The models Claude's edits can run on, and the chain: the biggest plans the steps and hands each one down to the
-// smallest that can do it well (Handoff's approve args.models, biggest first)
+// The models an edit can run on, by worker: suggestions (any model name can be typed), the one model a run starts on,
+// and the chain Claude's edits start with, biggest first: the biggest plans the steps and hands each one down to the
+// smallest that can do it well (Handoff's approve args.models, and args.efforts for how hard each one thinks)
 const CLAUDE_MODELS = [
   ["claude-fable-5-1", "Fable 5.1"], ["claude-opus-5-5", "Opus 5.5"], ["claude-sonnet-5-5", "Sonnet 5.5"],
   ["claude-haiku-5-5", "Haiku 5.5"],
 ];
-const CHAIN = ["claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5"];
-const MODEL_CHOICES = [
-  { value: "", label: "Claude Code's own model" },
-  { value: "chain", label: "Fable 5.1 plans, then Opus 5.5 and Haiku 5.5 build", models: CHAIN },
-  ...CLAUDE_MODELS.map(([id, name]) => ({ value: id, label: `${name} only`, models: [id] })),
-];
+const WORKER_MODELS = {
+  claude: { suggest: CLAUDE_MODELS, one: "claude-opus-5-5", chain: ["claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5"] },
+  codex: { suggest: ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.5", "gpt-5.5-mini"].map((m) => [m, m]),
+    one: "gpt-5.5", chain: [] },
+};
+const MAX_MODELS = 4;  // a planner and up to three models for its steps (Handoff's approvals.MAX_MODELS)
+const EFFORT_WORDS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
 function modelName(id) {
   const found = CLAUDE_MODELS.find(([m]) => m === id);
   return found ? found[1] : id;
@@ -1083,6 +1085,96 @@ function closeNeeds() {
   else renderPanel();
 }
 
+// How an edit runs: on the worker's own model, on one model, or as a chain of up to four, biggest first, each at an
+// effort the worker takes (and, where Ixel knows them, the model takes). What's picked lives in `asked.run`, so a
+// redraw keeps it. Returns the row and args(), the approve args it makes ({} for the worker's own model, as it is).
+function runPicker(asked, agent, worker) {
+  const names = WORKER_MODELS[agent] || { suggest: [], one: "", chain: [] };
+  const state = asked.run || (asked.run = { mode: "own", rows: [{ model: "", effort: "" }] });
+  const levels = new Map();  // model -> the levels it takes, once the server has said
+  const listId = `needs-models-${agent}`;
+  const rows = el("div", { class: "pick-rows" });
+  const mode = el("select", { id: "needs-run-mode", "data-key": "needs-run-mode" },
+    el("option", { value: "own" }, `${agent}'s own model`), el("option", { value: "one" }, "One model"),
+    worker.chain ? el("option", { value: "chain" }, "A chain of models, biggest first") : null);
+  mode.value = state.mode;
+  const hint = el("small", {});
+
+  const allowed = (model) => {
+    const takes = levels.get((model || "").trim().toLowerCase());
+    return takes ? worker.efforts.filter((l) => takes.includes(l)) : worker.efforts;
+  };
+  const effortSelect = (row, i) => {
+    const select = el("select", { "aria-label": `Effort for ${row.model || "its own model"}`, "data-key": `needs-effort-${i}` },
+      [["", "Default effort"], ...allowed(row.model).map((l) => [l, `${EFFORT_WORDS[l] || l} effort`])]
+        .map(([value, text]) => el("option", { value }, text)));
+    if (![...select.options].some((o) => o.value === row.effort)) row.effort = "";
+    select.value = row.effort;
+    select.disabled = !allowed(row.model).length;
+    if (select.disabled) select.title = `${row.model} has no effort setting, so it thinks at its default`;
+    select.addEventListener("change", () => { row.effort = select.value; });
+    return select;
+  };
+  const ask = async (row, i) => {  // the levels this model takes, where Ixel knows its company's
+    const model = (row.model || "").trim().toLowerCase();
+    if (!model || levels.has(model)) return;
+    try {
+      const found = await getJSON(`/api/board/levels?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`);
+      if (!Array.isArray(found.levels)) return;
+      levels.set(model, found.levels);
+      const old = rows.querySelector(`[data-key="needs-effort-${i}"]`);
+      if (old && (state.rows[i] || {}).model === row.model) old.replaceWith(effortSelect(row, i));
+    } catch (e) { /* the worker's own levels stand */ }
+  };
+  const draw = () => {
+    state.mode = mode.value;
+    if (state.mode === "own") state.rows = [{ model: "", effort: state.rows[0] && !state.rows[0].model ? state.rows[0].effort : "" }];
+    if (state.mode === "one" && (state.rows.length !== 1 || !state.rows[0].model)) state.rows = [{ model: names.one, effort: "" }];
+    if (state.mode === "chain" && state.rows.length < 2) state.rows = names.chain.map((model) => ({ model, effort: "" }));
+    rows.replaceChildren(...state.rows.map((row, i) => {
+      const parts = [];
+      if (state.mode !== "own") {
+        parts.push(el("span", { class: "pick-role" }, state.mode === "chain" ? (i === 0 ? "Plans" : `Step model ${i}`) : "Model"));
+        const box = el("input", { type: "text", list: listId, value: row.model, spellcheck: "false", autocomplete: "off",
+          maxlength: "64", placeholder: "a model name", "aria-label": state.mode === "chain" && i === 0 ? "Planning model" : "Model",
+          "data-key": `needs-model-${i}` });
+        box.addEventListener("input", () => { row.model = box.value; });
+        box.addEventListener("change", () => ask(row, i));
+        parts.push(box);
+      }
+      parts.push(effortSelect(row, i));
+      if (state.mode === "chain" && state.rows.length > 2) {
+        const remove = el("button", { type: "button", class: "btn icon-only", title: "Take this model out",
+          "aria-label": `Take ${row.model || "this model"} out`, "data-key": `needs-remove-${i}` }, "×");
+        remove.addEventListener("click", () => { state.rows.splice(i, 1); draw(); });
+        parts.push(remove);
+      }
+      ask(row, i);
+      return el("div", { class: "pick-row" }, parts);
+    }));
+    if (state.mode === "chain" && state.rows.length < MAX_MODELS) {
+      const add = el("button", { type: "button", class: "btn", "data-key": "needs-add-model" }, "Add a model");
+      add.addEventListener("click", () => { state.rows.push({ model: "", effort: "" }); draw(); });
+      rows.append(add);
+    }
+    hint.textContent = state.mode === "chain"
+      ? "The first model plans and gives each step to the smallest of the others that can do it. The task shows what each model used."
+      : "Higher effort thinks longer and uses more. The task shows what each model used.";
+  };
+  mode.addEventListener("change", draw);
+  draw();
+  const row = el("div", { class: "model-row" }, el("label", { for: "needs-run-mode" }, "Which model?"), mode, rows, hint,
+    el("datalist", { id: listId }, names.suggest.map(([id, name]) => el("option", { value: id }, name))));
+  const args = () => {
+    const picked = state.rows.map((r) => ({ model: (r.model || "").trim().toLowerCase(), effort: r.effort }));
+    if (state.mode === "own") return picked[0].effort ? { efforts: { "": picked[0].effort } } : {};
+    const models = picked.map((r) => r.model);
+    const efforts = Object.fromEntries(picked.filter((r) => r.effort && r.model).map((r) => [r.model, r.effort]));
+    return { models, ...(Object.keys(efforts).length ? { efforts } : {}) };
+  };
+  return { row, args };
+}
+
 // What the person typed or picked lives in `asked.draft`, so a redraw (or a refusal) keeps it
 function needsForm(asked, t) {
   const a = asked.action;
@@ -1115,26 +1207,20 @@ function needsForm(asked, t) {
     });
     form.append(el("fieldset", {}, el("legend", {}, "What should it do?"), options));
     const kindNow = () => (form.querySelector("input[name=needs-kind]:checked") || {}).value || chosen;
-    // Which model Claude's edit runs on, or the chain (a Handoff that reports usage takes it)
+    // Which model the edit runs on, or a chain of them, and how hard each thinks (a Handoff that says what its
+    // workers take: the task's `workers`)
     const agent = (a.args && a.args.agent) || t.assignee;
-    let model = null;
-    if (agent === "claude" && kinds.includes("edit") && "usage" in t) {
-      model = el("select", { id: "needs-model", "data-key": "needs-model" },
-        MODEL_CHOICES.map((c) => el("option", { value: c.value }, c.label)));
-      model.value = asked.model || "";
-      model.addEventListener("change", () => { asked.model = model.value; });
-      const row = el("div", { class: "model-row" }, el("label", { for: "needs-model" }, "Which model?"), model,
-        el("small", {}, "A chain plans with the biggest model and gives each step to the smallest that can do it. "
-          + "The task shows what each model used."));
-      const show = () => { row.hidden = kindNow() !== "edit"; };
+    const worker = t.workers && t.workers[agent];
+    const picker = worker && kinds.includes("edit") ? runPicker(asked, agent, worker) : null;
+    if (picker) {
+      const show = () => { picker.row.hidden = kindNow() !== "edit"; };
       form.addEventListener("change", show);
       show();
-      form.append(row);
+      form.append(picker.row);
     }
     read = () => {
       const kind = kindNow();
-      const picked = model && kind === "edit" ? MODEL_CHOICES.find((c) => c.value === model.value) : null;
-      return { ...(a.args || {}), kind, ...(picked && picked.models ? { models: picked.models } : {}) };
+      return { ...(a.args || {}), kind, ...(picker && kind === "edit" ? picker.args() : {}) };
     };
   }
   const cancel = el("button", { type: "button", class: "btn", "data-key": "needs-cancel" }, "Cancel");
