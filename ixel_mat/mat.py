@@ -541,7 +541,9 @@ async def run_full(prompt: str, agents: dict[str, BaseAgent]):
 async def _compare(prompt: str, agents: dict[str, BaseAgent]):
     """Run /full via FullModeDispatcher — single orchestration path."""
     settings = _settings()
-    connected = [a for name, a in agents.items() if a.is_connected and settings.yours(name)]
+    # Every model answers, but not an opt-in program (Antigravity) until it's switched on
+    connected = [a for name, a in agents.items()
+                 if a.is_connected and settings.yours(name) and settings.opted_in(name)]
     if not connected:
         console.print(f"  [{C['red']}]No connected agents.[/]")
         return

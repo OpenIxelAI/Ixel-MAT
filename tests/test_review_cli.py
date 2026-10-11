@@ -457,6 +457,26 @@ def test_review_panel_leaves_out_antigravity_until_it_is_switched_on(monkeypatch
     assert [a.name for a in mat.review_panel(agents, ReviewMode.SAVER)] == ["gpt", "anti", "claude"]
 
 
+def test_compare_in_the_terminal_leaves_out_antigravity_until_it_is_switched_on(monkeypatch):
+    asked = []
+
+    class Asked(_Agent):
+        async def send_and_receive(self, message, **kwargs):
+            asked.append(self.name)
+            return "391"
+
+    monkeypatch.setattr(mat, "console", Console(file=io.StringIO(), width=120))
+    monkeypatch.setattr(mat, "_CONFIG", {"agents": {"anti": {"preset": "antigravity"}}})
+    monkeypatch.setattr(mat, "_REVIEW", ReviewSettings())
+    agents = {n: Asked(n, f"m-{n}") for n in ("gpt", "anti")}
+    asyncio.run(mat._compare("What is 17 × 23?", agents))
+    assert asked == ["gpt"]
+    asked.clear()
+    monkeypatch.setattr(mat, "_REVIEW", ReviewSettings(agents=["gpt", "anti"]))
+    asyncio.run(mat._compare("What is 17 × 23?", agents))
+    assert sorted(asked) == ["anti", "gpt"]
+
+
 def test_parse_saver_settings():
     from ixel_mat.runtime import SaverSettings, parse_saver_settings
     names = {"opus", "haiku", "llama"}

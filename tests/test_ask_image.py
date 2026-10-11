@@ -274,6 +274,30 @@ def test_image_from_your_files_is_described_by_a_chat_model_first(image_home):
     assert picture.body == {"model": "gpt-image-1", "prompt": "A watercolor lighthouse at dusk, warm light.", "n": 2}
 
 
+def test_a_picture_from_your_files_isnt_described_by_antigravity_until_you_switch_it_on(tmp_path):
+    (tmp_path / "README.md").write_text("# Lighthouse\nA tool that keeps ships off the rocks.\n")
+    config = tmp_path / ".config" / "ixel-mat" / "config.toml"
+    config.parent.mkdir(parents=True)
+    with ThreadedFakeProvider(lambda r: openai_reply("A watercolor lighthouse."), image_reply()) as fake:
+        # First, as setup writes programs before local models. Its command is one that isn't there, so the
+        # test never reaches a real agy
+        base = ('[agents.anti]\npreset = "antigravity"\ncommand = "ixel-test-no-such-agy"\n\n'
+                f'[agents.local]\ntype = "http"\nurl = "{fake.openai_url}"\nmodel = "llama3.3"\nlabel = "Llama"\n\n'
+                f'[images]\nopenai_url = "{fake.images_url}"\n')
+
+        def picture(review=""):
+            config.write_text(base + review, encoding="utf-8")
+            return run_ixel(tmp_path, "image", "--json", "--provider", "openai", "--out", "pics", "-f", "README.md",
+                            "a poster", env={"OPENAI_API_KEY": "sk-openai-test"})
+
+        for review in ("", '\n[review]\nagents = ["local"]\n'):  # never switched on, or switched off in Settings
+            proc = picture(review)
+            assert proc.returncode == 0, proc.stderr
+            assert json.loads(proc.stdout)["writer"] == {"name": "local", "label": "Llama"}
+        # Switched on, it's your first model again
+        assert "Antigravity is reading" in picture('\n[review]\nagents = ["local", "anti"]\n').stderr
+
+
 def test_image_model_can_be_chosen(image_home):
     home, fake = image_home
     proc = run_ixel(home, "image", "--json", "--model", "my-image-model", "--out", "pics", "a fox",

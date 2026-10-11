@@ -246,6 +246,29 @@ def test_saying_yes_to_antigravity_puts_it_on_the_panel_and_a_kept_one_stays_off
     # Asked again and you say yes: on the panel
     config, on = panel(wizard._build_toml([claude, {**anti, "_asked": True}], existing=kept))
     assert on == ["claude_code", "antigravity"]
+    # An old list naming no model the file had (empty, or only ones since gone) was read as no list: so it is here
+    for listed in ([], ["opus"]):
+        old = {**tomllib.loads(wizard._build_toml([claude])), "review": {"agents": listed}}
+        config, on = panel(wizard._build_toml([claude, anti], existing=old))
+        assert on == ["claude_code", "antigravity"]
+
+
+def test_triage_doesnt_pick_antigravity_to_decide_unless_you_do(monkeypatch):
+    claude, anti = {"id": "claude_code", "preset": "claude_code"}, {"id": "antigravity", "preset": "antigravity"}
+    monkeypatch.setattr(wizard.Confirm, "ask", lambda *a, **k: True if "triage" in str(a[0]) else k.get("default"))
+    defaults = []
+
+    def prompt(question, **k):
+        if "Who decides" in str(question):
+            return "model"
+        defaults.append(k.get("default"))
+        return k.get("default") or k["choices"][0]
+
+    monkeypatch.setattr(wizard.Prompt, "ask", prompt)
+    assert wizard._configure_triage([claude, anti], {"mode": "review"})["agent"] == "claude_code"
+    assert defaults == ["claude_code"]  # it would see every question; it's still one of the choices
+    wizard._configure_triage([anti, {"id": "anti2", "command": "agy"}], {"mode": "review"})
+    assert defaults[-1] is None  # nothing but opt-in programs: no default, so you pick
 
 
 def test_opencode_with_only_its_own_models_is_left_off_unless_you_say(monkeypatch):
