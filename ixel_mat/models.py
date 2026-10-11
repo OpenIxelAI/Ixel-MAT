@@ -99,9 +99,10 @@ def models_url(chat_url: str) -> str:
     return base + "/models"
 
 
-_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$")
+_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}(#[a-z0-9-]+)?$")
 
 
 def valid_model_id(value: str) -> bool:
-    """A model name, never something a command line could read as a flag."""
+    """A model name, never something a command line could read as a flag. An optional #variant (OpenCode's
+    thinking level, as in anthropic/claude-opus-5-5#high) may end it."""
     return bool(_MODEL_ID.match(value))

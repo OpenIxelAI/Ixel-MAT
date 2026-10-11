@@ -112,7 +112,8 @@ color = "yellow"
 #             current, or name one (Claude Code: opus, sonnet, haiku…)
 #   effort    as above. Claude Code, Codex, Copilot and Grok Build take it (a
 #             level the CLI doesn't have is sent as the nearest one it does);
-#             Gemini CLI and OpenCode have no such setting, so it's not sent
+#             OpenCode gets it as the model's #variant (anthropic/…#high), for
+#             the providers Ixel knows; Gemini CLI has no such setting
 #   timeout   seconds per call (the presets: 300, in a review too)
 #   label     the name shown on the panel
 #   billing   "api" if you signed the CLI in with an API key, not a subscription
@@ -135,9 +136,19 @@ preset = "opencode"
 
 # Grok Build (`grok`), signed in with your xAI account (SuperGrok)
 # (`grok login`). Each question runs in a home folder of its own, so your Grok
-# Build config, MCP servers, hooks, skills and sessions stay out of it.
+# Build config, MCP servers, hooks, skills and sessions stay out of it. A review
+# of a diff can take Grok Build several minutes, so Ixel waits up to 15 minutes
+# for it and, unless you set an effort for it, asks it at low.
 [agents.grok_build]
 preset = "grok_build"
+
+# Antigravity (`agy`), signed in with your Google account (Google AI Pro):
+# Gemini CLI no longer takes a personal Google sign-in. Opt-in: it sits out of
+# the panel until you switch it on in Settings or name it in [review] agents.
+# Google's Antigravity terms may restrict using it from tools other than
+# Google's own; using it here could put your Google account at risk.
+[agents.antigravity]
+preset = "antigravity"
 
 # ── Other agents ───────────────────────────────────────────────────────────────
 # An OpenClaw gateway on this machine (or over wss:// elsewhere):
@@ -173,6 +184,7 @@ preset = "grok_build"
 # env = { MYCLI_COLOR = "never" } # fixed settings (not secrets)
 # model_args = ["--model", "{model}"]     # how it takes `model`
 # effort_args = ["--effort", "{effort}"]  # how it takes `effort`
+# effort_in_model = "{model}#{effort}"    # or inside the model name (OpenCode's #variant)
 # effort_levels = ["low", "high"]         # the levels it has
 
 # ── Review defaults ────────────────────────────────────────────────────────────

@@ -55,7 +55,11 @@ def test_provider_and_models_url():
 
 
 @pytest.mark.parametrize("value,ok", [("gpt-5.5", True), ("openai/gpt-5.5", True), ("llama3.3:latest", True),
-                                      ("--dangerously-skip-permissions", False), ("", False), ("a b", False)])
+                                      ("--dangerously-skip-permissions", False), ("", False), ("a b", False),
+                                      # OpenCode's #variant (its effort) may end a model id, once
+                                      ("anthropic/claude-opus-5-5#high", True), ("gpt-5.5#xhigh", True),
+                                      ("a#b-2", True), ("#high", False), ("a#", False), ("a#High", False),
+                                      ("a#b#c", False), ("a# b", False), ("-m#high", False)])
 def test_model_ids_can_never_be_flags(value, ok):
     assert valid_model_id(value) is ok
 

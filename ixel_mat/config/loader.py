@@ -29,7 +29,8 @@ from ixel_mat.usage import BILLING
 from ixel_mat.config.secrets import read_text_file, write_private_file
 from ixel_mat.local_models import chat_url
 from ixel_mat.models import ALIASES, provider_for_url, valid_model_id
-from ixel_mat.presets import PRESET_FIELDS, PRESETS_BY_ID, locked_env
+from ixel_mat.effort import native_levels
+from ixel_mat.presets import PRESET_FIELDS, PRESETS_BY_ID, locked_env, preset_for
 
 # Use tomllib (3.11+) or fallback to tomli
 try:
@@ -155,13 +156,27 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
             warnings.append(f"Agent '{name}': ignoring invalid workdir {workdir!r}")
             workdir = "temp"
         effort = data.get("effort", "")
-        if effort and effort not in EFFORT_LEVELS:
+        # Ixel's scale, or a level the program takes for its model in the provider's own names (Codex's ultra)
+        if effort and not (isinstance(effort, str) and (effort in EFFORT_LEVELS or effort in {
+                c["value"] for c in native_levels(_program_of(data), _str_or_none(data.get("model")))})):
             warnings.append(f"Agent '{name}': effort must be one of {', '.join(EFFORT_LEVELS)}")
             effort = ""
-        pass_env = _str_list(data, "pass_env", name, warnings)
+        ultracode = data.get("ultracode", False)
+        if not isinstance(ultracode, bool):
+            warnings.append(f"Agent '{name}': ultracode is on or off (true or false)")
+            ultracode = False
+        elif ultracode and _program_of(data) != "claude_code":
+            warnings.append(f"Agent '{name}': ultracode is Claude Code's own switch, so it does nothing here")
+            ultracode = False
+        pass_env =_str_list(data, "pass_env", name, warnings)
         drop_env = _str_list(data, "drop_env", name, warnings)
         effort_args = _str_list(data, "effort_args", name, warnings)
         effort_levels = _str_list(data, "effort_levels", name, warnings)
+        effort_in_model = data.get("effort_in_model", "")
+        if effort_in_model and not (isinstance(effort_in_model, str)
+                                    and "{model}" in effort_in_model and "{effort}" in effort_in_model):
+            warnings.append(f"Agent '{name}': effort_in_model must be text with {{model}} and {{effort}} in it")
+            effort_in_model = ""
         model_args = _str_list(data, "model_args", name, warnings)
         accepts = _str_list(data, "accepts", name, warnings)
         if accepts and any(kind not in MEDIA for kind in accepts):
@@ -230,10 +245,12 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
             output_flag=data.get("output_flag", "") if isinstance(data.get("output_flag", ""), str) else "",
             stdout_format=stdout_format,
             effort=effort,
+            ultracode=ultracode,
             env=env,
             drop_env=drop_env,
             effort_args=effort_args,
             effort_levels=effort_levels,
+            effort_in_model=effort_in_model,
             model_args=model_args,
             billing=billing,
             accepts=accepts,
@@ -262,6 +279,19 @@ def _with_preset(name: str, data: dict, problems: list[str]) -> dict | None:
     if "required_args" in preset:
         merged["required_args"] = preset["required_args"]  # but they still need these: they're the lockdown
     return merged
+
+
+def _program_of(data: dict) -> str:
+    """The preset id of the program an agent runs (the one it names, or the one its command is), or ""."""
+    preset = data.get("preset")
+    if isinstance(preset, str) and preset in PRESETS_BY_ID:
+        return preset
+    command = data.get("command")
+    return preset_for(command).get("id", "") if isinstance(command, str) else ""
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _args_table(value: object) -> bool:
@@ -418,6 +448,35 @@ def set_agent_model(path: Path, agent_id: str, model: str) -> None:
     """
     if model != "default" and not (model in ALIASES or valid_model_id(model)):
         raise ValueError(f"{model!r} isn't a valid model name")
+    _set_agent_key(path, agent_id, "model", None if model == "default" else model)
+
+
+# A level is kept on load when Ixel's scale or the agent's program and model take it (effort.native_levels)
+def set_agent_effort(path: Path, agent_id: str, level: str, takes: list[str] | None = None) -> None:
+    """
+    Change one agent's effort (thinking level) in the config file, leaving
+    everything else as written. "default" removes the setting (the model's or
+    program's own). takes: the levels the agent's model takes, when known; a
+    level outside them is refused. The previous version is kept as config.toml.bak.
+    """
+    check_effort_level(agent_id, level, takes)
+    _set_agent_key(path, agent_id, "effort", None if level == "default" else level)
+
+
+def check_effort_level(agent_id: str, level: str, takes: list[str] | None = None) -> None:
+    """ValueError unless level is "default" or a level the agent takes (any well-formed one when takes is None)."""
+    if level == "default":
+        return
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", level):  # never something a command line reads as a flag
+        raise ValueError(f"{level!r} isn't an effort level")
+    if takes is not None and not takes:
+        raise ValueError(f"{agent_id} takes no effort level")
+    if takes is not None and level not in takes:
+        raise ValueError(f"{agent_id} doesn't take {level!r}; it takes: {', '.join(takes)}")
+
+
+def _set_agent_key(path: Path, agent_id: str, key: str, value: str | None) -> None:
+    """Set `key = "value"` in one agent's table (None removes the line), re-read to confirm, keeping a .toml.bak."""
     text = read_text_file(path)
     agents = tomllib.loads(text).get("agents", {})
     if agent_id not in agents:
@@ -426,25 +485,25 @@ def set_agent_model(path: Path, agent_id: str, model: str) -> None:
     header = re.compile(r'^\s*\[\s*agents\s*\.\s*("?)' + re.escape(agent_id) + r'\1\s*\](\s*#.*)?\s*$')
     start = next((i for i, line in enumerate(lines) if header.match(line)), None)
     if start is None:
-        raise ValueError(f"couldn't find the [agents.{agent_id}] table to edit; change its model by hand")
+        raise ValueError(f"couldn't find the [agents.{agent_id}] table to edit; change its {key} by hand")
     end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
-    model_line = next((i for i in range(start + 1, end) if re.match(r"^\s*model\s*=", lines[i])), None)
+    key_line = next((i for i in range(start + 1, end) if re.match(rf"^\s*{key}\s*=", lines[i])), None)
     newline = "\r\n" if lines[start].endswith("\r\n") else "\n"
-    new_line = f"model = {json.dumps(model)}{newline}"
-    if model == "default":
-        if model_line is not None:
-            del lines[model_line]
-    elif model_line is not None:
+    new_line = f"{key} = {json.dumps(value)}{newline}"
+    if value is None:
+        if key_line is not None:
+            del lines[key_line]
+    elif key_line is not None:
         # Keep the line's indent and any comment after its value
-        kept = re.match(r"""^(\s*)model\s*=\s*(?:"(?:[^"\\]|\\.)*"|'[^']*')(\s*#.*?)?\s*$""", lines[model_line])
+        kept = re.match(rf"""^(\s*){key}\s*=\s*(?:"(?:[^"\\]|\\.)*"|'[^']*')(\s*#.*?)?\s*$""", lines[key_line])
         if kept:
-            new_line = f"{kept.group(1)}model = {json.dumps(model)}{kept.group(2) or ''}{newline}"
-        lines[model_line] = new_line
+            new_line = f"{kept.group(1)}{key} = {json.dumps(value)}{kept.group(2) or ''}{newline}"
+        lines[key_line] = new_line
     else:
         lines.insert(start + 1, new_line)
     updated = "".join(lines)
     check = tomllib.loads(updated)["agents"][agent_id]
-    if check.get("model") != (None if model == "default" else model):
-        raise ValueError("the edit didn't come out right; change the model by hand")
+    if check.get(key) != value:
+        raise ValueError(f"the edit didn't come out right; change the {key} by hand")
     write_private_file(path.with_suffix(".toml.bak"), text.encode("utf-8"))
     write_private_file(path, updated.encode("utf-8"))

@@ -48,6 +48,7 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from ixel_mat.agents.base import DEFAULT_TIMEOUT
 from ixel_mat.config.secrets import panel_depth
+from ixel_mat.effort import review_effort, slow_on_reviews
 from ixel_mat.material import MAX_MATERIAL_CHARS, Material, mark_hidden_characters, mask_secrets
 from ixel_mat.triage import TriageDecision, percent
 from ixel_mat.sanitize import sanitize_terminal_text
@@ -686,7 +687,11 @@ class _Run:
         One model call. on_text, if given, gets the reply's text as it's written, from
         agents that can stream (the rest ignore it and the whole reply comes back at once).
         """
-        await self.emit("agent_started", round=round_name, agent=agent.name, agent_label=agent.label)
+        cfg = getattr(agent, "config", None)
+        effort = review_effort(cfg, effort)  # Grok Build gets low unless someone set a level
+        # slow: the model can take several minutes over this, so the waiting line says so
+        await self.emit("agent_started", round=round_name, agent=agent.name, agent_label=agent.label,
+                        slow=slow_on_reviews(cfg))
         self.result.calls += 1
         tier = "verifier" if agent is self.verifier else "panel"
         self.result.tier_calls[tier] = self.result.tier_calls.get(tier, 0) + 1

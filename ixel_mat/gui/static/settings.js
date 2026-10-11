@@ -1,7 +1,8 @@
 // Settings: choices among what's already set up (which models sit on the panel and how each one
 // thinks, the default mode, Saver, Triage and pictures), model servers on your own computers, and the
 // keys. Each model is picked from a list (its company's own when Ixel can ask, see model_choices.py),
-// with Other… for any name. Each change is saved to the settings file as it's made; the file from before
+// with Other… for any name. Effort levels are named in each provider's own words (as the server sends
+// them), and Claude Code has its own Ultracode switch beside them. Each change is saved to the settings file as it's made; the file from before
 // it is kept as config.toml.bak. Models on your own computers (Ollama, LM Studio…) can be added, pointed
 // at another of your computers, or taken off here, never with a key. Everything else about what runs and
 // where things are sent (a command, any other address, a key name) stays with `ixel setup` and the file
@@ -342,6 +343,9 @@ function models() {
               save("models", { section: "panel", values: { on } });
             }, !data.editable, `${a.label} on the panel`),
             el("span", {}, "On the panel"))),
+        // A program's login ("uses your SuperGrok login"), and its warning (Antigravity: Google's terms)
+        a.about ? el("small", { class: "set-sub" }, cap(a.about)) : null,
+        a.warning ? el("small", { class: "set-warn", role: "note" }, a.warning) : null,
         el("div", { class: "set-agent-fields" },
           el("label", { class: "set-field" }, el("span", {}, "Model"), modelPicker(a, own)),
           naming.has(a.name) && own
@@ -356,10 +360,21 @@ function models() {
               }
             })
             : null,
-          effortsOf(a).length
+          levelsOf(a).length
             ? el("label", { class: "set-field" }, el("span", {}, "Effort"),
               labelled(select(`agent:${a.name}:effort`, a.effort, effortChoices(a),
                 (effort) => save("models", { section: "agent", agent: a.name, values: { effort } }), !own), `${a.label} effort`))
+            : a.effort_where
+              ? el("label", { class: "set-field" }, el("span", {}, "Effort"),
+                el("span", { class: "set-sub", "data-key": `agent:${a.name}:effort-where` }, a.effort_where))
+              : null,
+          // A separate on/off switch, not an effort level; off by default
+          a.program === "claude_code"
+            ? el("label", { class: "set-check" },
+              checkbox(`agent:${a.name}:ultracode`, a.ultracode,
+                (value) => save("models", { section: "agent", agent: a.name, values: { ultracode: value } }),
+                !own, `${a.label} Ultracode`),
+              el("span", {}, "Ultracode (Claude Code's multi-agent mode, works at any effort)"))
             : null),
         a.server ? serverFields(a, own) : null,
         effortNote(a) ? el("small", { class: "set-sub" }, effortNote(a)) : null,
@@ -374,26 +389,16 @@ function liveEfforts(a) {
   return list && list.efforts && list.follows === a.model ? list : null;
 }
 
-function effortsOf(a) {
+// [{value, label}], lowest first, in the provider's own words
+function levelsOf(a) {
   const live = liveEfforts(a);
-  return live ? live.efforts : a.efforts;
+  return (live ? live.levels : a.levels) || [];
 }
 
 function effortNote(a) {
   const list = liveEfforts(a);
   if (!list) return a.effort_note;
   return list.efforts.length ? "" : `${list.resolved} has no effort setting, so Ixel sends none.`;
-}
-
-// The nearest level a model takes, as a question sends it (ties go to the lower one)
-const LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
-function nearest(level, levels) {
-  const at = LEVELS.indexOf(level);
-  return levels.reduce((best, l) => {
-    const d = Math.abs(LEVELS.indexOf(l) - at);
-    const b = Math.abs(LEVELS.indexOf(best) - at);
-    return d < b || (d === b && LEVELS.indexOf(l) < LEVELS.indexOf(best)) ? l : best;
-  });
 }
 
 // A model on a server of yours: where the server is (another of your computers can be typed in), and Take off
@@ -613,11 +618,17 @@ function add(server, model) {
   });
 }
 
-// Only the levels this model takes; one saved before that it doesn't take says what's sent instead
+// Only the levels this model takes, labelled by the server in each provider's own words; one saved before
+// that it doesn't take says what's sent instead (the server works that out)
 function effortChoices(a) {
-  const levels = effortsOf(a);
-  const choices = [["", "Default"], ...levels.map((e) => [e, cap(e)])];
-  if (a.effort && !levels.includes(a.effort)) choices.push([a.effort, `${cap(a.effort)} (sent as ${cap(nearest(a.effort, levels))})`]);
+  const levels = levelsOf(a);
+  const labelFor = (v) => (data.choices.effort_labels || {})[v] || v;
+  const choices = [["", "Default"], ...levels.map((l) => [l.value, l.label])];
+  if (a.effort && !levels.some((l) => l.value === a.effort)) {
+    const live = liveEfforts(a);
+    const sent = live ? live.effort_sent : a.effort_sent;
+    choices.push([a.effort, sent ? `${labelFor(a.effort)} (sent as ${labelFor(sent)})` : labelFor(a.effort)]);
+  }
   return choices;
 }
 

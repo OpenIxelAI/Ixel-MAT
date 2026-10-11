@@ -2,7 +2,7 @@
 The app's Settings page: what it shows, and the few things it may change.
 
 It changes choices among things already set up: which models sit on the panel and which model and
-effort each uses, the default mode and moderator, Saver, Triage and the picture service. Beyond that it
+effort each uses (and Claude Code's Ultracode switch), the default mode and moderator, Saver, Triage and the picture service. Beyond that it
 manages only model servers on your own computers (Ollama, LM Studio…): it can add one of their models,
 point one at another of your computers, or take one off. Such a model is never given a key, and its address
 must be this computer or one on your own network, checked when it's saved. Nothing else about what runs or
@@ -14,6 +14,7 @@ Keys are write-only: the page can save, replace or remove one (only names Ixel k
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 from pathlib import Path
@@ -28,9 +29,12 @@ from ixel_mat.config import edit, secrets
 from ixel_mat.models import ALIASES, provider_for_url, valid_model_id
 from ixel_mat.modes.review import ESCALATE_POLICIES as ESCALATE
 from ixel_mat.modes.review import ON_WRONG_POLICIES as ON_WRONG
-from ixel_mat.presets import preset_for
+from ixel_mat.presets import PRESETS_BY_ID, preset_for
 from ixel_mat.runtime import MODE_CHOICES as MODES
 from ixel_mat.runtime import PLAIN_CHOICES as PLAIN
+
+# Shown next to a program's switch (by preset id): an opt-in preset's own warning (Antigravity's terms)
+PROGRAM_WARNINGS = {p["id"]: p["warning"] for p in PRESETS_BY_ID.values() if p.get("warning")}
 
 TRIAGE_PROVIDERS = ("typesafe", "model")
 KEY_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
@@ -153,15 +157,26 @@ def snapshot(settings, version: str | None = None) -> dict:
     panel = set(settings.review.agents) if settings.review.agents else None
     agents = []
     for name, cfg in settings.agent_configs.items():
-        levels = effort.agent_levels(cfg)
+        choices = effort.agent_choices(cfg)
+        levels = tuple(c["value"] for c in choices)
+        program = settings.program_of(name)
         agents.append({
             "name": name, "label": cfg.label, "kind": _kind(cfg), "model": raw.get(name, {}).get("model", "") or "",
-            # Only the levels this model (or program) takes; one set before that it doesn't is sent as the nearest
-            "effort": cfg.effort or "", "has_effort": bool(levels), "efforts": list(levels),
+            # Only the levels this model (or program) takes, in its provider's own names ("levels": {value, label});
+            # one set before that it doesn't is sent as the nearest
+            "effort": cfg.effort or "", "has_effort": bool(levels), "efforts": list(levels), "levels": choices,
             "effort_sent": effort.to_send(levels, cfg.effort) or "", "effort_note": _effort_note(cfg, levels),
+            "effort_where": _effort_where(program),
+            # Claude Code's multi-agent mode: its own on/off switch, at any effort
+            "ultracode": bool(cfg.ultracode),
             # A model server of your own has no default to fall back on: a model has to be named
             "needs_model": cfg.type == "http" and not _follows_newest(cfg),
-            "on_panel": panel is None or name in panel, "in_file": name in raw,
+            # A program's login ("uses your SuperGrok login"), and a warning where there is one. A program that's
+            # off by default (Antigravity) sits out of the panel until it's switched on
+            "program": program, "about": PRESETS_BY_ID.get(program, {}).get("why", "") if program else "",
+            "warning": PROGRAM_WARNINGS.get(program, ""), "off_by_default": settings.off_by_default(name),
+            "on_panel": name in panel if panel is not None else not settings.off_by_default(name),
+            "in_file": name in raw,
             # Models Ixel calls itself, and programs that take pictures (Claude Code, Codex, Gemini CLI…)
             "can_see": cfg.can_see_pictures, "pictures": cfg.sees_pictures,
             # A model server on your own computers: its address can change here, and it can be taken off
@@ -199,6 +214,8 @@ def snapshot(settings, version: str | None = None) -> dict:
         "key_store": key_store(),
         "choices": {"modes": list(MODES), "plain": list(PLAIN), "escalate": list(ESCALATE),
                     "on_wrong": list(ON_WRONG), "efforts": list(EFFORT_LEVELS),
+                    # To name a saved level the model no longer takes
+                    "effort_labels": dict(effort.LABELS),
                     "triage_providers": list(TRIAGE_PROVIDERS),
                     "image_providers": [{"name": p.name, "label": p.label} for p in images.PROVIDERS.values()],
                     "sound_providers": [{"name": p.name, "label": p.label} for p in sound.PROVIDERS.values()]},
@@ -393,9 +410,16 @@ def _effort_note(cfg, levels) -> str:
     """Why there's no Effort to pick, when there isn't."""
     if levels or cfg.type not in ("http", "oneshot"):
         return ""
-    if cfg.type == "oneshot":
-        return f"{cfg.label} doesn't take an effort level from Ixel; it thinks as it's set up to."
-    return f"{cfg.model or cfg.label} has no effort setting, so Ixel sends none."
+    return effort.why_none(cfg) + "."
+
+
+def _effort_where(program: str) -> str:
+    """The short line shown where the Effort dropdown would be, for a program that takes its effort elsewhere."""
+    if program == "gemini_cli":
+        return "Set in Gemini's own settings"
+    if program == "opencode":
+        return "Part of the model name"
+    return ""
 
 
 def _sound(settings) -> dict:
@@ -473,7 +497,19 @@ def plan_change(settings, section: str, values: Any, agent: Any = None) -> tuple
                 else:
                     raise SettingsError(f"{value!r} isn't a model name.")
             elif key == "effort":
-                out["effort"] = edit.REMOVE if value in ("", None) else _choice(value, EFFORT_LEVELS, "Effort")
+                if value in ("", None, "default"):
+                    out["effort"] = edit.REMOVE
+                    continue
+                cfg = settings.agent_configs[agent]
+                if isinstance(values.get("model"), str):  # set with a new model: the levels that one takes
+                    cfg = dataclasses.replace(cfg, model="" if values["model"] in ("", "default") else values["model"])
+                takes = [c["value"] for c in effort.agent_choices(cfg)]
+                if isinstance(value, str) and value in takes:
+                    out["effort"] = value
+                elif not takes:
+                    raise SettingsError(effort.why_none(cfg) + ".")
+                else:
+                    raise SettingsError(f"{cfg.label} doesn't take {value!r}; it takes: {', '.join(takes)}.")
             elif key == "url":
                 cfg = settings.agent_configs[agent]
                 if not own_server(cfg, _raw_agents(settings)[agent]):
@@ -495,6 +531,12 @@ def plan_change(settings, section: str, values: Any, agent: Any = None) -> tuple
                     raise SettingsError(f"{cfg.label} is a program Ixel can't give pictures to.")
                 others = [kind for kind in (cfg.accepts or []) if kind != "image"]
                 out["accepts"] = (["image"] if value else []) + others
+            elif key == "ultracode":
+                cfg = settings.agent_configs[agent]
+                if settings.program_of(agent) != "claude_code":
+                    raise SettingsError(f"Ultracode is Claude Code's own switch, so {cfg.label} hasn't got one.")
+                on = _flag(value, "Ultracode")
+                out["ultracode"] = True if on else edit.REMOVE  # off is the default: no key in the file
             else:
                 raise SettingsError(f"{key} can't be changed here.")
         return ("agents", agent), out
@@ -502,7 +544,9 @@ def plan_change(settings, section: str, values: Any, agent: Any = None) -> tuple
         if set(values) != {"on"}:
             raise SettingsError("Nothing to change.")
         on = _names(values["on"], settings, "the panel")
-        out["agents"] = edit.REMOVE if set(on) == set(settings.agent_configs) else on
+        # An empty list means every model, which would leave an off-by-default program out again
+        every = set(on) == set(settings.agent_configs) and not any(settings.off_by_default(n) for n in on)
+        out["agents"] = edit.REMOVE if every else on
         return ("review",), out
     if section == "review":
         for key, value in values.items():

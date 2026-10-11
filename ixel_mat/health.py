@@ -215,10 +215,12 @@ async def agent_check(settings, cfg: AgentConfig, probe: bool, which=None, run=N
         from ixel_mat.agents.oneshot import cli_env
         from ixel_mat.presets import preset_for
         preset = preset_for(cfg.command)
+        # An opt-in preset's warning (Antigravity's terms), shown with whatever else is found
+        terms = [Check(f"{cid}-terms", f"{label} terms", "warn", preset["warning"])] if preset.get("warning") else []
         path = which(cfg.command) if cfg.command else None
         if not path:
             return [Check(cid, label, "fail", f"{cfg.command or 'Its program'} isn't installed, or isn't on PATH",
-                          preset.get("install", ""))]
+                          preset.get("install", "")), *terms]
         # What the agent itself runs with (a subprocess one gets no Gemini API key)
         if cfg.type == "oneshot":
             env = cli_env(cfg)
@@ -229,9 +231,12 @@ async def agent_check(settings, cfg: AgentConfig, probe: bool, which=None, run=N
         # Read from its settings and environment, so it's there before Check now too
         sign_in = [gemini_sign_in(cid, label, env)] if preset.get("id") == "gemini_cli" and cfg.type == "oneshot" \
             else [grok_sign_in(cid, label, env)] if preset.get("id") == "grok_build" else []
+        antigravity = preset.get("id") == "antigravity"
         if not probe:
+            if antigravity:
+                sign_in.append(antigravity_sign_in(cid, label, None))
             return [Check(cid, label, "unchecked", f"{cfg.command} is installed. Check now asks it for its version"),
-                    *sign_in]
+                    *sign_in, *terms]
         code, out = await run([cfg.command, "--version"], env=env)
         checks = [Check(cid, label, "ok" if code == 0 else "warn",
                         out if code == 0 and out else f"{cfg.command} --version didn't work: {out or f'exit {code}'}")]
@@ -240,7 +245,10 @@ async def agent_check(settings, cfg: AgentConfig, probe: bool, which=None, run=N
             checks.append(Check(f"{cid}-login", f"{label} sign-in", "ok" if code == 0 else "warn",
                                 out or ("Signed in" if code == 0 else "Not signed in"),
                                 "" if code == 0 else f"{cfg.command} login"))
-        return checks + sign_in
+        if antigravity:
+            code, _ = await run([cfg.command, "models"], env=env)
+            checks.append(antigravity_sign_in(cid, label, code))
+        return checks + sign_in + terms
 
     remote = needs_api_key(cfg)
     if remote and not cfg.token:
@@ -289,6 +297,18 @@ def grok_sign_in(cid: str, label: str, env: dict[str, str]) -> Check:
     if grok_signed_in(env):
         return Check(f"{cid}-login", f"{label} sign-in", "ok", "Signed in, in Grok Build itself")
     return Check(f"{cid}-login", f"{label} sign-in", "warn", GROK_SIGN_IN, "grok login")
+
+
+def antigravity_sign_in(cid: str, label: str, code: int | None) -> Check:
+    """Whether Antigravity is signed in, from how `agy models` exited (None: not asked yet). Unverified: agy's
+    --help lists a models subcommand and no login-status command is known, so a models list is taken as a sign-in."""
+    from ixel_mat.presets import ANTIGRAVITY_SIGN_IN
+    cid, label = f"{cid}-login", f"{label} sign-in"
+    if code is None:
+        return Check(cid, label, "unchecked", "Check now asks agy for its models, which it lists only when signed in")
+    if code == 0:
+        return Check(cid, label, "ok", "Signed in, in Antigravity itself")
+    return Check(cid, label, "warn", ANTIGRAVITY_SIGN_IN, "agy")
 
 
 def extra_model_checks(settings) -> list[Check]:

@@ -4,6 +4,11 @@ locked down to answer-only.
 
 A config refers to one by name (`preset = "claude_code"`) rather than copying
 its flags, so when a preset is tightened, every install picks that up.
+
+Claude Code, Codex, Gemini CLI, GitHub Copilot, OpenCode and Grok Build are
+offered whenever they're installed. Antigravity is opt-in: a preset with a
+"warning" is never added unless you say yes, and its warning is shown wherever
+it's offered or shown.
 """
 from __future__ import annotations
 
@@ -18,6 +23,8 @@ from typing import Mapping
 # lock-down below was checked by pointing the CLI at a fake model server that
 # answers with shell, file-write and file-read tool calls: none may run
 # (tests/test_cli_presets_live.py repeats this wherever the CLIs are installed).
+# Antigravity's (the last one) is the exception: nobody has run agy headless
+# from Ixel yet, so its lock-down is unverified (see the comments on it).
 _OPENCODE_LOCKDOWN = json.dumps({
     # Our own agent, defined here where it outranks the user's config, so a
     # config that re-enables tools for the built-in agents can't reach it.
@@ -29,11 +36,16 @@ _OPENCODE_LOCKDOWN = json.dumps({
 PANEL_MEMBER = ("You're answering as one member of a panel of AI models. Answer the question directly and "
                 "completely, whatever its topic, without remarking on whether it relates to coding.")
 
-# Grok Build's tools by their own names (1.0.46), all taken away, and the kinds of tool its --deny rules stop
-GROK_TOOLS = ("run_terminal_cmd", "Agent", "read_file", "search_replace", "list_dir", "grep", "todo_write", "monitor",
-              "search_tool", "use_tool", "workflow", "enter_plan_mode", "exit_plan_mode", "ask_user_question",
-              "send_feedback", "image_gen", "image_edit", "image_to_video", "reference_to_video", "write",
-              "web_search", "web_fetch", "kill_command_or_subagent", "get_command_or_subagent_output",
+# Otherwise Grok Build reaches for a tool on a review (git diff), is denied, and waits for permission it never gets
+GROK_RULES = (PANEL_MEMBER + " Everything you need, the code, diff or documents, is in the question itself. You "
+              "have no tools: don't try to run commands, read files or search; answer from what you were given.")
+
+# Grok Build's tools by their own names (1.0.46 and 1.0.50), all taken away, and the kinds of tool its --deny rules
+# stop. 1.0.50 renamed run_terminal_cmd to run_terminal_command; both are kept, for either version.
+GROK_TOOLS = ("run_terminal_cmd", "run_terminal_command", "Agent", "read_file", "search_replace", "list_dir", "grep",
+              "todo_write", "monitor", "search_tool", "use_tool", "workflow", "enter_plan_mode", "exit_plan_mode",
+              "ask_user_question", "send_feedback", "image_gen", "image_edit", "image_to_video", "reference_to_video",
+              "write", "web_search", "web_fetch", "kill_command_or_subagent", "get_command_or_subagent_output",
               "spawn_subagent", "scheduler_create", "scheduler_delete", "scheduler_list")
 GROK_DENY = ("Bash", "Edit", "Write", "Read", "Grep", "WebFetch", "MCPTool")
 
@@ -44,6 +56,11 @@ GROK_DENY = ("Bash", "Edit", "Write", "Read", "Grep", "WebFetch", "MCPTool")
 OTHER_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "GEMINI_API_KEY",
               "GOOGLE_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_API_KEY",
               "DEEPSEEK_API_KEY", "TYPESAFE_API_KEY"]
+
+# Shown wherever Antigravity is offered or shown (setup, ixel doctor, the Health page, `ixel model`). Defined here,
+# not with the sign-in messages below, because its preset carries it.
+ANTIGRAVITY_WARNING = ("Google's Antigravity terms may restrict using it from tools other than Google's own; "
+                       "using it here could put your Google account at risk.")
 
 CLI_PRESETS = [
     {
@@ -89,7 +106,8 @@ CLI_PRESETS = [
         "picture_args": ["--image", "{name}"],
         "drop_env": [*OTHER_KEYS],
         "effort_args": ["-c", 'model_reasoning_effort="{effort}"'],
-        "effort_levels": ["minimal", "low", "medium", "high", "xhigh"],
+        # Every level any Codex model takes; which of them a model takes is in effort.py (from Codex's models cache)
+        "effort_levels": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         "model_args": ["-m", "{model}"], "model_hint": "a model name such as gpt-5.5",
     },
     {
@@ -152,7 +170,13 @@ CLI_PRESETS = [
         # on older versions); it uses the copy it already has, or the one built into it
         "env": {"OPENCODE_CONFIG_CONTENT": _OPENCODE_LOCKDOWN, "OPENCODE_DISABLE_AUTOUPDATE": "1",
                 "OPENCODE_DISABLE_MODELS_FETCH": "1"},
-        "model_args": ["-m", "{model}"], "model_hint": "provider/model, e.g. anthropic/claude-opus-5-5",
+        # OpenCode's -m takes provider/model#variant, and the variant is its thinking level. Variants differ per
+        # provider and model, so Ixel offers the generic low/medium/high only for providers whose models it
+        # knows (effort.OPENCODE_PROVIDERS), none for the others, and none when the model carries its own #variant
+        "effort_in_model": "{model}#{effort}", "effort_levels": ["low", "medium", "high"],
+        "model_args": ["-m", "{model}"],
+        "model_hint": "provider/model, e.g. anthropic/claude-opus-5-5 (a #variant you add yourself, such as #max, "
+                      "is sent as it is)",
     },
     {
         "id": "grok_build", "label": "Grok Build", "command": "grok",
@@ -163,13 +187,20 @@ CLI_PRESETS = [
         # as one of Grok Build's /commands (/compact, /clear). --rules adds to Grok Build's own instructions.
         # Ixel also runs it with a home of its own for each question (agents/leftovers.py): your config, MCP
         # servers, hooks, plugins, memory and sessions stay out of it, and what the run keeps goes with it.
+        # --permission-mode dontAsk (never bypassPermissions): a tool call a rule denies, or a tool left in place
+        # by a name Ixel doesn't know yet, fails at once instead of the run waiting forever for an answer nobody
+        # gives, as reviews did with 1.0.50, which renamed its terminal tool.
         "args": ["--output-format", "streaming-messages-json", "--include-partial-messages", "--verbatim",
-                 "--no-auto-update", "--no-subagents", "--disable-web-search",
+                 "--no-auto-update", "--no-subagents", "--disable-web-search", "--permission-mode", "dontAsk",
                  "--disallowed-tools", ",".join(GROK_TOOLS), *[a for kind in GROK_DENY for a in ("--deny", kind)],
-                 "--rules", PANEL_MEMBER],
+                 "--rules", GROK_RULES],
         # Grok Build doesn't read stdin: the question goes in a private file of its own, out of `ps`. Its stream
-        # is Claude Code's, so the answer shows as it's written
-        "prompt_via": "file", "timeout": 300, "stdout_format": "claude-stream-json",
+        # is Claude Code's, so the answer shows as it's written.
+        # 900 s: measured 2026-10-11 with grok 1.0.50 and these args, a review of an 11.6k-character diff
+        # answered in 189 s at --effort low (about 12k reasoning tokens) and 604 s at high (about 32k), a 2k one
+        # in 49 s at Grok Build's own default (xhigh in a ~/.grok config); at 300 s a review at the default
+        # never finished
+        "prompt_via": "file", "timeout": 900, "stdout_format": "claude-stream-json",
         # An API key would be used instead of your login. GROK_CONFIG and GROK_CONFIG_PATH add settings: Ixel sets
         # the only one it carries over from yours, the default model (agents/leftovers.py)
         "drop_env": [*OTHER_KEYS, "GROK_CODE_XAI_API_KEY", "GROK_CONFIG", "GROK_CONFIG_PATH"],
@@ -183,16 +214,40 @@ CLI_PRESETS = [
         "effort_args": ["--effort", "{effort}"], "effort_levels": ["low", "medium", "high", "xhigh"],
         "model_args": ["-m", "{model}"], "model_hint": "a model name such as grok-4.7",
     },
+    {
+        # Opt-in ("warning"): Gemini CLI no longer takes a personal Google sign-in, and Google points those
+        # accounts to Antigravity. Never added unless you say yes. No "install": how agy gets installed wasn't
+        # checked, so setup never suggests it and health has no install line for it.
+        "id": "antigravity", "label": "Antigravity", "command": "agy",
+        "why": "uses your Google AI Pro login, through Google's Antigravity (opt-in: see its warning)",
+        "warning": ANTIGRAVITY_WARNING,
+        # Unverified, all of it (agy 1.2.16's --help, never run headless from Ixel): its flags mirror Claude
+        # Code's, so -p is assumed to print one answer to a question read from stdin, as `claude -p` does;
+        # --mode plan is assumed to be read-only; --sandbox (terminal restrictions) is assumed to be a bare flag;
+        # --disable-slash-commands keeps the question from being read as one of its /commands. Text output:
+        # Ixel can't parse agy's json/stream-json yet (if it turns out to be Claude Code's stream-json,
+        # stdout_format "claude-stream-json" would stream the answer). agy has an mcp subcommand and no known
+        # flag that turns its MCP servers off. Never --dangerously-skip-permissions, never --add-dir.
+        "args": ["-p", "--output-format", "text", "--disable-slash-commands", "--mode", "plan", "--sandbox"],
+        # On stdin, out of `ps` (unverified that agy -p reads it there, see above)
+        "prompt_via": "stdin", "timeout": 300,
+        # No pictures: whether --input-format stream-json takes image blocks is unverified.
+        # Your login is what's used, never a Gemini or Google key (or anyone else's)
+        "drop_env": [*OTHER_KEYS],
+        "effort_args": ["--effort", "{effort}"], "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+        "model_args": ["--model", "{model}"],
+        "model_hint": "a model name as agy models lists them, such as gemini-3.1-pro-preview",
+    },
 ]
 
 
 # Fields a preset supplies; an agent's own config overrides any of them.
 PRESET_FIELDS = ("command", "args", "args_by_version", "prompt_via", "output_flag", "stdout_format", "timeout",
-                 "env", "drop_env", "effort_args", "effort_levels", "model_args", "picture_args", "picture_prompt",
-                 "picture_stdin")
+                 "env", "drop_env", "effort_args", "effort_levels", "effort_in_model", "model_args", "picture_args",
+                 "picture_prompt", "picture_stdin")
 PRESETS_BY_ID = {p["id"]: p for p in CLI_PRESETS}
 # Fields that describe a preset for people (setup, `ixel model`) and never reach an agent's config.
-PRESET_ABOUT = ("id", "why", "install", "free", "free_then", "model_hint")
+PRESET_ABOUT = ("id", "why", "install", "free", "free_then", "model_hint", "warning")
 
 
 def preset_for(command: str) -> dict:
@@ -245,8 +300,13 @@ COPILOT_TOO_OLD = ("This Copilot is older than Ixel needs (1.0.52, May 2026): ru
 # Grok Build with no login (grok login saves one in ~/.grok/auth.json)
 GROK_SIGN_IN = ("Grok Build isn't signed in: run grok login once (it opens your browser to sign in to your "
                 "xAI account, such as SuperGrok), or take Grok Build off the panel.")
+# Antigravity with no Google sign-in (at most 160 characters, like the others)
+ANTIGRAVITY_SIGN_IN = ("Antigravity isn't signed in: run agy once and sign in with your Google account (Google AI "
+                       "Pro), or take Antigravity off the panel.")
 # What a preset's CLI says on stderr when it can't start on a question at all, and what to tell you instead
 PLAIN_ERRORS = {"grok_build": {"Not signed in": GROK_SIGN_IN},
+                # Unverified: guessed from Claude Code's wording, which agy's flags mirror
+                "antigravity": {"Not logged in": ANTIGRAVITY_SIGN_IN, "Please run /login": ANTIGRAVITY_SIGN_IN},
                 "gemini_cli": {"Please set an Auth method": GEMINI_SIGN_IN},
                 "copilot": {"unknown option '--no-remote-export'": COPILOT_TOO_OLD,
                             "unknown option '--session-id'": COPILOT_TOO_OLD},

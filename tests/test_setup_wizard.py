@@ -116,11 +116,24 @@ def test_cli_presets_are_answer_only_and_never_bypass_safety():
     assert "--standalone" not in opencode["args_by_version"]["1"]
     grok = next(p for p in wizard.CLI_PRESETS if p["id"] == "grok_build")
     taken = set(grok["args"][grok["args"].index("--disallowed-tools") + 1].split(","))
-    assert {"run_terminal_cmd", "read_file", "write", "search_replace", "web_fetch", "Agent", "use_tool"} <= taken
+    assert {"run_terminal_cmd", "run_terminal_command", "read_file", "write", "search_replace", "web_fetch", "Agent",
+            "use_tool"} <= taken
     denied = {grok["args"][i + 1] for i, a in enumerate(grok["args"]) if a == "--deny"}
     assert {"Bash", "Read", "Write", "Edit", "MCPTool"} <= denied and "--verbatim" in grok["args"]
+    # A denied tool fails at once instead of the run waiting forever for a permission nobody gives
+    assert grok["args"][grok["args"].index("--permission-mode") + 1] == "dontAsk"
+    assert "bypassPermissions" not in grok["args"]
     assert grok["env"]["GROK_TELEMETRY_ENABLED"] == "0" and grok["env"]["GROK_CLAUDE_MCPS_ENABLED"] == "0"
     assert "XAI_API_KEY" in grok["drop_env"] and "GROK_CODE_XAI_API_KEY" in grok["drop_env"]  # your login, not a key
+    # Antigravity (opt-in; its flags are unverified, see presets.py): plan mode, no folder of yours, no bypass
+    antigravity = next(p for p in wizard.CLI_PRESETS if p["id"] == "antigravity")
+    assert "-p" in antigravity["args"] and antigravity["args"][antigravity["args"].index("--mode") + 1] == "plan"
+    assert "--sandbox" in antigravity["args"] and "--disable-slash-commands" in antigravity["args"]
+    assert "--add-dir" not in antigravity["args"]
+    assert "--dangerously-skip-permissions" not in " ".join(antigravity["args"])
+    assert antigravity["prompt_via"] == "stdin"
+    assert {"GEMINI_API_KEY", "GOOGLE_API_KEY"} <= set(antigravity["drop_env"])  # your login, not a key
+    assert "install" not in antigravity  # opt-in: setup never suggests it, and has no install line
     # A prompt is never a positional argument that a CLI could parse as a flag
     assert all(p["prompt_via"] in ("arg", "stdin", "auto", "file") for p in wizard.CLI_PRESETS)
 
@@ -178,6 +191,40 @@ def test_cli_agent_model_can_be_chosen(monkeypatch):
     assert cmd[cmd.index("--model") + 1] == "opus" and "q" not in cmd and stdin == b"q"
 
 
+def wizard_output(monkeypatch):
+    from rich.console import Console
+    buf = io.StringIO()
+    monkeypatch.setattr(wizard, "console", Console(file=buf, width=300))
+    return lambda: " ".join(buf.getvalue().split())
+
+
+def test_antigravity_warning_is_the_agreed_one_line():
+    from ixel_mat.presets import ANTIGRAVITY_WARNING, PRESET_ABOUT, PRESETS_BY_ID
+    assert ANTIGRAVITY_WARNING == ("Google's Antigravity terms may restrict using it from tools other than Google's "
+                                   "own; using it here could put your Google account at risk.")
+    assert "\n" not in ANTIGRAVITY_WARNING
+    assert PRESETS_BY_ID["antigravity"]["warning"] is ANTIGRAVITY_WARNING
+    assert "warning" in PRESET_ABOUT  # describes the preset to people, and never reaches an agent's config
+
+
+def test_antigravity_is_off_unless_you_say_yes_and_comes_with_its_warning(monkeypatch):
+    from ixel_mat.presets import ANTIGRAVITY_WARNING
+    monkeypatch.setattr(wizard, "find_on_path", lambda cmd: "/home/x/.local/bin/agy" if cmd == "agy" else None)
+    said = wizard_output(monkeypatch)
+    monkeypatch.setattr(wizard.Prompt, "ask", lambda *a, **k: "")  # Enter: Antigravity's default model
+    defaults = []
+    monkeypatch.setattr(wizard.Confirm, "ask", lambda *a, **k: defaults.append(k["default"]) or k["default"])
+    assert wizard._configure_cli_agents(set()) == [] and defaults == [False]  # No is the default
+    assert ANTIGRAVITY_WARNING in said()
+    monkeypatch.setattr(wizard.Confirm, "ask", lambda *a, **k: True)
+    [agent] = wizard._configure_cli_agents(set())
+    assert agent["id"] == "antigravity" and agent["preset"] == "antigravity" and agent["type"] == "oneshot"
+    assert agent["label"] == "Antigravity"
+    assert not {"warning", "why", "model"} & set(agent)  # the warning never goes into the config
+    toml = wizard._build_toml([agent])
+    assert 'preset = "antigravity"' in toml and ANTIGRAVITY_WARNING not in toml
+
+
 def test_opencode_with_only_its_own_models_is_left_off_unless_you_say(monkeypatch):
     # Its free models answer only inside OpenCode: every question would come back turned down
     monkeypatch.setattr(wizard, "find_on_path", lambda cmd: "/usr/bin/opencode" if cmd == "opencode" else None)
@@ -222,6 +269,8 @@ def test_small_panels_hear_about_free_members(monkeypatch):
     two = [{"id": "codex", "preset": "codex"}, {"id": "claude_code", "preset": "claude_code"}]
     out = tips(two, {"codex", "claude"})
     assert "a disagreement is a tie" in out
+    assert "Antigravity" not in out and "agy" not in out  # opt-in: never suggested
+    assert "Antigravity" not in tips(two, {"codex", "claude", "agy"})  # even when it's installed
     assert "npm install -g @google/gemini-cli" in out and "https://ollama.com" in out
     words = " ".join(out.split())  # the tip wraps
     assert "asks for Google (Gemini)" in words and "once to sign in" not in words  # no personal sign-in
@@ -833,13 +882,6 @@ def test_a_settings_file_that_cant_be_read_is_replaced_and_kept_as_the_backup(mo
 
 
 # ── Where keys go ─────────────────────────────────────────────────────────────
-
-def wizard_output(monkeypatch):
-    from rich.console import Console
-    buf = io.StringIO()
-    monkeypatch.setattr(wizard, "console", Console(file=buf, width=300))
-    return lambda: " ".join(buf.getvalue().split())
-
 
 def test_setup_says_where_keys_go(monkeypatch, keychain):
     for p in wizard.PROVIDERS:

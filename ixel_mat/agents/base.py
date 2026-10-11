@@ -27,7 +27,8 @@ PROMPT_MODES = ("flag", "arg", "stdin", "auto", "file")
 # How a CLI prints its answer: plain text, or Claude Code's stream-json events (which let the
 # answer be shown as it's written)
 STDOUT_FORMATS = ("text", "claude-stream-json")
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# Ixel's scale, lowest first: ultra is Codex's own top level, past max
+EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 # What an agent can take besides text (`accepts = ["image"]`)
 MEDIA = ("image",)
 # APIs whose current models all take pictures; an agent on one of them sees pictures unless its
@@ -157,8 +158,12 @@ class AgentConfig:
     # Per-call timeout in seconds (0 = DEFAULT_TIMEOUT)
     timeout: float = 0.0
 
-    # Thinking level: minimal | low | medium | high | xhigh | max
+    # Thinking level: minimal | low | medium | high | xhigh | max | ultra (each program is offered its
+    # provider's own levels for its model: effort.py)
     effort: str = ""
+    # Claude Code's multi-agent mode (its settings key "ultracode"), a separate on/off switch that works at any
+    # effort; only a claude_code agent uses it
+    ultracode: bool = False
 
     # Command-line agents
     # How the question reaches it: "stdin" (the default: other programs can read a command line, but not
@@ -177,6 +182,9 @@ class AgentConfig:
     effort_levels: list[str] | None = None  # levels it accepts; others map to the nearest one
     model_args: list[str] | None = None     # how the CLI takes a model: ["--model", "{model}"];
                                             # with no model set, the CLI uses its own (current) default
+    effort_in_model: str = ""  # how a CLI takes the level inside the model name instead of a flag, e.g.
+                               # "{model}#{effort}" (OpenCode's #variant); used only when a model is set and a
+                               # level is sent; a model that already names its own #variant is sent as it is
 
     # How its calls are paid for: "api", "plan", "local" or "unknown" (usage.py); "" = guess
     billing: str = ""
