@@ -8,7 +8,8 @@ last rule covers the models that come out after that. A level a model doesn't ta
 does (minimal on GPT-6 is sent as low), and a model that takes none (Claude Haiku 4.5) gets none sent.
 
 Programs are told what the program itself takes (Claude Code: low to max). Codex hands the level straight to
-OpenAI, so it gets the levels its model takes as well. Gemini CLI and OpenCode take none from Ixel.
+OpenAI, and Grok Build to xAI, so they get the levels their model takes as well. Gemini CLI and OpenCode take
+none from Ixel.
 """
 from __future__ import annotations
 
@@ -70,7 +71,7 @@ NEWEST = {"latest": {"anthropic": "claude-opus-5-5", "openai": "gpt-6-astra", "g
                           "xai": "grok-4.7-fast"}}
 
 # Programs that hand the level straight to a company's API, and the model they use when given none
-PASSES_ON = {"codex": ("openai", "gpt-6")}
+PASSES_ON = {"codex": ("openai", "gpt-6"), "grok": ("xai", "grok-4.7")}
 
 
 def model_levels(company: str | None, model: str) -> tuple[str, ...]:

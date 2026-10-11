@@ -19,8 +19,10 @@ import sqlite3
 import struct
 import tempfile
 import threading
+import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -120,11 +122,58 @@ def _opencode(home, tmp_path, url, monkeypatch):
     return calls, [], None
 
 
+# Notes for agents in your own folders, which must not reach a panel member (Grok Build reads Claude Code's too)
+HOME_NOTE = "ixel-note-from-your-own-agent-settings"
+# Your default model in Grok Build's own config, which Ixel carries over
+GROK_DEFAULT = "grok-ixel-default"
+
+
+def _grok(home, tmp_path, url, monkeypatch, fields):
+    # Your Grok Build config: a default model, an MCP server and a hook that leave a file behind if started.
+    # Claude Code's MCP servers, hooks and instructions, which Grok Build reads too, and notes for agents
+    marker, args = _trap(tmp_path)
+    _write(home / ".grok" / "config.toml",
+           f'[models]\ndefault = "{GROK_DEFAULT}"\n\n[mcp_servers.trap]\ncommand = "sh"\nargs = {json.dumps(args)}\n')
+    hook = {"hooks": [{"type": "command", "command": f"touch '{marker}'"}]}
+    _write(home / ".grok" / "hooks" / "trap.json", json.dumps({"hooks": {"SessionStart": [hook]}}))
+    _write(home / ".claude.json", json.dumps({"mcpServers": {"trap": {"command": "sh", "args": args}}}))
+    _write(home / ".claude" / "settings.json", json.dumps({"hooks": {"UserPromptSubmit": [hook], "SessionStart": [hook]}}))
+    _write(home / ".claude" / "CLAUDE.md", f"{HOME_NOTE}\n")
+    _write(home / ".grok" / "AGENTS.md", f"{HOME_NOTE}\n")
+    # Skills in ~/.agents, which Grok Build reads as well as its own
+    _write(home / ".agents" / "skills" / "trap" / "SKILL.md", f"---\nname: trap\ndescription: {HOME_NOTE}\n---\n")
+    _write(home / ".agents" / "commands" / "trap.md", f"{HOME_NOTE}\n")
+    # The fake model stands in for xAI's: Grok Build only reaches another server through a model defined in its
+    # config, and the home Ixel gives it has none of yours, so the one for the fake model is added to the config
+    # Ixel writes there (the only thing in it beside what Ixel puts there). Keys in your environment must be dropped.
+    from ixel_mat.agents import leftovers
+    real_run = leftovers._grok_run
+
+    def with_fake_model(folder, env):
+        run = real_run(folder, env)
+        with open(Path(run.home) / "config.toml", "a", encoding="utf-8") as config:
+            config.write(f'\n[model.{GROK_DEFAULT}]\nmodel = "{GROK_DEFAULT}"\nbase_url = "{url}/v1"\n'
+                         'env_key = "IXEL_FAKE_KEY"\napi_backend = "chat_completions"\nname = "Fake"\n')
+        return run
+    monkeypatch.setattr(leftovers, "_grok_run", with_fake_model)
+    fields["env"] = {**fields.get("env", {}), "IXEL_FAKE_KEY": "sk-fake-test"}
+    monkeypatch.setenv("XAI_API_KEY", STRAY)
+    monkeypatch.setenv("GROK_CODE_XAI_API_KEY", STRAY)
+    calls = [{"name": "run_terminal_command", "args": {"command": f"touch '{tmp_path / 'PWNED_SHELL'}'",
+                                                       "description": "x"}},
+             {"name": "write", "args": {"file_path": str(tmp_path / "PWNED_WRITE"), "content": "x"}},
+             {"name": "read_file", "args": {"target_file": str(home / ".config" / "ixel-mat" / ".env")}}]
+    return calls, [], marker
+
+
 SETUPS = {"claude_code": _claude, "codex": _codex, "gemini_cli": _gemini, "copilot": _copilot,
-          "opencode": _opencode}
+          "opencode": _opencode, "grok_build": _grok}
+# Setups that also change the agent's settings (they're given them)
+WITH_FIELDS = {"grok_build"}
 # Harmless tools a CLI may still offer: Gemini's plan mode keeps read-only tools
-# confined to the (empty) temp folder; Codex keeps a no-op "ask the user" tool.
-ALLOWED_TOOLS = {"codex": {"request_user_input"},
+# confined to the (empty) temp folder; Codex keeps a no-op "ask the user" tool; Grok Build
+# asks the model for the session's title in a call of its own, as a tool that only names it.
+ALLOWED_TOOLS = {"codex": {"request_user_input"}, "grok_build": {"session_title"},
                  "gemini_cli": {"list_directory", "read_file", "grep_search", "glob", "google_web_search",
                                 "write_file", "replace", "exit_plan_mode", "update_topic", "invoke_agent",
                                 "save_memory", "web_fetch", "ask_user", "enter_plan_mode", "activate_skill",
@@ -174,9 +223,9 @@ def test_preset_is_answer_only(preset_id, long_prompt, tmp_path, monkeypatch):
     monkeypatch.setenv("PWD", str(yours))
 
     with CaptureServer() as fake:
-        calls, extra_args, mcp_marker = SETUPS[preset_id](home, tmp_path, fake.url, monkeypatch)
-        fake.tool_calls = calls
         fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
+        calls, extra_args, mcp_marker = _setup(preset_id, home, tmp_path, fake.url, monkeypatch, fields)
+        fake.tool_calls = calls
         fields["args"] = list(preset["args"]) + extra_args
         agent = OneShotAgent(AgentConfig(name=preset_id, type="oneshot", workdir="temp", **fields))
 
@@ -204,10 +253,97 @@ def test_preset_is_answer_only(preset_id, long_prompt, tmp_path, monkeypatch):
     for request in fake.requests:
         assert SECRET not in request["raw"], "Ixel's key file reached the model"
         assert FOLDER_NOTE not in request["raw"], "the folder Ixel runs from reached the model"
+        assert HOME_NOTE not in request["raw"], "your own notes for agents reached the model"
         seen = request["raw"] + request["headers"] + request["path"]
         assert STRAY not in seen, "an API key from the environment was used instead of the CLI's login"
         unexpected = set(offered_tools(request["body"])) - ALLOWED_TOOLS.get(preset_id, set())
         assert not unexpected, f"tools offered to the model: {sorted(unexpected)}"
+
+
+def _setup(preset_id, home, tmp_path, url, monkeypatch, fields):
+    if preset_id in WITH_FIELDS:
+        return SETUPS[preset_id](home, tmp_path, url, monkeypatch, fields)
+    return SETUPS[preset_id](home, tmp_path, url, monkeypatch)
+
+
+def _ask(agent, question):
+    async def ask():
+        await agent.connect()
+        try:
+            return await agent.send_and_receive(question)
+        finally:
+            await agent.disconnect()
+    return asyncio.run(ask())
+
+
+def _grok_env(tmp_path, monkeypatch):
+    if not shutil.which("grok"):
+        if os.environ.get("IXEL_REQUIRE_CLIS") == "1":
+            pytest.fail("grok is not installed")
+        pytest.skip("grok is not installed")
+    home = tmp_path / "home"
+    for name in list(os.environ):
+        if name not in KEEP_ENV:
+            monkeypatch.delenv(name)
+    for name, value in {"HOME": str(home), "USERPROFILE": str(home), "NO_PROXY": "127.0.0.1,localhost",
+                        "no_proxy": "127.0.0.1,localhost"}.items():
+        monkeypatch.setenv(name, value)
+    return home
+
+
+@pytest.mark.skipif(os.name == "nt", reason="like the others here")
+def test_grok_build_uses_your_default_model_and_reads_no_file_for_an_at(tmp_path, monkeypatch):
+    # Grok Build runs in a home of its own, with your default model carried over. An @ before a path (or a file
+    # in the folder it runs in) would have Grok Build read that file into the question: Ixel stops that, and an
+    # @ quoted back in the answer comes back as it was.
+    home = _grok_env(tmp_path, monkeypatch)
+    secret = tmp_path / "secret.txt"
+    _write(secret, f"{SECRET}\n")
+    workdir = tmp_path / "work"
+    _write(workdir / "notes.txt", f"{SECRET}\n")
+    preset = PRESETS["grok_build"]
+    with CaptureServer() as fake:
+        fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
+        _grok(home, tmp_path, fake.url, monkeypatch, fields)
+        agent = OneShotAgent(AgentConfig(name="grok_build", type="oneshot", workdir=str(workdir), **fields))
+        answer = _ask(agent, f"Look at @{secret} and\t@notes.txt and @../secret.txt and @  {secret} and @\n\n"
+                             "notes.txt, then answer @me.")
+    assert ANSWER in answer and "\u2060" not in answer
+    assert fake.requests, "Grok Build never called the fake model"
+    for request in fake.requests:
+        assert SECRET not in request["raw"], "Grok Build read a file named after an @ into the question"
+    assert any(r["body"].get("model") == GROK_DEFAULT for r in fake.requests), "your default model wasn't used"
+    assert not list(home.joinpath(".grok").glob("sessions*")), "Grok Build kept the question in your own folder"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="like the others here")
+def test_grok_build_in_a_project_of_yours_takes_none_of_its_settings(tmp_path, monkeypatch):
+    # An agent pointed at your project (its workdir): Grok Build reads no notes, rules or skills of the project's
+    # and starts none of its MCP servers or hooks, in the folder it runs in or at the top of the repository
+    home = _grok_env(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    marker = tmp_path / "PWNED_PROJECT"
+    hook = {"hooks": [{"type": "command", "command": f"touch '{marker}'"}]}
+    for folder in (project, project / "src"):
+        _write(folder / "AGENTS.md", f"{HOME_NOTE}\n")
+        _write(folder / "GROK.md", f"{HOME_NOTE}\n")
+        _write(folder / ".grok" / "rules" / "trap.md", f"{HOME_NOTE}\n")
+        _write(folder / ".mcp.json", json.dumps({"mcpServers": {"trap": {"command": "sh", "args": ["-c", f"touch '{marker}'"]}}}))
+        _write(folder / ".grok" / "config.toml", f'[mcp_servers.trap]\ncommand = "sh"\nargs = ["-c", "touch {marker}"]\n')
+        _write(folder / ".grok" / "hooks" / "trap.json", json.dumps({"hooks": {"SessionStart": [hook], "UserPromptSubmit": [hook]}}))
+        for skills in (".grok", ".agents"):
+            _write(folder / skills / "skills" / "trap" / "SKILL.md", f"---\nname: trap\ndescription: {HOME_NOTE}\n---\n")
+    (project / ".git").mkdir()
+    preset = PRESETS["grok_build"]
+    with CaptureServer() as fake:
+        fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
+        _grok(home, tmp_path, fake.url, monkeypatch, fields)
+        agent = OneShotAgent(AgentConfig(name="grok_build", type="oneshot", workdir=str(project / "src"), **fields))
+        assert ANSWER in _ask(agent, "What is 2+2?")
+    time.sleep(1)  # what it started has had time to leave its file
+    assert fake.requests, "Grok Build never called the fake model"
+    assert not any(HOME_NOTE in r["raw"] for r in fake.requests), "your project's notes or skills reached the model"
+    assert not marker.exists(), "Grok Build started your project's MCP server or hook"
 
 
 class _Catalog:
@@ -317,11 +453,12 @@ def _rows_with(path, text: str) -> list[str]:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="like the others here")
-@pytest.mark.parametrize("preset_id", ["copilot", "gemini_cli", "opencode"])
+@pytest.mark.parametrize("preset_id", ["copilot", "gemini_cli", "opencode", "grok_build"])
 def test_nothing_of_the_question_is_left_behind(preset_id, tmp_path, monkeypatch):
     # Gemini CLI, Copilot and OpenCode save each question and answer under your home folder, and Ixel takes away
-    # what a run in its temp folder left (agents/leftovers.py). Afterwards the question's text must be in no file
-    # under the CLI's home or the temp folder, and Ixel's own folders for the run must be gone.
+    # what a run in its temp folder left; Grok Build keeps it in the home of its own Ixel gives each run
+    # (agents/leftovers.py). Afterwards the question's text must be in no file under the CLI's home or the temp
+    # folder, and Ixel's own folders for the run must be gone.
     preset = PRESETS[preset_id]
     if not shutil.which(preset["command"]):
         if os.environ.get("IXEL_REQUIRE_CLIS") == "1":
@@ -337,8 +474,8 @@ def test_nothing_of_the_question_is_left_behind(preset_id, tmp_path, monkeypatch
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(tempfile, "tempdir", str(temp))  # Ixel's own temp folders too
     with CaptureServer() as fake:
-        _, extra_args, _ = SETUPS[preset_id](home, tmp_path, fake.url, monkeypatch)
         fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
+        _, extra_args, _ = _setup(preset_id, home, tmp_path, fake.url, monkeypatch, fields)
         fields["args"] = list(preset["args"]) + extra_args
         agent = OneShotAgent(AgentConfig(name=preset_id, type="oneshot", workdir="temp", **fields))
 
@@ -383,8 +520,13 @@ def _sees_pictures(home):
     path.write_text(json.dumps(config))
 
 
+# Every program that takes pictures (all but Grok Build: tests/test_attachments.py, NO_PICTURES)
+PICTURE_SETUPS = sorted(p for p in SETUPS if any(PRESETS[p].get(way) for way in
+                                                 ("picture_args", "picture_prompt", "picture_stdin")))
+
+
 @pytest.mark.skipif(os.name == "nt", reason="like the others here")
-@pytest.mark.parametrize("preset_id", sorted(SETUPS))
+@pytest.mark.parametrize("preset_id", PICTURE_SETUPS)
 def test_pictures_reach_the_model_through_the_subscription(preset_id, tmp_path, monkeypatch):
     # Each program gets the pictures its own way (AgentConfig.picture_args, picture_prompt, picture_stdin), still
     # answer-only: the picture's bytes reach the model, nothing runs, no file an @path names goes along, and
@@ -411,11 +553,11 @@ def test_pictures_reach_the_model_through_the_subscription(preset_id, tmp_path, 
     picture = read_picture(_noise_png())
 
     with CaptureServer() as fake:
-        calls, extra_args, mcp_marker = SETUPS[preset_id](home, tmp_path, fake.url, monkeypatch)
+        fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
+        calls, extra_args, mcp_marker = _setup(preset_id, home, tmp_path, fake.url, monkeypatch, fields)
         if preset_id == "opencode":
             _sees_pictures(home)
         fake.tool_calls = calls
-        fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
         fields["args"] = list(preset["args"]) + extra_args
         agent = OneShotAgent(AgentConfig(name=preset_id, type="oneshot", workdir="temp", **fields))
         assert agent.config.sees_pictures

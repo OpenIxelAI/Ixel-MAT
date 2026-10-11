@@ -52,7 +52,7 @@ PROGRAM_NAMES: dict[str, list[tuple[str, str]]] = {
     "copilot": [("auto", "Copilot picks")],
 }
 # The company whose model list a program can use
-PROGRAM_COMPANY = {"claude_code": "anthropic", "codex": "openai", "gemini_cli": "gemini"}
+PROGRAM_COMPANY = {"claude_code": "anthropic", "codex": "openai", "gemini_cli": "gemini", "grok_build": "xai"}
 # Programs that list their own models: `opencode models` prints provider/model, one a line. Only run when
 # the agent's command is that program itself (a command such as npx would read "models" as a package to fetch).
 # It's run as for a question, so OpenCode lists what it already knows and never fetches its model catalog

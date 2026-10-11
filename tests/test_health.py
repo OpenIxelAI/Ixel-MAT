@@ -111,6 +111,19 @@ def test_check_now_asks_each_model_and_program():
     assert checks["handoff"]["detail"] == "/usr/bin/handoff 1.2.3"
 
 
+def test_grok_build_without_a_login_says_to_sign_in(tmp_path, monkeypatch):
+    # Only looks for its login: nothing is read out of it, and nothing is run before Check now
+    grok = AgentConfig(name="grok_build", label="Grok Build", type="oneshot", command="grok")
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "grok"))
+    monkeypatch.delenv("GROK_AUTH", raising=False)
+    check = checks_of(run_report(settings_with(grok), False, Calls(), found=("git", "grok")))["agent-grok_build-login"]
+    assert check["state"] == "warn" and check["fix"] == "grok login" and "SuperGrok" in check["detail"]
+    (tmp_path / "grok").mkdir()
+    (tmp_path / "grok" / "auth.json").write_text('{"https://accounts.x.ai/sign-in": {"key": "%s"}}' % KEY)
+    report = run_report(settings_with(grok), False, Calls(), found=("git", "grok"))
+    assert checks_of(report)["agent-grok_build-login"]["state"] == "ok" and KEY not in json.dumps(report)
+
+
 @pytest.mark.parametrize("status, state, fix", [
     (("ok", "reachable", 30, None), "ok", ""),
     (("rate_limited", "429", 30, None), "warn", ""),

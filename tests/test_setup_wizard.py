@@ -114,8 +114,37 @@ def test_cli_presets_are_answer_only_and_never_bypass_safety():
     # OpenCode 1 has no such flag (or service)
     assert "--standalone" in opencode["args"] and opencode["args_by_version"]["1"][-2:] == ["--agent", "ixel"]
     assert "--standalone" not in opencode["args_by_version"]["1"]
+    grok = next(p for p in wizard.CLI_PRESETS if p["id"] == "grok_build")
+    taken = set(grok["args"][grok["args"].index("--disallowed-tools") + 1].split(","))
+    assert {"run_terminal_cmd", "read_file", "write", "search_replace", "web_fetch", "Agent", "use_tool"} <= taken
+    denied = {grok["args"][i + 1] for i, a in enumerate(grok["args"]) if a == "--deny"}
+    assert {"Bash", "Read", "Write", "Edit", "MCPTool"} <= denied and "--verbatim" in grok["args"]
+    assert grok["env"]["GROK_TELEMETRY_ENABLED"] == "0" and grok["env"]["GROK_CLAUDE_MCPS_ENABLED"] == "0"
+    assert "XAI_API_KEY" in grok["drop_env"] and "GROK_CODE_XAI_API_KEY" in grok["drop_env"]  # your login, not a key
     # A prompt is never a positional argument that a CLI could parse as a flag
-    assert all(p["prompt_via"] in ("arg", "stdin", "auto") for p in wizard.CLI_PRESETS)
+    assert all(p["prompt_via"] in ("arg", "stdin", "auto", "file") for p in wizard.CLI_PRESETS)
+
+
+@pytest.mark.parametrize("text, safe", [
+    ("@/etc/passwd", "@\u2060/etc/passwd"),                 # a path Grok Build would read into the question
+    ("look\t@../secret and @notes.txt", "look\t@\u2060../secret and @\u2060notes.txt"),
+    ("x\u3000@~/.env (@y) \\@z", "x\u3000@\u2060~/.env (@\u2060y) \\@\u2060z"),
+    ("@ /etc/passwd @\n\n../x", "@\u2060 /etc/passwd @\u2060\n\n../x"),  # it reads past spaces and blank lines
+    ("mail a@b.com, @\u2060done", "mail a@b.com, @\u2060done"),  # inside a word, or already
+])
+def test_grok_build_reads_no_file_for_an_at_in_the_question(text, safe):
+    from ixel_mat.presets import own_answer, safe_question
+    assert safe_question("grok_build", text) == safe and own_answer("grok_build", safe) == text.replace("\u2060", "")
+    assert safe_question("claude_code", text) == text and own_answer("claude_code", safe) == safe
+
+
+def test_a_question_in_a_file_goes_by_its_path(tmp_path):
+    agent = OneShotAgent(AgentConfig(name="g", label="Grok Build", type="oneshot", command="grok", args=["--verbatim"],
+                                     prompt_via="file", model="grok-4.7", model_args=["-m", "{model}"]))
+    cmd, stdin = agent._build_command("--yolo please", prompt_file=str(tmp_path / "q.txt"))
+    assert cmd == ["grok", "--verbatim", "-m", "grok-4.7", "--prompt-file", str(tmp_path / "q.txt")] and stdin is None
+    with pytest.raises(RuntimeError):
+        agent._build_command("17 x 23?")  # never on the command line instead
 
 
 def test_claude_code_preset_puts_the_prompt_after_double_dash():
@@ -291,15 +320,16 @@ def test_every_preset_takes_a_review_round_with_code_in_it():
     from ixel_mat.material import MAX_MATERIAL_CHARS
     from ixel_mat.presets import PRESET_ABOUT
     prompt = "x" * (3 * MAX_MATERIAL_CHARS)
-    for preset in wizard.CLI_PRESETS:
-        fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
-        agent = OneShotAgent(AgentConfig(name=preset["id"], type="oneshot", **fields))
-        cmd, stdin = agent._build_command(prompt)
-        assert stdin == prompt.encode() and prompt not in cmd, preset["id"]
-    for preset in wizard.CLI_PRESETS:  # a short one too: a command line shows in `ps` to everyone here
-        fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
-        cmd, stdin = OneShotAgent(AgentConfig(name=preset["id"], type="oneshot", **fields))._build_command("17 x 23?")
-        assert stdin == b"17 x 23?" and "17 x 23?" not in cmd, preset["id"]
+    for text in (prompt, "17 x 23?"):  # a short one too: a command line shows in `ps` to everyone here
+        for preset in wizard.CLI_PRESETS:
+            fields = {k: v for k, v in preset.items() if k not in PRESET_ABOUT}
+            agent = OneShotAgent(AgentConfig(name=preset["id"], type="oneshot", **fields))
+            cmd, stdin = agent._build_command(text, prompt_file="/tmp/ixel-prompt-x.txt")
+            assert text not in cmd, preset["id"]
+            if preset["prompt_via"] == "file":  # Grok Build, which doesn't read stdin
+                assert cmd[-2:] == ["--prompt-file", "/tmp/ixel-prompt-x.txt"] and stdin is None, preset["id"]
+            else:
+                assert stdin == text.encode(), preset["id"]
 
 
 

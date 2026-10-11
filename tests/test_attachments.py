@@ -163,9 +163,15 @@ def _preset_agent(preset_id, **override):
     return OneShotAgent(AgentConfig(name=preset_id, type="oneshot", **{"workdir": "temp", **fields, **override}))
 
 
+# Grok Build has no way to be given a picture yet: an @name in the question is left as text, and image blocks in
+# --prompt-file or --prompt-json reach the model as text too (Grok Build 1.0.46). Like any model that doesn't
+# see pictures, it's told there are some it can't see.
+NO_PICTURES = {"grok_build"}
+
+
 def test_every_subscription_program_sees_pictures():
     for preset_id in PRESETS_BY_ID:
-        assert _preset_agent(preset_id).config.sees_pictures, preset_id
+        assert _preset_agent(preset_id).config.sees_pictures is (preset_id not in NO_PICTURES), preset_id
     assert not _preset_agent("codex", accepts=[]).config.sees_pictures  # turned off in Settings
     assert not _preset_agent("codex", workdir="/some/folder").config.sees_pictures  # only into a folder of its own
 
@@ -221,6 +227,23 @@ def test_pictures_are_written_for_the_run_alone_and_gone_after(tmp_path):
     assert seen["cmd"][-1] == "--image=ixel-picture-1.jpg"
     folder = os.path.dirname(os.path.abspath(seen["cmd"][0]))  # (the run's folder is gone: nothing to look in)
     assert folder
+
+
+def test_a_program_given_the_question_in_a_file_finds_the_pictures_named_there():
+    # prompt_via "file": what picture_prompt puts before the question is in the file too
+    script = ("import os, sys; path = sys.argv[sys.argv.index('--prompt-file') + 1]; "
+              "print(repr(open(path, encoding='utf-8').read()), sorted(os.listdir('.'))); print(path)")
+    agent = OneShotAgent(AgentConfig(name="cli", label="CLI", type="oneshot", command=sys.executable,
+                                     args=["-c", script], prompt_via="file", picture_prompt="@{name} "))
+    assert agent.config.sees_pictures
+
+    async def go():
+        await agent.connect()
+        return await agent.send_and_receive("What colour?", pictures=[read_picture(samples.png())])
+
+    said, path = _run(go()).splitlines()
+    assert said == "'@ixel-picture-1.png \\n\\nWhat colour?' ['ixel-picture-1.png']"
+    assert not os.path.exists(path)  # the question's file is gone after the run
 
 
 def test_no_pictures_go_to_a_program_that_doesn_t_take_them():

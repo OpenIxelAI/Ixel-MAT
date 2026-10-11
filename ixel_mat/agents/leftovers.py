@@ -1,5 +1,5 @@
 """
-What Gemini CLI, GitHub Copilot and OpenCode keep of a question Ixel asks them, and taking it away again.
+What Gemini CLI, GitHub Copilot, OpenCode and Grok Build keep of a question Ixel asks them, and taking it away again.
 
 Each of them saves every question and its answer under your home folder, and none has a switch that stops it
 when it's run the way Ixel runs it (Claude Code and Codex have one, and their presets use it). So after a run
@@ -13,6 +13,10 @@ never a login, a setting, or a session of yours.
   in ~/.copilot/session-state, its lock, and its rows in ~/.copilot/session-store.db.
 - OpenCode: the sessions whose folder is the run's folder, in each of its databases
   (~/.local/share/opencode/opencode*.db), with everything kept for them.
+- Grok Build: each run gets a home folder of its own (GROK_HOME), with only a copy of your computer's id in it,
+  so none of your config, MCP servers, hooks, plugins, skills, memory or sessions reaches it. It uses your login
+  where it is (GROK_AUTH_PATH). Afterwards the folder goes, with the session it kept. This happens in any
+  folder, an agent's own workdir too.
 
 Rows are deleted with SQLite's secure_delete on, and the database's write-ahead log is emptied afterwards, so
 the text doesn't stay behind in free space. A run in a folder of yours (an agent's own workdir) is left alone:
@@ -34,7 +38,7 @@ from pathlib import Path, PurePath
 from typing import Callable, Mapping
 from urllib.parse import quote
 
-from ixel_mat.presets import preset_for
+from ixel_mat.presets import grok_home, grok_login, preset_for
 
 logger = logging.getLogger("ixel_mat.agents.leftovers")
 
@@ -54,6 +58,7 @@ class Places:
     gemini: tuple[Path, ...]     # Gemini CLI's ~/.gemini, and ~/.cache/.gemini
     copilot: Path                # Copilot's ~/.copilot
     opencode: tuple[Path, ...]   # OpenCode's databases
+    grok: Path                   # Grok Build's ~/.grok
 
 
 def places(env: Mapping[str, str]) -> Places:
@@ -73,19 +78,21 @@ def places(env: Mapping[str, str]) -> Places:
         databases = (data / chosen,)  # a full path replaces the folder
     else:  # opencode.db, or one for a test release (opencode-beta.db…)
         databases = tuple(sorted(data.glob("opencode*.db")))
-    return Places(gemini, copilot, databases)
+    return Places(gemini, copilot, databases, grok_home({**env, "HOME": str(home), "USERPROFILE": str(home)}))
 
 
 @dataclass
 class Run:
     """One question to a CLI in Ixel's temp folder, and what's added to it and taken away after it."""
-    program: str                 # the preset's id: "gemini_cli", "copilot" or "opencode"
-    folder: str                  # the temp folder it runs in
+    program: str                 # the preset's id: "gemini_cli", "copilot", "opencode" or "grok_build"
+    folder: str                  # the temp folder it runs in ("" for Grok Build in a folder of yours)
     env: Mapping[str, str]       # the environment it runs with
     forms: frozenset[str]        # the folder as the CLI may write it: as given, and with links resolved
     args: list[str] = field(default_factory=list)  # arguments added for this run
     session_id: str = ""         # Copilot's, picked by Ixel
     log_dir: str = ""            # Copilot's log folder for this run
+    env_add: dict[str, str] = field(default_factory=dict)  # variables added for this run
+    home: str = ""               # Grok Build's home folder for this run
 
     def clean(self) -> None:
         """Take away what the run left, once the CLI has exited. Never fails: what can't be removed stays, and is
@@ -98,9 +105,11 @@ class Run:
             self.drop()
 
     def drop(self) -> None:
-        """Remove what Ixel made for the run (Copilot's log folder): all there is when the CLI never started."""
-        if self.log_dir:
-            _remove_folder(Path(self.log_dir))
+        """Remove what Ixel made for the run (Copilot's log folder, Grok Build's home): all there is when the CLI
+        never started."""
+        for folder in (self.log_dir, self.home):
+            if folder:
+                _remove_folder(Path(folder))
 
     def same_folder(self, path: object) -> bool:
         return isinstance(path, str) and bool(path) and _normal(path) in self.forms
@@ -123,6 +132,8 @@ def prepare(command: str, args: list[str], folder: str | None, env: Mapping[str,
     """What to add to a run of command, and to take away after it; None when Ixel doesn't clean up after it:
     another program, or a folder that isn't Ixel's own temp folder."""
     program = preset_for(command).get("id", "")
+    if program == "grok_build":
+        return _grok_run(folder, env)
     if not folder or program not in CLEANERS:
         return None
     forms = frozenset({_normal(folder), _normal(os.path.realpath(folder))})
@@ -379,5 +390,100 @@ def _delete_rows(path: Path, find: Callable[[sqlite3.Connection], object],
         db.close()
 
 
+# ── Grok Build ────────────────────────────────────────────────────────────────
+
+# The id Grok Build gives your computer, and its own program (GROK_HOME/bin)
+GROK_DEVICE = "agent_id"
+GROK_PROGRAM = "grok.exe" if os.name == "nt" else "grok"
+
+
+def _write_private(path: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)  # as it is, on Windows too
+    with open(os.open(path, flags, 0o600), "wb") as f:
+        f.write(content)
+
+
+def _grok_run(folder: str | None, env: Mapping[str, str]) -> Run:
+    """A run of Grok Build in a home folder of its own, holding a copy of your computer's id, a link to Grok Build's
+    own program, and a config with only your default model (a model of your own making isn't defined there, so it
+    isn't) and your skills in ~/.agents switched off. Your login stays where it is, and Grok Build is told where
+    (GROK_AUTH_PATH), so it refreshes it there under its own lock, as it does for any Grok Build of yours."""
+    real = places(env).grok
+    home = Path(tempfile.mkdtemp(prefix="ixel-grok-"))  # only you can open it
+    run = Run("grok_build", folder or "", dict(env), frozenset(), home=str(home))
+    try:
+        try:
+            device = (real / GROK_DEVICE).read_bytes()
+        except OSError:
+            device = None  # Grok Build makes one
+        if device is not None:
+            _write_private(home / GROK_DEVICE, device)
+        _write_private(home / "config.toml", _grok_config(real, env).encode("utf-8"))
+        _link_grok_program(real, home)
+        run.env_add["GROK_HOME"] = str(home)
+        run.env_add["GROK_AUTH_PATH"] = os.path.abspath(grok_login(env))
+    except BaseException:
+        run.drop()
+        raise
+    return run
+
+
+def _grok_config(real: Path, env: Mapping[str, str]) -> str:
+    """The run's Grok Build config. Grok Build reads skills in ~/.agents as well as its own, so those are hidden
+    (by your home folder as Grok Build finds it, as Ixel does, and with links resolved)."""
+    model = _grok_default_model(real)
+    home = Path(env.get("USERPROFILE" if os.name == "nt" else "HOME") or Path.home())
+    hidden = list(dict.fromkeys(["~/.agents", str(home / ".agents"), os.path.realpath(home / ".agents")]))
+    text = f"[models]\ndefault = {_toml_string(model)}\n\n" if model else ""
+    return text + f"[skills]\nignore = [{', '.join(map(_toml_string, hidden))}]\n"
+
+
+def _toml_string(text: str) -> str:
+    """A TOML string: JSON's escapes are TOML's, as long as nothing beyond ASCII is escaped (no surrogate pairs)."""
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _grok_default_model(real: Path) -> str:
+    """The default model in your Grok Build config, unless it's one defined there ([model.<id>])."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib  # type: ignore[no-redef]
+    try:
+        config = tomllib.loads((real / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    models, own = config.get("models"), config.get("model")
+    model = models.get("default") if isinstance(models, dict) else None
+    if not isinstance(model, str) or not 0 < len(model) <= 200 or (isinstance(own, dict) and model in own):
+        return ""
+    return model
+
+
+def _link_grok_program(real: Path, home: Path) -> None:
+    """Grok Build's own program, linked into the run's home: its npm launcher (Windows keeps one) runs
+    GROK_HOME/bin/grok, and would otherwise unpack a new copy of it there, some 160 MB, for every question."""
+    try:
+        program = (real / "bin" / GROK_PROGRAM).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return  # installed another way: there's nothing to link
+    (home / "bin").mkdir()
+    # A hard link on Windows (a symbolic one needs Developer Mode there), a symbolic one elsewhere (/tmp is
+    # often a filesystem of its own on Linux, where a hard link can't reach)
+    links = (os.link, os.symlink) if os.name == "nt" else (os.symlink, os.link)
+    for link in links:
+        try:
+            link(program, home / "bin" / GROK_PROGRAM)
+            return
+        except OSError as exc:
+            reason = exc.strerror or type(exc).__name__
+    logger.warning("Couldn't link Grok Build's program for a question (%s): it unpacks a copy of its own, which is "
+                   "slower", reason)
+
+
+def _clean_grok(run: Run, where: Places) -> None:
+    """Nothing: what Grok Build kept of the question is in the run's home, which goes (Run.drop)."""
+
+
 CLEANERS: dict[str, Callable[[Run, Places], None]] = {
-    "gemini_cli": _clean_gemini, "copilot": _clean_copilot, "opencode": _clean_opencode}
+    "gemini_cli": _clean_gemini, "copilot": _clean_copilot, "opencode": _clean_opencode, "grok_build": _clean_grok}

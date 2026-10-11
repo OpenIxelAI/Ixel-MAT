@@ -112,7 +112,7 @@ anyway: from your keychain, which gives them to programs you run (below), or fro
   included. HTTP libraries strip `Authorization` on cross-host redirects, but not headers like Anthropic's
   `x-api-key`, and Python's `urllib` strips nothing.
 
-### Command-line agents (Claude Code, Codex, Gemini CLI, Copilot, OpenCode, and your own)
+### Command-line agents (Claude Code, Codex, Gemini CLI, Copilot, OpenCode, Grok Build, and your own)
 
 The subscription CLIs are coding agents: left to their defaults they can run shell commands and edit
 files. Ixel uses them only to answer, and for each preset:
@@ -126,6 +126,7 @@ files. Ixel uses them only to answer, and for each preset:
   | Gemini CLI | plan (read-only) mode in a trusted empty folder, no extensions, no MCP servers. Plan mode still offers the model tools, among them reading files (in that empty folder), Google web search and web fetch; it blocks writes and shell commands, and the test below checks that |
   | Copilot | `--available-tools=ixel_none` (no tools), built-in MCP off, `COPILOT_ALLOW_ALL` removed |
   | OpenCode | runs Ixel's own agent, defined with every tool denied in config that outranks yours, on a server started for that run (OpenCode 2's background service runs with your own settings) |
+  | Grok Build | every tool taken away by its own name (`--disallowed-tools`), each kind denied again (`--deny Bash`, `Read`, `Write`, `Edit`, `Grep`, `WebFetch`, `MCPTool`), no sub-agents, no web search, `--verbatim` (a question starting with `/compact` stays a question), and a home folder of its own for the run (below), so none of your MCP servers, hooks, plugins, skills, memory or notes for agents (`~/.grok/AGENTS.md`) reach it. Claude Code's and Cursor's MCP servers, hooks, rules, skills and agents, which Grok Build reads too, are turned off (`GROK_CLAUDE_*_ENABLED=0`, `GROK_CURSOR_*_ENABLED=0`) |
 
 - **OpenCode never fetches its model catalog.** Whenever Ixel runs an agent whose command is `opencode`, with
   or without its preset (a question, its model list in Settings, Check now), it sets
@@ -139,6 +140,23 @@ files. Ixel uses them only to answer, and for each preset:
   change the switch, which the test below would catch. Not covered: a command that only starts OpenCode (`npx`,
   a script of yours), OpenCode you run yourself (it still fetches unless you set that variable too), and
   OpenCode 1's attempt to install its plugin package from npm the first time it runs with a new config folder.
+- **Grok Build gets a home folder of its own** for every run (`GROK_HOME`, made so only you can open it),
+  holding a copy of the id Grok Build gave your computer (`~/.grok/agent_id`), a link to Grok Build's own
+  program (`~/.grok/bin/grok`, so its npm launcher doesn't unpack a new copy for each question), and a config
+  of Ixel's: your default model (unless it's a model you defined yourself, which isn't defined there), and
+  your skills in `~/.agents` switched off (Grok Build reads them as well as its own). Nothing else of yours is
+  in it, so no folder is trusted either (Grok Build keeps that list there): in a folder of yours (a `workdir`),
+  the project's notes, rules, skills, MCP servers and hooks aren't loaded. Your login stays where it is, and Grok Build is told where (`GROK_AUTH_PATH`), so it refreshes it
+  there under its own lock, as it does for any Grok Build of yours. The folder is deleted after the run, with
+  the session Grok Build kept in it. An API key in your environment (`XAI_API_KEY`, `GROK_CODE_XAI_API_KEY`)
+  is dropped, so your xAI login (SuperGrok) is what's used. Checked against Grok Build 1.0.46.
+- **No file read for an `@` (Grok Build).** Grok Build reads a file into the question for every `@` that
+  starts a word and names one (`@/etc/passwd`, `@../notes`, or `@notes.txt` in the folder it runs in), even
+  with spaces or blank lines between the `@` and the name, with its read tool denied and `--verbatim` alike,
+  and a question can quote anything (a model's answer, in a review). Ixel puts an invisible word joiner
+  (U+2060) right after every `@` that starts a word, so the model still sees the
+  `@` but Grok Build reads nothing, and takes the joiners out of the answer again, so code quoted back (a
+  decorator) still runs. An `@` inside a word (an email address) is left as it is.
 - **A fresh empty folder** for every run, deleted afterwards (`workdir = "temp"`).
 - **Pictures through your sign-in, as files only that run can see.** A picture attached to a question
   (or found in a document) goes to Claude Code inside the question's message on stdin
@@ -149,10 +167,13 @@ files. Ixel uses them only to answer, and for each preset:
   Pictures go only to a CLI running in its own temp folder; one with a `workdir` of yours never gets any.
   OpenCode sends a picture only to a model its catalog says takes them; others are told OpenCode left it out.
   `--title Ixel` stops OpenCode asking the model a second time, for a title, with the question in it.
+  Grok Build is given no pictures: it has no way to take one that reaches the model as a picture (an `@`
+  name is left as text), so, like any model that doesn't see pictures, it's told there are some it can't see.
 - **Nothing of the question left in the CLI's own folders**, as far as each allows. Claude Code and Codex are
-  told not to save the session (`--no-session-persistence`, `--ephemeral`). Gemini CLI, Copilot and OpenCode
-  have no such switch, so after a run in Ixel's temp folder, once the CLI has exited, Ixel removes what that run
-  saved and nothing else: never a login, a setting, or a session of yours (`ixel_mat/agents/leftovers.py`).
+  told not to save the session (`--no-session-persistence`, `--ephemeral`). Grok Build keeps it in the home
+  folder Ixel gives each run, which goes afterwards (above). Gemini CLI, Copilot and OpenCode have no such
+  switch, so after a run in Ixel's temp folder, once the CLI has exited, Ixel removes what that run saved and
+  nothing else: never a login, a setting, or a session of yours (`ixel_mat/agents/leftovers.py`).
   Checked against Gemini CLI 0.62.0, Copilot 1.0.91, OpenCode 1.18.34 and 2.0.22:
 
   | CLI | What it saves of a question, and Ixel removes |
@@ -178,24 +199,32 @@ files. Ixel uses them only to answer, and for each preset:
     the temp folder (on Linux `.bun-0-*.so` and `.bun-0-*.node`, 19.7 MB in all) and an empty `opencode`
     folder; they're named after what's in them, so later runs use them again rather than add more, and none
     has anything of the question.
+  - Grok Build: nothing, in your home folder or the temp folder (1.0.46).
   - A run in a folder you gave the agent as its `workdir`: nothing is removed, since your own sessions are
-    kept there too.
+    kept there too (Grok Build's home of its own still goes).
 - **Usage statistics.** Gemini CLI sends Google usage statistics (`play.googleapis.com`): how long the prompt
   was, the model, which tools were called, the system and version, with your Google account's email or the
   random id, never the prompt's text. Only `"privacy": {"usageStatisticsEnabled": false}` in your
   `~/.gemini/settings.json` turns them off; there's no switch for one run. Copilot's help says it sends
   telemetry and that only `COPILOT_OFFLINE` turns it off, along with its GitHub sign-in, so Ixel can't; what it
   sends wasn't checked, since that needs a GitHub login. OpenCode 2 contacted nothing but the model; OpenCode 1
-  contacts `registry.npmjs.org` (see above).
+  contacts `registry.npmjs.org` (see above). Grok Build is run with its usage statistics, traces, feedback and
+  updates off (`GROK_TELEMETRY_ENABLED=0`, `GROK_TELEMETRY_MIXPANEL_ENABLED=0`, `GROK_TELEMETRY_TRACE_UPLOAD=0`,
+  `GROK_FEEDBACK_ENABLED=0`, `GROK_EXTERNAL_OTEL=0`, `--no-auto-update`), which an agent's own `env` can't turn
+  back on, and with its summaries, recaps and suggestions off. It still asks the model, in a call of its own
+  to xAI, for a title for the session (the question, with a tool that only names it): that counts against your
+  plan like a short question, and the title goes with the session afterwards.
 - **No terminal:** stdin is closed or carries only the question, so a CLI can't stop and ask for approval.
 - **The question can't become a flag.** Every preset, and every command-line agent of your own whose
   config doesn't say otherwise, gets it on stdin, so it never shows on a command line that other programs
   and other users of the computer can read (`ps`, Task Manager). An agent you set up with
   `prompt_via = "auto"` or `"arg"` gets it after `--`, never as a bare argument, so a question that starts
   with `--dangerously-…` stays a question; `"flag"` puts it after `-q`. Those three show it on the command
-  line. A chat-style (`"subprocess"`) agent always gets it on stdin.
+  line. Grok Build doesn't read stdin, so its preset (`"file"`) puts the question in a temp file only you can
+  read, outside the folder it runs in, names the file after `--prompt-file`, and deletes it after the run.
+  A chat-style (`"subprocess"`) agent always gets it on stdin.
 - **None of Ixel's keys:** keys saved in Ixel are withheld unless an agent lists them in
-  `pass_env`. The Claude Code, Codex, Gemini CLI and Copilot presets also drop every AI vendor's key from
+  `pass_env`. The Claude Code, Codex, Gemini CLI, Copilot and Grok Build presets also drop every AI vendor's key from
   your environment with `drop_env` (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`…): their own
   would make the CLI bill an API account instead of your plan, and the others are no business of theirs.
   A key you list in `pass_env` is passed even so. Gemini CLI gets your Gemini API key (`GEMINI_API_KEY`, or
@@ -220,7 +249,9 @@ files. Ixel uses them only to answer, and for each preset:
 **How it's checked:** `tests/test_cli_presets_live.py` runs each real CLI against a fake model API. The
 fake model answers with tool calls: run a shell command, write a file, read Ixel's key file. Some tests
 also plant a user MCP server that would leave a file behind if started, a user config that turns every
-tool back on, API keys in the environment, and notes for agents (`AGENTS.md`) in the folder Ixel runs from.
+tool back on, API keys in the environment, and notes for agents (`AGENTS.md`) in the folder Ixel runs from
+(for Grok Build also hooks, skills in `~/.agents`, Claude Code's MCP servers, hooks and `CLAUDE.md`, and an `@`
+before a file's path and before a file in the folder it runs in).
 The test fails if anything runs, if the key file's contents or those notes reach the model, if a planted API
 key is used, or if any tool is offered beyond a short list of harmless
 ones (for Gemini CLI, the list plan mode keeps, web search and web fetch included). For OpenCode it also

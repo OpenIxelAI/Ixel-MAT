@@ -228,7 +228,7 @@ async def agent_check(settings, cfg: AgentConfig, probe: bool, which=None, run=N
             env = child_env(cfg.pass_env, {**(cfg.env or {}), **locked_env(cfg.command)}, cfg.drop_env)
         # Read from its settings and environment, so it's there before Check now too
         sign_in = [gemini_sign_in(cid, label, env)] if preset.get("id") == "gemini_cli" and cfg.type == "oneshot" \
-            else []
+            else [grok_sign_in(cid, label, env)] if preset.get("id") == "grok_build" else []
         if not probe:
             return [Check(cid, label, "unchecked", f"{cfg.command} is installed. Check now asks it for its version"),
                     *sign_in]
@@ -281,6 +281,14 @@ def gemini_sign_in(cid: str, label: str, env: dict[str, str]) -> Check:
     if env.get("GEMINI_API_KEY"):
         return Check(cid, label, "ok", "Uses your Gemini API key")
     return Check(cid, label, "warn", GEMINI_SIGN_IN, "gemini")
+
+
+def grok_sign_in(cid: str, label: str, env: dict[str, str]) -> Check:
+    """Whether Grok Build has a login: without one, every question it's asked fails."""
+    from ixel_mat.presets import GROK_SIGN_IN, grok_signed_in
+    if grok_signed_in(env):
+        return Check(f"{cid}-login", f"{label} sign-in", "ok", "Signed in, in Grok Build itself")
+    return Check(f"{cid}-login", f"{label} sign-in", "warn", GROK_SIGN_IN, "grok login")
 
 
 def extra_model_checks(settings) -> list[Check]:

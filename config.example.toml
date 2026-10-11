@@ -81,14 +81,15 @@ color = "yellow"
 # only when the guess is wrong:
 #   billing  "api" (per token: API models) | "local" (free: this machine, or a
 #            private address or .local/.lan name on your network) | "plan" (a
-#            subscription: the Claude Code, Codex, Gemini CLI and Copilot logins)
+#            subscription: the Claude Code, Codex, Gemini CLI, Copilot and Grok
+#            Build logins)
 #            | "unknown" (counted, not priced: other CLIs, gateways). Set "api" on
 #            a paid proxy on your network.
 #
 # Pictures you attach (in the app, with --file, or in a document) go to the
 # models that can see them. Claude, GPT, Grok and Gemini can, and so do the
-# subscription logins below, through your sign-in; a local or other model only
-# with:
+# subscription logins below (all but Grok Build), through your sign-in; a
+# local or other model only with:
 #   accepts  ["image"] to send it pictures, [] to never send it any
 # Your own command-line agent can take them as files in its temp folder:
 #   picture_args    once per picture, e.g. ["--image", "{path}"] ({path} is
@@ -109,9 +110,9 @@ color = "yellow"
 # Settings you add override the preset's:
 #   model     leave it out for the CLI's own default, which its maker keeps
 #             current, or name one (Claude Code: opus, sonnet, haiku…)
-#   effort    as above. Claude Code, Codex and Copilot take it (a level the CLI
-#             doesn't have is sent as the nearest one it does); Gemini CLI and
-#             OpenCode have no such setting, so it's not sent to them
+#   effort    as above. Claude Code, Codex, Copilot and Grok Build take it (a
+#             level the CLI doesn't have is sent as the nearest one it does);
+#             Gemini CLI and OpenCode have no such setting, so it's not sent
 #   timeout   seconds per call (the presets: 300, in a review too)
 #   label     the name shown on the panel
 #   billing   "api" if you signed the CLI in with an API key, not a subscription
@@ -131,6 +132,12 @@ preset = "copilot"
 
 [agents.opencode]
 preset = "opencode"
+
+# Grok Build (`grok`), signed in with your xAI account (SuperGrok)
+# (`grok login`). Each question runs in a home folder of its own, so your Grok
+# Build config, MCP servers, hooks, skills and sessions stay out of it.
+[agents.grok_build]
+preset = "grok_build"
 
 # ── Other agents ───────────────────────────────────────────────────────────────
 # An OpenClaw gateway on this machine (or over wss:// elsewhere):
@@ -153,7 +160,8 @@ preset = "opencode"
 # prompt_via = "stdin"        # stdin (the default: other programs on this
 #                             # computer can read a command line, but not
 #                             # this) | arg (after --) | auto (arg, or stdin
-#                             # when too long) | flag (-q PROMPT)
+#                             # when too long) | flag (-q PROMPT) | file (in
+#                             # a private temp file: --prompt-file PATH)
 # stdout_format = "text"      # or "claude-stream-json"
 # output_flag = "-o"          # if it writes its answer to a file you name
 # workdir = "temp"            # a fresh empty folder (the default) | "inherit" |

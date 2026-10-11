@@ -561,10 +561,12 @@ def test_a_copilot_too_old_for_ixels_settings_is_said_plainly(monkeypatch, optio
 
 
 def test_questions_reach_the_subscription_clis_on_stdin_not_on_their_command_line():
-    # Another person on this computer can read any program's command line (`ps`)
+    # Another person on this computer can read any program's command line (`ps`). Grok Build doesn't read stdin:
+    # its question goes in a file only you can read
     from ixel_mat.presets import CLI_PRESETS
     assert {p["id"]: p["prompt_via"] for p in CLI_PRESETS} == {
-        "claude_code": "stdin", "codex": "stdin", "gemini_cli": "stdin", "copilot": "stdin", "opencode": "stdin"}
+        "claude_code": "stdin", "codex": "stdin", "gemini_cli": "stdin", "copilot": "stdin", "opencode": "stdin",
+        "grok_build": "file"}
 
 
 def test_cli_agent_effort_flag_uses_the_nearest_supported_level():
@@ -980,6 +982,17 @@ def test_claude_stream_json_without_a_result_uses_the_pieces():
 def test_claude_stream_json_error_result_is_an_error():
     with pytest.raises(RuntimeError, match="Claude Code reported an error: API Error: 401"):
         _run(_ask_cli(_claude_stream(is_error="True", result='"API Error: 401 unauthorized"')))
+
+
+def test_a_question_in_a_file_is_one_only_you_can_read_and_it_goes_afterwards():
+    script = ("import os, stat, sys; path = sys.argv[sys.argv.index('--prompt-file') + 1]; "
+              "print(oct(stat.S_IMODE(os.stat(path).st_mode)), os.path.dirname(path) != os.getcwd(), path, "
+              "open(path, encoding='utf-8').read())")
+    said = _run(_ask_cli(_cli(script, prompt_via="file"), "17 x 23?"))
+    mode, outside, path, question = said.split(" ", 3)
+    assert question == "17 x 23?" and outside == "True" and not os.path.exists(path)
+    if os.name != "nt":
+        assert mode == "0o600"
 
 
 def test_plain_text_clis_ignore_on_text():

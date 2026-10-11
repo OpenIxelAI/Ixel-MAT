@@ -149,8 +149,9 @@ def gemini_home(tmp_path, monkeypatch):
 
 # The environment the suite started with, before any test changes it
 SUITE_ENV = dict(os.environ)
-# What tells Ixel where Gemini CLI, Copilot and OpenCode keep their sessions (agents/leftovers.py)
-CLI_PLACES = ("HOME", "USERPROFILE", "GEMINI_CLI_HOME", "COPILOT_HOME", "XDG_DATA_HOME", "OPENCODE_DB")
+# What tells Ixel where Gemini CLI, Copilot and OpenCode keep their sessions, and Grok Build its login
+# (agents/leftovers.py)
+CLI_PLACES = ("HOME", "USERPROFILE", "GEMINI_CLI_HOME", "COPILOT_HOME", "XDG_DATA_HOME", "OPENCODE_DB", "GROK_HOME")
 
 
 @pytest.fixture(autouse=True)

@@ -40,7 +40,7 @@ MCP plugin. The engine doesn't know which one is calling.
 | `ixel_mat/gui/` | `ixel gui`: an aiohttp server on 127.0.0.1 and a dependency-free HTML/JS/CSS app; `window.py` is `ixel app`, which shows it in an Edge or Chrome app window, or the native windows: `macos/` (Ixel.app, Swift) and `linux_window.py` (GTK), which run `ixel app --host` |
 | `ixel_mat/machines/` | Machines (SSH): `store.py` (`machines.json`, and imports from `~/.ssh/config` and Ixel Console), `ssh.py` (pinned host keys, learned with ssh into a temporary file; the ssh lines, with the destination after `--`), `terminal.py` (Connect's terminal window, given the argv unjoined, held open by a Python helper until Enter), `runs.py` ("Run on machines": 8 at a time, time and output limits), `log.py` (`machines.log`: never a command's text, lines kept 30 days, one file of at most 1 MB), `cli.py` (`ixel machines`) |
 | `ixel_mat/mcp_server.py` | `ixel mcp`: the MCP server (tools `ixel_review`, `ixel_panel`) and host setup snippets |
-| `ixel_mat/agents/` | Transports, one per kind of model (below); `launch.py` finds the program to run for a CLI (PATH only, and npm `.cmd` shims resolved on Windows); `leftovers.py` removes what Gemini CLI, Copilot and OpenCode save of a question |
+| `ixel_mat/agents/` | Transports, one per kind of model (below); `launch.py` finds the program to run for a CLI (PATH only, and npm `.cmd` shims resolved on Windows); `leftovers.py` removes what Gemini CLI, Copilot and OpenCode save of a question, and gives Grok Build a home of its own for each one |
 | `ixel_mat/config/` | `loader.py` (TOML → `AgentConfig`, `set_agent_model`), `secrets.py` (saved keys: `keys.enc` and its key in the system keychain, or `.env` without one; child environments, file I/O), `setup.py` (the wizard) |
 | `ixel_mat/presets.py` | The locked-down subscription CLI presets; configs refer to them by name (`preset = "codex"`) |
 | `ixel_mat/models.py` | `latest` / `latest-fast`: which model id each means, from a provider's live list |
@@ -57,7 +57,7 @@ Every model is a `BaseAgent` with `connect()`, `send_and_receive(message, **kwar
 | `type` | Class | Used for |
 |---|---|---|
 | `http` | `HttpAgent` | Anthropic (official SDK, with server-side model fallback for the newest models), and any OpenAI-compatible API: OpenAI, Gemini, xAI, Ollama, LM Studio |
-| `oneshot` | `OneShotAgent` | A CLI run once per question: Claude Code, Codex, Gemini CLI, Copilot, OpenCode, or your own |
+| `oneshot` | `OneShotAgent` | A CLI run once per question: Claude Code, Codex, Gemini CLI, Copilot, OpenCode, Grok Build, or your own |
 | `subprocess` | `SubprocessAgent` | A long-running interactive CLI (pty on POSIX, pipes on Windows) |
 | `websocket` | `WebSocketAgent` | An OpenClaw gateway session (device-key auth) |
 
@@ -94,7 +94,10 @@ loaded (unless `pass_env` names them) and anything in `drop_env`, adds `env`, an
 `IXEL_PANEL_DEPTH`. `agents/process_tree.py` ends a CLI and everything it started (a process group on
 POSIX, a job object on Windows). Then, for a run in Ixel's temp folder, `agents/leftovers.py` removes what Gemini
 CLI, Copilot and OpenCode saved of it in their own folders (`leftovers.prepare` gives Copilot its own
-`--session-id` and `--log-dir` first; `Run.clean` runs in a thread once the CLI has exited). See
+`--session-id` and `--log-dir` first; `Run.clean` runs in a thread once the CLI has exited). Grok Build, in any
+folder, gets a `GROK_HOME` of its own (`Run.env_add`), which goes afterwards, and uses your login where it is
+(`GROK_AUTH_PATH`); its question goes in a private file (`prompt_via = "file"`), with each `@`
+that would make it read a file defused (`presets.safe_question`, undone in the answer by `own_answer`). See
 [SECURITY.md](SECURITY.md).
 
 ## The review engine (`modes/review.py`)
@@ -182,7 +185,9 @@ blocks, and when the API refuses them (400, 413, 415, 422) asks again without th
 (`ixel-picture-1.png`…, owner-only, removed with the folder) and named by `picture_args` once per picture
 (Codex `--image NAME`, Copilot `--attachment PATH`, OpenCode `-f PATH`) or `picture_prompt` before the
 question (Gemini CLI's `@NAME`), or with no file at all by `picture_stdin = "claude-stream-json"` (Claude
-Code: `--input-format stream-json`, with the pictures as image blocks in the question's message). `tests/test_cli_presets_live.py` checks each
+Code: `--input-format stream-json`, with the pictures as image blocks in the question's message). Grok Build has
+none of these, so it gets no pictures. With `prompt_via = "file"`, what `picture_prompt` adds is in the question's
+file. `tests/test_cli_presets_live.py` checks each
 program's picture reaches the model with the program still answer-only. The app uploads each one to `POST /api/pictures` (its own body, read with a counted 3.9 MB cap; every
 other route keeps 512 KB) and names their ids in `/api/review`.
 

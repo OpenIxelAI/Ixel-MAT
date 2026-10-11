@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Mapping
@@ -27,6 +28,14 @@ _OPENCODE_LOCKDOWN = json.dumps({
 
 PANEL_MEMBER = ("You're answering as one member of a panel of AI models. Answer the question directly and "
                 "completely, whatever its topic, without remarking on whether it relates to coding.")
+
+# Grok Build's tools by their own names (1.0.46), all taken away, and the kinds of tool its --deny rules stop
+GROK_TOOLS = ("run_terminal_cmd", "Agent", "read_file", "search_replace", "list_dir", "grep", "todo_write", "monitor",
+              "search_tool", "use_tool", "workflow", "enter_plan_mode", "exit_plan_mode", "ask_user_question",
+              "send_feedback", "image_gen", "image_edit", "image_to_video", "reference_to_video", "write",
+              "web_search", "web_fetch", "kill_command_or_subagent", "get_command_or_subagent_output",
+              "spawn_subagent", "scheduler_create", "scheduler_delete", "scheduler_list")
+GROK_DENY = ("Bash", "Edit", "Write", "Read", "Grep", "WebFetch", "MCPTool")
 
 # Model providers' keys a subscription CLI has no use for. Exported in your shell, they would reach
 # every CLI (Ixel withholds the ones it loads itself): each preset drops the ones that aren't its own, and
@@ -145,6 +154,35 @@ CLI_PRESETS = [
                 "OPENCODE_DISABLE_MODELS_FETCH": "1"},
         "model_args": ["-m", "{model}"], "model_hint": "provider/model, e.g. anthropic/claude-opus-5-5",
     },
+    {
+        "id": "grok_build", "label": "Grok Build", "command": "grok",
+        "why": "uses your SuperGrok login",
+        "install": "npm install -g @xai-official/grok",
+        # --disallowed-tools takes every tool away by its own name (--tools with a name that doesn't exist leaves
+        # them all), and the --deny rules stop each kind again. --verbatim: the question goes as it is, never read
+        # as one of Grok Build's /commands (/compact, /clear). --rules adds to Grok Build's own instructions.
+        # Ixel also runs it with a home of its own for each question (agents/leftovers.py): your config, MCP
+        # servers, hooks, plugins, memory and sessions stay out of it, and what the run keeps goes with it.
+        "args": ["--output-format", "streaming-messages-json", "--include-partial-messages", "--verbatim",
+                 "--no-auto-update", "--no-subagents", "--disable-web-search",
+                 "--disallowed-tools", ",".join(GROK_TOOLS), *[a for kind in GROK_DENY for a in ("--deny", kind)],
+                 "--rules", PANEL_MEMBER],
+        # Grok Build doesn't read stdin: the question goes in a private file of its own, out of `ps`. Its stream
+        # is Claude Code's, so the answer shows as it's written
+        "prompt_via": "file", "timeout": 300, "stdout_format": "claude-stream-json",
+        # An API key would be used instead of your login. GROK_CONFIG and GROK_CONFIG_PATH add settings: Ixel sets
+        # the only one it carries over from yours, the default model (agents/leftovers.py)
+        "drop_env": [*OTHER_KEYS, "GROK_CODE_XAI_API_KEY", "GROK_CONFIG", "GROK_CONFIG_PATH"],
+        "env": {**{f"GROK_{source}_{kind}_ENABLED": "0" for source in ("CLAUDE", "CURSOR")
+                   for kind in ("HOOKS", "MCPS", "RULES", "SKILLS", "AGENTS")},
+                "GROK_MEMORY": "0", "GROK_SUBAGENTS": "0", "GROK_WEB_FETCH": "0",
+                "GROK_TELEMETRY_ENABLED": "0", "GROK_TELEMETRY_MIXPANEL_ENABLED": "0",
+                "GROK_TELEMETRY_TRACE_UPLOAD": "0", "GROK_FEEDBACK_ENABLED": "0", "GROK_EXTERNAL_OTEL": "0",
+                "GROK_DISABLE_AUTOUPDATER": "1", "GROK_TURN_SUMMARY": "0", "GROK_SESSION_RECAP": "0",
+                "GROK_TITLE_REFRESH": "0", "GROK_PROMPT_SUGGESTIONS": "0"},
+        "effort_args": ["--effort", "{effort}"], "effort_levels": ["low", "medium", "high", "xhigh"],
+        "model_args": ["-m", "{model}"], "model_hint": "a model name such as grok-4.7",
+    },
 ]
 
 
@@ -166,7 +204,12 @@ def preset_for(command: str) -> dict:
 # Settings of a preset's env that Ixel gives its program whenever it runs it, whatever an agent's own env says and
 # whether or not the agent names the preset: OpenCode's locked-down agent, and no fetching of its model catalog
 # (checked against OpenCode 1.18.18, 1.18.34 and 2.0.22: with it, none of them asked for the catalog)
-LOCKED_ENV = {"opencode": ("OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_MODELS_FETCH")}
+LOCKED_ENV = {"opencode": ("OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_MODELS_FETCH"),
+              # Grok Build: no usage data or traces sent to xAI, none of Claude Code's or Cursor's hooks, MCP servers
+              # or instructions taken in, no memory
+              "grok_build": tuple(name for name in PRESETS_BY_ID["grok_build"]["env"]
+                                  if name.startswith(("GROK_TELEMETRY", "GROK_FEEDBACK", "GROK_EXTERNAL_OTEL",
+                                                      "GROK_CLAUDE_", "GROK_CURSOR_", "GROK_MEMORY")))}
 
 
 def locked_env(command: str) -> dict[str, str]:
@@ -199,8 +242,12 @@ OPENCODE_UNKNOWN_MODEL = ("OpenCode can't use this model: sign in to its provide
 # (--session-id) and off GitHub (--no-remote-export)
 COPILOT_TOO_OLD = ("This Copilot is older than Ixel needs (1.0.52, May 2026): run npm install -g @github/copilot, "
                    "or take Copilot off the panel.")
+# Grok Build with no login (grok login saves one in ~/.grok/auth.json)
+GROK_SIGN_IN = ("Grok Build isn't signed in: run grok login once (it opens your browser to sign in to your "
+                "xAI account, such as SuperGrok), or take Grok Build off the panel.")
 # What a preset's CLI says on stderr when it can't start on a question at all, and what to tell you instead
-PLAIN_ERRORS = {"gemini_cli": {"Please set an Auth method": GEMINI_SIGN_IN},
+PLAIN_ERRORS = {"grok_build": {"Not signed in": GROK_SIGN_IN},
+                "gemini_cli": {"Please set an Auth method": GEMINI_SIGN_IN},
                 "copilot": {"unknown option '--no-remote-export'": COPILOT_TOO_OLD,
                             "unknown option '--session-id'": COPILOT_TOO_OLD},
                 "opencode": {"free tier can only be used from within OpenCode": OPENCODE_FREE_TIER,
@@ -230,6 +277,47 @@ _GEMINI_UNTRUSTED_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJE
 def plain_error(preset_id: str, stderr: str) -> str | None:
     """What to tell you, for an error from a preset's CLI that Ixel knows a plainer way to say."""
     return next((tell for says, tell in PLAIN_ERRORS.get(preset_id, {}).items() if says in stderr), None)
+
+
+# ── Grok Build's @ ────────────────────────────────────────────────────────────
+
+# Grok Build reads a file into the question for each @ that begins a word and names one (@/etc/passwd, @../notes,
+# or @notes.txt in the folder it runs in), even with spaces or blank lines between the @ and the name, with
+# --verbatim and with its read tool denied alike. A word joiner right after the @ (invisible, and the model still
+# reads the @) stops that, and comes out of the answer again, so code quoted back (a decorator) still runs. An @
+# inside a word (an email address) is left as it is.
+WORD_JOINER = "\u2060"
+_GROK_MENTION = re.compile(r"(?<![^\W_])@(?!\u2060)")
+_MENTION_SAFE = {"grok_build"}
+
+
+def safe_question(preset_id: str, text: str) -> str:
+    """The question as a preset's CLI is given it: for Grok Build, with no @ it would read a file for."""
+    return _GROK_MENTION.sub("@" + WORD_JOINER, text) if preset_id in _MENTION_SAFE else text
+
+
+def own_answer(preset_id: str, text: str) -> str:
+    """A preset's answer without what safe_question added to the question (a model quotes it back)."""
+    return text.replace(WORD_JOINER, "") if preset_id in _MENTION_SAFE else text
+
+
+def grok_home(env: Mapping[str, str]) -> Path:
+    """Grok Build's own folder, for the environment it runs with: GROK_HOME, or .grok in your home folder."""
+    home = env.get("USERPROFILE" if os.name == "nt" else "HOME") or Path.home()
+    return Path(env.get("GROK_HOME") or Path(home) / ".grok")
+
+
+def grok_login(env: Mapping[str, str]) -> Path:
+    """Where Grok Build keeps your login: GROK_AUTH_PATH, or auth.json in its own folder."""
+    return Path(env.get("GROK_AUTH_PATH") or grok_home(env) / "auth.json")
+
+
+def grok_signed_in(env: Mapping[str, str]) -> bool:
+    """Whether Grok Build has a login to use (only looks: nothing is read out of it)."""
+    try:
+        return grok_login(env).stat().st_size > 2 or bool(env.get("GROK_AUTH"))
+    except OSError:
+        return bool(env.get("GROK_AUTH"))
 
 
 def _gemini_home(env: Mapping[str, str]) -> Path:

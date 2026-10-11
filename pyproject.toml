@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.1"]
 
 [project.scripts]
 ixel = "ixel_mat.cli:main"
@@ -40,3 +40,8 @@ ixel_mat = ["assets/*.txt", "assets/*.ico", "assets/*.icns", "assets/*.png", "gu
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# A hung test fails after this many seconds, with every thread's stack, instead of holding up CI until its own
+# limit. The slowest test takes about 9 s; "thread" works on Windows too. A test that needs longer says so itself
+# (@pytest.mark.timeout).
+timeout = 120
+timeout_method = "thread"

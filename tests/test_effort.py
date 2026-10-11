@@ -108,6 +108,17 @@ def test_codex_is_never_given_a_level_its_model_turns_down():
     assert flags(effort="high", model="gpt-4.1") == []
 
 
+def test_grok_build_is_given_only_the_levels_its_grok_takes():
+    def flags(effort, **extra):
+        cmd, _ = OneShotAgent(_preset("grok_build", **extra))._build_command("q", effort=effort, prompt_file="q.txt")
+        return cmd[cmd.index("--effort") + 1] if "--effort" in cmd else None
+
+    assert agent_levels(_preset("grok_build")) == UP_TO_XHIGH         # Grok 4.7, its newest
+    assert flags("max") == "xhigh" and flags("minimal") == "low"
+    assert flags("max", model="grok-4.5") == "high"                   # Grok 4.5 stops at high
+    assert flags("high", model="grok-4.7-fast") is None               # a fast one takes none
+
+
 def test_an_api_model_is_judged_by_the_model_it_resolved_to():
     cfg = AgentConfig(name="a", label="A", type="http", url="https://api.anthropic.com/v1/messages", model="latest")
     assert agent_levels(cfg) == UP_TO_MAX

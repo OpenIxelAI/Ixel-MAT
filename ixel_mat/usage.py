@@ -9,7 +9,7 @@ Dollars are at per-token API prices: the tool's own figure when it gives one (Cl
 otherwise PRICES below or the [pricing] table in your config. Which calls are money you
 spent depends on how the agent is billed:
   api      an API key (billed per token): these add up to what a review cost you
-  plan     a subscription login (Claude Code, Codex, Gemini CLI, Copilot): the call uses your
+  plan     a subscription login (Claude Code, Codex, Gemini CLI, Copilot, Grok Build): the call uses your
            plan's limits, not money
   local    a model on this machine or your own network (Ollama, LM Studio…): free
   unknown  anything else (a gateway, or a CLI Ixel doesn't know)
@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 BILLING = ("api", "plan", "local", "unknown")
 # The vendors' CLIs, signed in with the user's subscription (see presets.py)
-PLAN_COMMANDS = frozenset({"claude", "codex", "gemini", "copilot"})
+PLAN_COMMANDS = frozenset({"claude", "codex", "gemini", "copilot", "grok"})
 # OpenCode's names for model servers of your own (its docs' provider ids), as in model = "ollama/qwen3:8b"
 LOCAL_OPENCODE_PROVIDERS = ("ollama/", "lmstudio/", "llama.cpp/", "llamacpp/")
 # Ollama's cloud models (gpt-oss:120b-cloud, qwen3-coder:480b-cloud…) are listed beside the local ones but

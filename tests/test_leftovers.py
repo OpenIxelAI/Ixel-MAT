@@ -1,6 +1,6 @@
 """
-Ixel takes away what Gemini CLI, Copilot and OpenCode keep of a question it asked them in its temp folder
-(ixel_mat/agents/leftovers.py), and nothing else. Each CLI's folders are built here, in a home of the test's own,
+Ixel takes away what Gemini CLI, Copilot and OpenCode keep of a question it asked them in its temp folder, and
+runs Grok Build in a home of its own (ixel_mat/agents/leftovers.py), and nothing else. Each CLI's folders are built here, in a home of the test's own,
 the way the CLI leaves them (as checked against Gemini CLI 0.62.0, Copilot 1.0.91, OpenCode 1.18.34 and 2.0.22).
 """
 import asyncio
@@ -12,6 +12,11 @@ import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib  # type: ignore[no-redef]
 
 from ixel_mat.agents import leftovers
 from ixel_mat.agents.base import AgentConfig
@@ -64,6 +69,8 @@ def test_each_clis_folders_are_found_the_way_the_cli_finds_them(tmp_path):
     assert leftovers.places(_env(home, OPENCODE_DB=":memory:")).opencode == ()  # nothing on disk to clean
     # Gemini CLI sets SANDBOX for the copy of itself its sandbox runs, not Ixel: both are looked in, whatever it says
     assert leftovers.places(_env(home, SANDBOX="sandbox-exec")).gemini == where.gemini
+    assert where.grok == home / ".grok" and moved.grok == home / ".grok"
+    assert leftovers.places(_env(home, GROK_HOME=str(tmp_path / "gr"))).grok == tmp_path / "gr"
 
 
 def test_the_tests_never_look_in_your_own_folders(tmp_path_factory):
@@ -71,7 +78,7 @@ def test_the_tests_never_look_in_your_own_folders(tmp_path_factory):
     base = tmp_path_factory.getbasetemp()
     for env in (dict(os.environ), {}):
         where = leftovers.places(env)
-        assert all(base in place.parents for place in (*where.gemini, where.copilot, *where.opencode))
+        assert all(base in place.parents for place in (*where.gemini, where.copilot, *where.opencode, where.grok))
 
 
 @pytest.mark.parametrize("command", ["claude", "codex", "hermes", sys.executable, "/opt/bin/ixel-own-cli"])
@@ -83,6 +90,87 @@ def test_a_folder_of_yours_is_left_alone(tmp_path):
     # An agent's own workdir holds your own sessions too: only Ixel's temp folder is cleaned up after
     for command in ("gemini", "copilot", "opencode"):
         assert leftovers.prepare(command, [], None, _env(tmp_path)) is None
+
+
+# ── Grok Build's home of its own ──────────────────────────────────────────────
+
+LOGIN = json.dumps({"https://accounts.x.ai/sign-in": {"key": "session-token-1", "refresh": "r1"}}).encode()
+
+
+def _grok_home(tmp_path: Path, config: str = "") -> Path:
+    real = tmp_path / "home" / ".grok"
+    (real / "sessions").mkdir(parents=True)
+    (real / "auth.json").write_bytes(LOGIN)
+    (real / "agent_id").write_bytes(b"device-1\n")
+    (real / "sessions" / "yours.jsonl").write_text(YOURS)
+    if config:
+        (real / "config.toml").write_text(config, encoding="utf-8")
+    return real
+
+
+def _grok_config(run) -> dict:
+    return tomllib.loads((Path(run.home) / "config.toml").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("folder", ["temp", None])
+def test_grok_build_gets_a_home_of_its_own_and_your_login_where_it_is(folder, tmp_path):
+    # In Ixel's temp folder or a folder of yours alike: your config, MCP servers, hooks, skills in ~/.agents
+    # and sessions stay out, and Grok Build refreshes your login where it is, under its own lock
+    real = _grok_home(tmp_path, '[mcp_servers.yours]\ncommand = "yours"\n')
+    run = leftovers.prepare("grok", [], _run_folder(tmp_path) if folder else None, _env(tmp_path / "home"))
+    home = Path(run.home)
+    assert run.env_add == {"GROK_HOME": str(home), "GROK_AUTH_PATH": str(real / "auth.json")} and run.args == []
+    assert sorted(p.name for p in home.iterdir()) == ["agent_id", "config.toml"]
+    assert (home / "agent_id").read_bytes() == b"device-1\n"  # as it is, on Windows too
+    agents = tmp_path / "home" / ".agents"
+    hidden = list(dict.fromkeys(["~/.agents", str(agents), os.path.realpath(agents)]))
+    assert _grok_config(run) == {"skills": {"ignore": hidden}}
+    if os.name != "nt":
+        assert home.stat().st_mode & 0o077 == 0 and (home / "config.toml").stat().st_mode & 0o077 == 0
+    (home / "sessions").mkdir()
+    (home / "sessions" / "run.jsonl").write_text(QUESTION)
+    run.clean()
+    assert not home.exists()  # with the session it kept
+    assert (real / "auth.json").read_bytes() == LOGIN and (real / "sessions" / "yours.jsonl").read_text() == YOURS
+
+
+def test_grok_build_uses_your_default_model_unless_its_one_of_your_own_making(tmp_path):
+    _grok_home(tmp_path, '[models]\ndefault = "grok-4.7 \\"\u00e9\U0001F600"\n')
+    run = leftovers.prepare("grok", [], None, _env(tmp_path / "home"))
+    assert _grok_config(run)["models"] == {"default": 'grok-4.7 "\u00e9\U0001F600'}
+    run.drop()
+    assert not os.path.exists(run.home)
+    (tmp_path / "home" / ".grok" / "config.toml").write_text(
+        '[models]\ndefault = "mine"\n[model.mine]\nbase_url = "http://127.0.0.1:1/v1"\n')
+    run = leftovers.prepare("grok", [], None, _env(tmp_path / "home"))
+    assert "models" not in _grok_config(run)  # it isn't defined in the home Ixel gives Grok Build
+    run.drop()
+
+
+def test_grok_build_not_signed_in_gets_a_home_with_only_its_config(tmp_path):
+    run = leftovers.prepare("grok", [], None, _env(tmp_path / "home", GROK_AUTH_PATH="elsewhere.json"))
+    assert [p.name for p in Path(run.home).iterdir()] == ["config.toml"]
+    assert run.env_add["GROK_AUTH_PATH"] == os.path.abspath("elsewhere.json")  # yours, wherever you keep it
+    run.clean()
+    assert not os.path.exists(run.home) and not (tmp_path / "home" / ".grok").exists()
+
+
+def test_grok_build_runs_its_own_program_not_a_new_copy_for_each_question(tmp_path):
+    # Its npm launcher (kept on Windows) runs GROK_HOME/bin/grok, and would unpack a new copy there otherwise
+    real = _grok_home(tmp_path)
+    name = "grok.exe" if os.name == "nt" else "grok"
+    (real / "bin").mkdir()
+    (real / "bin" / "grok-1.0.46").write_bytes(b"the program")
+    if os.name == "nt":
+        (real / "bin" / name).write_bytes(b"the program")
+    else:
+        (real / "bin" / name).symlink_to("grok-1.0.46")
+    run = leftovers.prepare("grok", [], None, _env(tmp_path / "home"))
+    linked = Path(run.home) / "bin" / name
+    assert linked.read_bytes() == b"the program"
+    assert os.path.samefile(linked, real / "bin" / name)  # a link, not a copy
+    run.clean()
+    assert not os.path.exists(run.home) and (real / "bin" / name).read_bytes() == b"the program"
 
 
 def test_copilot_gets_a_session_and_a_log_folder_of_its_own(tmp_path):
@@ -505,6 +593,21 @@ print("391")
 }
 
 
+STAND_INS["grok"] = """
+import json, os, pathlib, sys
+args = sys.argv[1:]
+prompt = pathlib.Path(args[args.index("--prompt-file") + 1])
+question = prompt.read_text(encoding="utf-8")
+home = pathlib.Path(os.environ["GROK_HOME"])
+(home / "sessions").mkdir()
+(home / "sessions" / "chat_history.jsonl").write_text(question, encoding="utf-8")
+pathlib.Path(os.environ["GROK_AUTH_PATH"]).write_text(json.dumps({"refreshed": True}))  # it refreshed your login
+pathlib.Path(os.environ["HOME"], "seen.json").write_text(json.dumps(
+    {"prompt": str(prompt), "home": str(home), "question": question, "cwd": os.getcwd()}))
+sys.stdout.buffer.write("391, says @\u2060me\\n".encode("utf-8"))  # as Grok Build writes, on Windows too
+"""
+
+
 @pytest.fixture
 def stand_in(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -546,6 +649,26 @@ def test_after_a_question_nothing_copilot_kept_of_it_is_left(stand_in):
     assert args[0] == "-s" and "--session-id" in args and "--log-dir" in args
     assert list((stand_in / ".copilot" / "session-state").iterdir()) == []
     assert not os.path.exists(args[args.index("--log-dir") + 1])
+
+
+def test_after_a_question_nothing_grok_build_kept_of_it_is_left(stand_in, tmp_path):
+    # Its home of its own goes, the question's file too, and it refreshed your login where it is
+    (stand_in / ".grok").mkdir()
+    (stand_in / ".grok" / "auth.json").write_bytes(LOGIN)
+    agent = OneShotAgent(AgentConfig(name="grok", label="Grok Build", type="oneshot", command="grok",
+                                     prompt_via="file", workdir=str(tmp_path / "yours")))
+    (tmp_path / "yours").mkdir()
+
+    async def ask():
+        await agent.connect()
+        return await agent.send_and_receive(QUESTION + " @/etc/passwd")
+    assert asyncio.run(ask()) == "391, says @me"  # what Ixel adds to an @ comes out of the answer
+    seen = json.loads((stand_in / "seen.json").read_text())
+    assert seen["question"] == QUESTION + " @\u2060/etc/passwd"  # Grok Build reads no file for it
+    assert not os.path.exists(seen["prompt"]) and not os.path.exists(seen["home"])
+    assert not Path(seen["prompt"]).is_relative_to(tmp_path / "yours")  # the question's file is never in its folder
+    assert json.loads((stand_in / ".grok" / "auth.json").read_text()) == {"refreshed": True}
+    assert QUESTION.encode() not in _everything(stand_in / ".grok")
 
 
 def test_a_question_asked_in_a_folder_of_yours_leaves_its_sessions_alone(stand_in, tmp_path):

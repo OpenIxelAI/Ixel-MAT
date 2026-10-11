@@ -21,8 +21,9 @@ DEFAULT_TIMEOUT = 180.0  # seconds per model call; reasoning models can take min
 # How long a transport itself lets a call run when the agent sets no timeout: every caller (a review,
 # `ixel ask`, triage) waits with its own limit, so this only stops a call that nothing else limits
 UNSET_TRANSPORT_TIMEOUT = 3600.0
-# "auto": an argument when it fits on a command line, else stdin (for CLIs that read either)
-PROMPT_MODES = ("flag", "arg", "stdin", "auto")
+# "auto": an argument when it fits on a command line, else stdin (for CLIs that read either). "file": in a
+# private temp file, its path after --prompt-file (Grok Build, which doesn't read stdin)
+PROMPT_MODES = ("flag", "arg", "stdin", "auto", "file")
 # How a CLI prints its answer: plain text, or Claude Code's stream-json events (which let the
 # answer be shown as it's written)
 STDOUT_FORMATS = ("text", "claude-stream-json")

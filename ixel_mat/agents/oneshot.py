@@ -19,7 +19,7 @@ from ixel_mat.config.secrets import child_env, ixels_own
 from ixel_mat.effort import agent_levels, to_send
 from ixel_mat.limits import UsageLimit, out_of_usage
 from ixel_mat.models import valid_model_id
-from ixel_mat.presets import gemini_key_env, locked_env, plain_error, preset_for
+from ixel_mat.presets import gemini_key_env, locked_env, own_answer, plain_error, preset_for, safe_question
 from ixel_mat.sanitize import ESCAPE_SEQUENCE_RE
 from ixel_mat.usage import OnUsage, claude_code_usage
 
@@ -159,12 +159,15 @@ async def version_args(config: AgentConfig, env: dict[str, str]) -> list[str]:
 
 async def _read_claude_stream(proc: asyncio.subprocess.Process, stdin_data: bytes | None,
                               on_text: Callable[[str], Awaitable[None]] | None,
-                              on_usage: OnUsage | None = None) -> tuple[bytes, bytes]:
+                              on_usage: OnUsage | None = None, who: str = "Claude Code",
+                              preset_id: str = "") -> tuple[bytes, bytes]:
     """
-    Claude Code's `--output-format stream-json --include-partial-messages`: each line is an
-    event. Text pieces go to on_text as they arrive; the answer is the final "result" event
-    (or, without one, the pieces put together), which also carries the tokens and cost that go
-    to on_usage. Returns (answer, stderr) like communicate().
+    Claude Code's `--output-format stream-json --include-partial-messages` (and Grok Build's
+    streaming-messages-json, the same events): each line is an event. Text pieces go to on_text
+    as they arrive; the answer is the final "result" event (or, without one, the pieces put
+    together), which also carries the tokens and cost that go to on_usage. Returns (answer,
+    stderr) like communicate(). who names the program in an error it reports, and preset_id
+    finds a plainer way to say one (plain_error).
     """
     async def feed() -> None:
         if proc.stdin is None:
@@ -216,11 +219,48 @@ async def _read_claude_stream(proc: asyncio.subprocess.Process, stdin_data: byte
     answer = result if result is not None else "".join(pieces)
     if failed:
         from ixel_mat.material import mask_secrets  # material imports the agents package
-        # Out of usage only by Claude Code's own words, never by the pieces of an answer it was writing
+        # Out of usage only by the program's own words, never by the pieces of an answer it was writing
         own = result if result is not None else " ".join(str(e) for e in errors)
-        said = mask_secrets(answer.strip())[:300] or 'no details'
-        raise (UsageLimit if out_of_usage(own) else RuntimeError)(f"Claude Code reported an error: {said}")
+        plain = plain_error(preset_id, own)
+        if plain:  # one Ixel can say what to do about, like Grok Build that isn't signed in
+            raise RuntimeError(plain)
+        # Grok Build says why in errors, with no result
+        said = mask_secrets(answer.strip() or own.strip())[:300] or 'no details'
+        raise (UsageLimit if out_of_usage(own) else RuntimeError)(f"{who} reported an error: {said}")
     return answer.encode("utf-8"), stderr
+
+
+def _as_answer(on_text: Callable[[str], Awaitable[None]] | None,
+               preset_id: str) -> Callable[[str], Awaitable[None]] | None:
+    """on_text, given each piece of the answer as the answer itself will be (own_answer)."""
+    if on_text is None or not preset_id:
+        return on_text
+
+    async def shown(text: str) -> None:
+        await on_text(own_answer(preset_id, text))
+    return shown
+
+
+def _write_prompt_file(message: str) -> str:
+    """The question in a temp file only you can read, for a CLI that takes it from a file (prompt_via "file")."""
+    fd, path = tempfile.mkstemp(prefix="ixel-prompt-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(message.encode("utf-8"))
+    except BaseException:
+        _remove_file(path)
+        raise
+    return path
+
+
+def _remove_file(path: str | None) -> None:
+    if path:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:  # its name only, never what was in it
+            logger.warning("Couldn't remove %s: %s", path, exc.strerror)
 
 
 ERROR_LINES = 15  # a failed CLI says why at the end
@@ -322,9 +362,10 @@ class OneShotAgent(BaseAgent):
 
     def _build_command(self, message: str, output_file: str | None = None, effort: str = "",
                        args: list[str] | None = None, pictures: list[tuple[str, object]] | None = None,
-                       ) -> tuple[list[str], bytes | None]:
+                       prompt_file: str | None = None) -> tuple[list[str], bytes | None]:
         """The command line and stdin for one question. pictures: (path, pictures.Picture) for each picture,
-        already written to the run's folder, given to the program as its config says."""
+        already written to the run's folder, given to the program as its config says. prompt_file: the file
+        the question (with what pictures add to it) is already written to, for prompt_via "file"."""
         cmd = [self.config.command] + list((self.config.args or []) if args is None else args)
         if self.config.model and self.config.model_args:
             if not valid_model_id(self.config.model):  # never something the CLI could read as a flag
@@ -342,10 +383,12 @@ class OneShotAgent(BaseAgent):
             for path, _ in pictures:
                 cmd += [a.replace("{path}", path).replace("{name}", os.path.basename(path))
                         for a in self.config.picture_args or []]
-            if self.config.picture_prompt:
-                message = "".join(self.config.picture_prompt.replace("{name}", os.path.basename(path))
-                                  .replace("{path}", path) for path, _ in pictures) + "\n\n" + message
+            message = self._with_picture_prompt(message, pictures)
         mode = self.config.prompt_via
+        if mode == "file":
+            if not prompt_file:
+                raise RuntimeError(f"'{self.name}': no file to give the question in")
+            return cmd + ["--prompt-file", prompt_file], None
         too_long = arg_size(message) > ARG_LIMIT
         if mode == "stdin" or (mode == "auto" and too_long):
             return cmd, message.encode("utf-8")
@@ -363,23 +406,33 @@ class OneShotAgent(BaseAgent):
             cmd += ["--resume", self.config.last_session_id]
         return cmd, None
 
+    def _with_picture_prompt(self, message: str, pictures: list[tuple[str, object]] | None) -> str:
+        """The question with picture_prompt before it, once per picture ("@{name} " for Gemini CLI)."""
+        if not (pictures and self.config.picture_prompt):
+            return message
+        return "".join(self.config.picture_prompt.replace("{name}", os.path.basename(path))
+                       .replace("{path}", path) for path, _ in pictures) + "\n\n" + message
+
     async def _run_command(self, message: str, effort: str = "",
                            on_text: Callable[[str], Awaitable[None]] | None = None,
                            on_usage: OnUsage | None = None, pictures: tuple = ()) -> str:
         """Run the command once for this message and return its answer."""
         env = cli_env(self.config)
         args = await self._args(env)
+        preset_id = preset_for(self.config.command).get("id", "")
+        message = safe_question(preset_id, message)  # Grok Build: no @ it would read a file for
         cwd, remove_cwd = prepare_workdir(self.config.workdir)
         if pictures and not remove_cwd:  # only ever into a folder of the run's own, removed after it
             remove_workdir(cwd, remove_cwd)
             raise RuntimeError(f"'{self.name}': pictures go only to a program that runs in its own temp folder "
                                '(workdir = "temp").')
         # Gemini CLI, Copilot and OpenCode save the question and answer under your home folder: what a run in
-        # Ixel's own temp folder left is taken away after it (leftovers.py)
+        # Ixel's own temp folder left is taken away after it. Grok Build gets a home of its own (leftovers.py)
         run = leftovers.prepare(self.config.command, args, cwd if remove_cwd else None, env)
         if run:
             args = args + run.args
-        output_file = None
+            env.update(run.env_add)
+        output_file = prompt_file = None
         if self.config.output_flag:
             output_dir = cwd if remove_cwd else tempfile.mkdtemp(prefix="ixel-out-")
             output_file = os.path.join(output_dir, "answer.txt")
@@ -388,7 +441,11 @@ class OneShotAgent(BaseAgent):
                 written = [("", picture) for picture in pictures]
             else:
                 written = _write_pictures(cwd, pictures) if pictures else None
-            cmd, stdin_data = self._build_command(message, output_file, effort, args, written)
+            if self.config.prompt_via == "file":  # outside the folder the CLI runs in
+                prompt_file = _write_prompt_file(
+                    message if self.config.picture_stdin else self._with_picture_prompt(message, written))
+            cmd, stdin_data = self._build_command(message, output_file, effort, args, pictures=written,
+                                                  prompt_file=prompt_file)
             try:
                 cmd = resolve_argv(cmd)
             except FileNotFoundError:
@@ -399,6 +456,7 @@ class OneShotAgent(BaseAgent):
             remove_workdir(cwd, remove_cwd)
             if output_file and not remove_cwd:
                 remove_workdir(os.path.dirname(output_file), True)
+            _remove_file(prompt_file)
             raise
         logger.info("Running one-shot agent '%s': %s (prompt via %s)",
                     self.name, self.config.command, self.config.prompt_via)
@@ -422,7 +480,9 @@ class OneShotAgent(BaseAgent):
                 raise RuntimeError(f"Command not found: {self.config.command}") from None
             try:
                 if self.config.stdout_format == "claude-stream-json":
-                    reading = _read_claude_stream(proc, stdin_data, on_text, on_usage)
+                    reading = _read_claude_stream(proc, stdin_data, _as_answer(on_text, preset_id), on_usage,
+                                                  preset_for(self.config.command).get("label", "Claude Code"),
+                                                  preset_id)
                 else:
                     reading = proc.communicate(stdin_data)
                 stdout, stderr = await asyncio.wait_for(reading, timeout=self.timeout)
@@ -434,7 +494,7 @@ class OneShotAgent(BaseAgent):
                     written = handle.read()
                 if written.strip():
                     stdout = written  # the CLI's final answer, without its progress chatter
-            result, session_id = _split_footer(_visible_text(stdout))
+            result, session_id = _split_footer(own_answer(preset_id, _visible_text(stdout)))
             if session_id is None:
                 session_id = _session_id_in_log(_visible_text(stderr))
             if session_id:
@@ -470,6 +530,7 @@ class OneShotAgent(BaseAgent):
             remove_workdir(cwd, remove_cwd)
             if output_file and not remove_cwd:
                 remove_workdir(os.path.dirname(output_file), True)
+            _remove_file(prompt_file)
             if run and tree is not None:
                 # Once the CLI and everything it started have exited, so nothing is still writing. In a thread: a
                 # database a CLI of yours is using at that moment can take a moment to be free (and if this call
