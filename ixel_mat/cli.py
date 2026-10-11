@@ -398,6 +398,8 @@ def cmd_model(argv: list[str] | None = None) -> int:
             if preset:
                 console.print(f"  [{C['dim']}]{safe_markup(preset['label'])} accepts "
                               f"{safe_markup(preset['model_hint'])}.[/]")
+                if preset.get("warning"):  # an opt-in preset's (Antigravity's terms)
+                    console.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{safe_markup(preset['warning'])}[/]")
     console.print(f"  [{C['dim']}]Change one:[/] [{C['blue']}]ixel model <agent> <model>[/]"
                   f"[{C['dim']}]  (latest, latest-fast, a model name, or default)[/]")
     console.print()

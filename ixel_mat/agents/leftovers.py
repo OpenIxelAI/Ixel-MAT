@@ -17,6 +17,8 @@ never a login, a setting, or a session of yours.
   so none of your config, MCP servers, hooks, plugins, skills, memory or sessions reaches it. It uses your login
   where it is (GROK_AUTH_PATH). Afterwards the folder goes, with the session it kept. This happens in any
   folder, an agent's own workdir too.
+- Antigravity: where it keeps a question is unverified (nobody has run agy headless from Ixel yet), so nothing
+  is removed after it yet.
 
 Rows are deleted with SQLite's secure_delete on, and the database's write-ahead log is emptied afterwards, so
 the text doesn't stay behind in free space. A run in a folder of yours (an agent's own workdir) is left alone:
@@ -485,5 +487,6 @@ def _clean_grok(run: Run, where: Places) -> None:
     """Nothing: what Grok Build kept of the question is in the run's home, which goes (Run.drop)."""
 
 
+# No Antigravity: where agy keeps a question is unverified, so nothing is removed after it yet (prepare gives None)
 CLEANERS: dict[str, Callable[[Run, Places], None]] = {
     "gemini_cli": _clean_gemini, "copilot": _clean_copilot, "opencode": _clean_opencode, "grok_build": _clean_grok}

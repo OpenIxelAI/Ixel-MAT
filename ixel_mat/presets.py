@@ -4,6 +4,11 @@ locked down to answer-only.
 
 A config refers to one by name (`preset = "claude_code"`) rather than copying
 its flags, so when a preset is tightened, every install picks that up.
+
+Claude Code, Codex, Gemini CLI, GitHub Copilot, OpenCode and Grok Build are
+offered whenever they're installed. Antigravity is opt-in: a preset with a
+"warning" is never added unless you say yes, and its warning is shown wherever
+it's offered or shown.
 """
 from __future__ import annotations
 
@@ -18,6 +23,8 @@ from typing import Mapping
 # lock-down below was checked by pointing the CLI at a fake model server that
 # answers with shell, file-write and file-read tool calls: none may run
 # (tests/test_cli_presets_live.py repeats this wherever the CLIs are installed).
+# Antigravity's (the last one) is the exception: nobody has run agy headless
+# from Ixel yet, so its lock-down is unverified (see the comments on it).
 _OPENCODE_LOCKDOWN = json.dumps({
     # Our own agent, defined here where it outranks the user's config, so a
     # config that re-enables tools for the built-in agents can't reach it.
@@ -44,6 +51,11 @@ GROK_DENY = ("Bash", "Edit", "Write", "Read", "Grep", "WebFetch", "MCPTool")
 OTHER_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "GEMINI_API_KEY",
               "GOOGLE_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_API_KEY",
               "DEEPSEEK_API_KEY", "TYPESAFE_API_KEY"]
+
+# Shown wherever Antigravity is offered or shown (setup, ixel doctor, the Health page, `ixel model`). Defined here,
+# not with the sign-in messages below, because its preset carries it.
+ANTIGRAVITY_WARNING = ("Google's Antigravity terms may restrict using it from tools other than Google's own; "
+                       "using it here could put your Google account at risk.")
 
 CLI_PRESETS = [
     {
@@ -183,6 +195,30 @@ CLI_PRESETS = [
         "effort_args": ["--effort", "{effort}"], "effort_levels": ["low", "medium", "high", "xhigh"],
         "model_args": ["-m", "{model}"], "model_hint": "a model name such as grok-4.7",
     },
+    {
+        # Opt-in ("warning"): Gemini CLI no longer takes a personal Google sign-in, and Google points those
+        # accounts to Antigravity. Never added unless you say yes. No "install": how agy gets installed wasn't
+        # checked, so setup never suggests it and health has no install line for it.
+        "id": "antigravity", "label": "Antigravity", "command": "agy",
+        "why": "uses your Google AI Pro login, through Google's Antigravity (opt-in: see its warning)",
+        "warning": ANTIGRAVITY_WARNING,
+        # Unverified, all of it (agy 1.2.16's --help, never run headless from Ixel): its flags mirror Claude
+        # Code's, so -p is assumed to print one answer to a question read from stdin, as `claude -p` does;
+        # --mode plan is assumed to be read-only; --sandbox (terminal restrictions) is assumed to be a bare flag;
+        # --disable-slash-commands keeps the question from being read as one of its /commands. Text output:
+        # Ixel can't parse agy's json/stream-json yet (if it turns out to be Claude Code's stream-json,
+        # stdout_format "claude-stream-json" would stream the answer). agy has an mcp subcommand and no known
+        # flag that turns its MCP servers off. Never --dangerously-skip-permissions, never --add-dir.
+        "args": ["-p", "--output-format", "text", "--disable-slash-commands", "--mode", "plan", "--sandbox"],
+        # On stdin, out of `ps` (unverified that agy -p reads it there, see above)
+        "prompt_via": "stdin", "timeout": 300,
+        # No pictures: whether --input-format stream-json takes image blocks is unverified.
+        # Your login is what's used, never a Gemini or Google key (or anyone else's)
+        "drop_env": [*OTHER_KEYS],
+        "effort_args": ["--effort", "{effort}"], "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+        "model_args": ["--model", "{model}"],
+        "model_hint": "a model name as agy models lists them, such as gemini-3.1-pro-preview",
+    },
 ]
 
 
@@ -192,7 +228,7 @@ PRESET_FIELDS = ("command", "args", "args_by_version", "prompt_via", "output_fla
                  "picture_stdin")
 PRESETS_BY_ID = {p["id"]: p for p in CLI_PRESETS}
 # Fields that describe a preset for people (setup, `ixel model`) and never reach an agent's config.
-PRESET_ABOUT = ("id", "why", "install", "free", "free_then", "model_hint")
+PRESET_ABOUT = ("id", "why", "install", "free", "free_then", "model_hint", "warning")
 
 
 def preset_for(command: str) -> dict:
@@ -245,8 +281,13 @@ COPILOT_TOO_OLD = ("This Copilot is older than Ixel needs (1.0.52, May 2026): ru
 # Grok Build with no login (grok login saves one in ~/.grok/auth.json)
 GROK_SIGN_IN = ("Grok Build isn't signed in: run grok login once (it opens your browser to sign in to your "
                 "xAI account, such as SuperGrok), or take Grok Build off the panel.")
+# Antigravity with no Google sign-in (at most 160 characters, like the others)
+ANTIGRAVITY_SIGN_IN = ("Antigravity isn't signed in: run agy once and sign in with your Google account (Google AI "
+                       "Pro), or take Antigravity off the panel.")
 # What a preset's CLI says on stderr when it can't start on a question at all, and what to tell you instead
 PLAIN_ERRORS = {"grok_build": {"Not signed in": GROK_SIGN_IN},
+                # Unverified: guessed from Claude Code's wording, which agy's flags mirror
+                "antigravity": {"Not logged in": ANTIGRAVITY_SIGN_IN, "Please run /login": ANTIGRAVITY_SIGN_IN},
                 "gemini_cli": {"Please set an Auth method": GEMINI_SIGN_IN},
                 "copilot": {"unknown option '--no-remote-export'": COPILOT_TOO_OLD,
                             "unknown option '--session-id'": COPILOT_TOO_OLD},
