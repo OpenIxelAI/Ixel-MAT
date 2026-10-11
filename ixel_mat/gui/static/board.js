@@ -1120,6 +1120,7 @@ function runPicker(asked, agent, worker) {
   const names = WORKER_MODELS[agent] || { suggest: [], one: "", chain: [] };
   const state = asked.run || (asked.run = { mode: "own", rows: [{ model: "", effort: "" }] });
   const levels = new Map();  // model -> the levels it takes, once the server has said
+  const asking = new Map();  // model -> the server's answer on its way
   const listId = `needs-models-${agent}`;
   const rows = el("div", { class: "pick-rows" });
   const mode = el("select", { id: "needs-run-mode", "data-key": "needs-run-mode" },
@@ -1143,21 +1144,27 @@ function runPicker(asked, agent, worker) {
     select.addEventListener("change", () => { row.effort = select.value; });
     return select;
   };
-  const ask = async (row, i) => {  // the levels this model takes, where Ixel knows its company's
+  const ask = (row, i) => {  // the levels this model takes, where Ixel knows its company's
     const model = (row.model || "").trim().toLowerCase();
     if (!model || levels.has(model)) return;
-    try {
-      const found = await getJSON(`/api/board/levels?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`);
-      if (!Array.isArray(found.levels)) return;
-      levels.set(model, found.levels);
+    if (!asking.has(model)) {
+      asking.set(model, getJSON(`/api/board/levels?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`)
+        .then((found) => { if (Array.isArray(found.levels)) levels.set(model, found.levels); })
+        .catch(() => { /* the worker's own levels stand */ })
+        .finally(() => asking.delete(model)));
+    }
+    asking.get(model).then(() => {
       const old = rows.querySelector(`[data-key="needs-effort-${i}"]`);
-      if (old && (state.rows[i] || {}).model === row.model) old.replaceWith(effortSelect(row, i));
-    } catch (e) { /* the worker's own levels stand */ }
+      if (levels.has(model) && old && (state.rows[i] || {}).model === row.model) old.replaceWith(effortSelect(row, i));
+    });
   };
   const draw = () => {
+    const changed = state.mode !== mode.value;  // (a redraw keeps what was typed, a blank model too)
     state.mode = mode.value;
     if (state.mode === "own") state.rows = [{ model: "", effort: state.rows[0] && !state.rows[0].model ? state.rows[0].effort : "" }];
-    if (state.mode === "one" && (state.rows.length !== 1 || !state.rows[0].model)) state.rows = [{ model: names.one, effort: "" }];
+    if (state.mode === "one" && (state.rows.length !== 1 || (changed && !state.rows[0].model))) {
+      state.rows = [{ model: names.one, effort: "" }];
+    }
     if (state.mode === "chain" && state.rows.length < 2) state.rows = names.chain.map(([model, effort]) => ({ model, effort }));
     rows.replaceChildren(...state.rows.map((row, i) => {
       const parts = [];
@@ -1199,10 +1206,20 @@ function runPicker(asked, agent, worker) {
     // A blank row, or a model named twice, would only come back refused: leave them out
     const picked = typed.filter((r, i) => r.model && typed.findIndex((o) => o.model === r.model) === i);
     const models = picked.map((r) => r.model);
-    const efforts = Object.fromEntries(picked.filter((r) => r.effort && r.model).map((r) => [r.model, r.effort]));
+    // Only a level the model takes: one picked for the model typed before goes, and the new one thinks at its default
+    const efforts = Object.fromEntries(picked.filter((r) => r.effort && allowed(r.model).includes(r.effort))
+      .map((r) => [r.model, r.effort]));
     return { models, ...(Object.keys(efforts).length ? { efforts } : {}) };
   };
-  return { row, args };
+  // Before args(): the levels of every model as typed now (a model typed just before pressing the button is still
+  // being looked up), and why it can't go yet, if it can't
+  const ready = async () => {
+    state.rows.forEach((r, i) => ask(r, i));
+    await Promise.all([...asking.values()]);
+  };
+  const problem = () => state.mode !== "own" && !args().models.length
+    ? `Name a model to run it on, or pick ${agent}'s own model.` : "";
+  return { row, args, ready, problem };
 }
 
 // What the person typed or picked lives in `asked.draft`, so a redraw (or a refusal) keeps it
@@ -1210,6 +1227,7 @@ function needsForm(asked, t) {
   const a = asked.action;
   const form = el("form", { class: "needs" });
   let read;
+  let check = async () => "";  // why what was picked can't go yet, if it can't ("" when it can)
   if (a.needs === "text") {
     const box = el("textarea", { rows: "3", maxlength: "4000", "data-first": true, id: "needs-text", "data-key": "needs-text",
       required: TEXT_NEEDED[a.op] || false, ...PRIVATE_TYPING });
@@ -1252,13 +1270,25 @@ function needsForm(asked, t) {
       const kind = kindNow();
       return { ...(a.args || {}), kind, ...(picker && kind === "edit" ? picker.args() : {}) };
     };
+    check = async () => {
+      if (!picker || kindNow() !== "edit") return "";
+      await picker.ready();
+      return picker.problem();
+    };
   }
   const cancel = el("button", { type: "button", class: "btn", "data-key": "needs-cancel" }, "Cancel");
   cancel.addEventListener("click", closeNeeds);
   form.append(el("div", { class: "needs-buttons" }, cancel,
     el("button", { type: "submit", class: "btn primary", disabled: busy, "data-key": "needs-submit" }, a.label)));
-  form.addEventListener("submit", (e) => {
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (busy) return;
+    const problem = await check();
+    if (problem) {
+      actionFailure = problem;
+      renderPanel();
+      return;
+    }
     if (!busy) act(a, t, read());  // the form says what will happen: pressing its button is the yes
   });
   form.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); closeNeeds(); } });
