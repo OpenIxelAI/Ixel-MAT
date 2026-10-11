@@ -302,10 +302,32 @@ def _claude_message(message: str, pictures) -> bytes:
     return (json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n").encode("utf-8")
 
 
+def _with_ultracode(cmd: list[str]) -> list[str]:
+    """cmd with Claude Code's Ultracode on. Claude Code keeps only the last --settings it's given, so the switch
+    goes into the --settings JSON already there (the preset's lockdown) rather than a second one that would
+    drop it; with no --settings (a config with its own args), one is added. A --settings that isn't JSON (a
+    file's path) is left as it is, without Ultracode: a second one would drop it."""
+    cmd = list(cmd)
+    if "--settings" not in cmd:
+        return cmd + ["--settings", json.dumps({"ultracode": True})]
+    i = cmd.index("--settings")
+    try:
+        settings = json.loads(cmd[i + 1]) if i + 1 < len(cmd) else None
+    except ValueError:
+        settings = None
+    if isinstance(settings, dict):
+        settings["ultracode"] = True
+        cmd[i + 1] = json.dumps(settings)
+    else:
+        logger.warning("Ultracode not turned on: this agent's --settings isn't JSON Ixel can add it to")
+    return cmd
+
+
 class OneShotAgent(BaseAgent):
     """
     Runs a fresh subprocess per message, with the question on its stdin unless its config's prompt_via
-    says otherwise (e.g. "flag" for hermes chat -q "prompt").
+    says otherwise (e.g. "flag" for hermes chat -q "prompt"). Claude Code with ultracode set gets its
+    Ultracode switch in its --settings JSON (_with_ultracode).
 
     No persistent process, no PTY, no TUI rendering issues.
     Each send() spawns a new process, captures stdout, returns the result.
@@ -367,6 +389,8 @@ class OneShotAgent(BaseAgent):
         already written to the run's folder, given to the program as its config says. prompt_file: the file
         the question (with what pictures add to it) is already written to, for prompt_via "file"."""
         cmd = [self.config.command] + list((self.config.args or []) if args is None else args)
+        if self.config.ultracode and preset_for(self.config.command).get("id") == "claude_code":
+            cmd = _with_ultracode(cmd)
         # The nearest level the program (and, for Codex, its model) takes, or none when it takes none
         level = (to_send(agent_levels(self.config), effort)
                  if (self.config.effort_args or self.config.effort_in_model) else None)

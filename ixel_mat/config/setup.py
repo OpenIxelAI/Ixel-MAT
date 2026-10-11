@@ -909,7 +909,7 @@ def _table_lines(path: tuple[str, ...], table: dict) -> list[str]:
 # The order an agent's settings are written in; any others follow
 _AGENT_ORDER = ("preset", "type", "url", "token_env", "command", "args", "args_by_version", "prompt_via",
                 "output_flag", "workdir", "drop_env", "effort_args", "effort_levels", "effort_in_model", "model_args",
-                "env", "timeout", "session_key", "model", "effort", "label", "color")
+                "env", "timeout", "session_key", "model", "effort", "ultracode", "label", "color")
 # What the wizard asks in each table. The rest of a table (set in Settings, or by hand) is kept.
 _ASKED = {"review": ("mode", "plain_questions", "moderator"),
           "saver": ("verifier", "escalate", "verifier_effort"),

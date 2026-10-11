@@ -64,7 +64,7 @@ Every model is a `BaseAgent` with `connect()`, `send_and_receive(message, **kwar
 `send_and_receive(…, effort=)` sets the thinking level for one call. Saver mode uses it to run the verifier
 at `verifier_effort`. HTTP agents map it to the provider's setting (Anthropic `output_config.effort`,
 OpenAI-style `reasoning_effort`). CLI agents map it through `effort_args`, using the nearest level the
-CLI accepts (`nearest_effort`). OpenCode has no effort flag: `effort_in_model` puts the level into the model name as its `#variant` (`anthropic/claude-opus-5-5#high`).
+CLI accepts (`nearest_effort`). OpenCode has no effort flag: `effort_in_model` puts the level into the model name as its `#variant` (`anthropic/claude-opus-5-5#high`). Claude Code's Ultracode (`ultracode = true` in an agent's config) is merged into its `--settings` JSON, since Claude Code keeps only the last `--settings` given.
 
 `send_and_receive(…, on_usage=)` reports what a call used, as a `usage.Usage`: the Anthropic SDK's
 `usage` (one per attempt in `usage.iterations`, so a declined attempt and its fallback are both priced, each

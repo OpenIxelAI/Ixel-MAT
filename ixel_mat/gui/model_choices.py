@@ -287,7 +287,9 @@ def agent_choices(cfg, raw: dict) -> dict:
     {"source": "company" | "program" | "server" | "built_in" | "none", "where": who the list is from,
      "newest": whether Default means the newest model, "default": the model that is now when Ixel knows
      ("" otherwise, None when there's no default: a model has to be named), and for a model that follows
-     the newest, "follows" (its setting), "resolved" (the model it is now) and "efforts" (that model's levels),
+     the newest, "follows" (its setting), "resolved" (the model it is now), "efforts" (that model's levels),
+     "levels" (the same as [{"value", "label"}], in its provider's own names) and "effort_sent" (the level sent
+     for the agent's saved effort, or ""),
      "names": [{"id", "about", "now"}] (names that follow the newest), "models": [names], "note": ...}
     """
     out = {"source": "none", "where": "", "newest": False, "default": "", "names": [], "models": [], "note": ""}
@@ -424,13 +426,18 @@ def choices(settings, fresh: bool = False) -> dict[str, dict]:
 
 def _with_levels(cfg, found: dict) -> dict:
     """For a model that follows the newest, the effort levels of the model it is now, not a guess at it (worked
-    out from the list kept, so picking another model asks no one again)."""
+    out from the list kept, so picking another model asks no one again): "efforts" (the values), "levels"
+    ([{value, label}] in the provider's own names) and "effort_sent" (the level sent for the agent's saved
+    effort, or "")."""
     provider = provider_for_url(cfg.url) if cfg.type == "http" else None
     follows = cfg.model or "latest"
     now = next((n["now"] for n in found.get("names", ()) if n.get("id") == follows), "")
     if not provider or follows not in ALIASES or not now:
         return found
-    return {**found, "follows": cfg.model, "resolved": now, "efforts": list(effort.model_levels(provider, now))}
+    levels = effort.native_levels("http", now, provider)
+    values = tuple(level["value"] for level in levels)
+    return {**found, "follows": cfg.model, "resolved": now, "efforts": list(effort.model_levels(provider, now)),
+            "levels": levels, "effort_sent": effort.to_send(values, cfg.effort) or ""}
 
 
 def _unreadable(exc: Exception) -> dict:

@@ -161,6 +161,9 @@ class AgentConfig:
     # Thinking level: minimal | low | medium | high | xhigh | max | ultra (each program is offered its
     # provider's own levels for its model: effort.py)
     effort: str = ""
+    # Claude Code's multi-agent mode (its settings key "ultracode"), a separate on/off switch that works at any
+    # effort; only a claude_code agent uses it
+    ultracode: bool = False
 
     # Command-line agents
     # How the question reaches it: "stdin" (the default: other programs can read a command line, but not
