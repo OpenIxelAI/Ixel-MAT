@@ -1093,6 +1093,11 @@ details.original > summary:hover { color: var(--text-2); }
 .who.you { color: var(--accent); }
 .overlap { display: inline-flex; align-items: center; gap: 3px; color: var(--amber); }
 .overlap .icon { width: 12px; height: 12px; }
+.card-foot .cost { font-variant-numeric: tabular-nums; color: var(--text-2); }
+.board-spent {
+  padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 12px; line-height: 20px;
+  color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums;
+}
 
 .pill {
   padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 11px; line-height: 18px;
