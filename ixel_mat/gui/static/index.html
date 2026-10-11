@@ -18,6 +18,7 @@
     <img src="/mark.svg" alt="" class="mark rail-mark" width="24" height="24">
     <button type="button" class="rail-item" data-view="ask"><i data-icon="message"></i><span>Ask</span><b class="rail-dot rec" id="rec-dot" title="Recording" hidden></b></button>
     <button type="button" class="rail-item" data-view="board"><i data-icon="board"></i><span>Board</span><b class="rail-dot" hidden></b></button>
+    <button type="button" class="rail-item" data-view="agent"><i data-icon="zap"></i><span>Agent</span><small class="beta">Beta</small></button>
     <button type="button" class="rail-item" data-view="machines"><i data-icon="server"></i><span>Machines</span></button>
     <button type="button" class="rail-item" data-view="health"><i data-icon="pulse"></i><span>Health</span><b class="rail-dot" hidden></b></button>
     <button type="button" class="rail-item" data-view="settings"><i data-icon="sliders"></i><span>Settings</span></button>
@@ -168,6 +169,29 @@
     <div class="board-main" id="board-main"></div>
     <aside class="task-panel" id="task-panel" aria-labelledby="task-title" hidden></aside>
     <dialog class="board-dialog" id="board-dialog" aria-label="Board"></dialog>
+  </section>
+
+  <section class="view page agent-view" id="view-agent" data-view="agent" aria-labelledby="agent-title" hidden>
+    <header class="topbar">
+      <h1 class="page-title" id="agent-title" tabindex="-1">Agent</h1>
+      <small class="beta">Beta</small>
+      <span class="page-sub" id="agent-sub"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn danger" id="agent-stop" hidden><i data-icon="stop"></i><span>Stop</span></button>
+    </header>
+    <div class="scroller">
+      <div class="page-wrap agent-wrap">
+        <div class="agent-main">
+          <div class="agent-status" id="agent-status" hidden></div>
+          <form class="agent-form" id="agent-form" aria-label="Start a run"></form>
+          <div class="agent-run" id="agent-run" aria-live="polite"></div>
+        </div>
+        <aside class="agent-side" aria-label="Earlier runs and memory">
+          <section class="agent-runs" id="agent-runs" aria-label="Earlier runs"></section>
+          <section class="agent-memory" id="agent-memory" aria-label="Memory"></section>
+        </aside>
+      </div>
+    </div>
   </section>
 
   <section class="view page machines-view" id="view-machines" data-view="machines" aria-labelledby="machines-title" hidden>

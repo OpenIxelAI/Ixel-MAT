@@ -80,6 +80,7 @@ STATIC_FILES = {
     "/sound.js": ("sound.js", "text/javascript; charset=utf-8"),
     "/video.js": ("video.js", "text/javascript; charset=utf-8"),
     "/machines.js": ("machines.js", "text/javascript; charset=utf-8"),
+    "/agent.js": ("agent.js", "text/javascript; charset=utf-8"),
     "/markdown.js": ("markdown.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/mark.svg": ("mark.svg", "image/svg+xml"),
