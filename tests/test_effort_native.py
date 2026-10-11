@@ -1,5 +1,8 @@
 """Each program is offered its provider's own effort levels for the model it runs, in the provider's own names."""
+import pytest
+
 from ixel_mat.agents.base import EFFORT_LEVELS, AgentConfig
+from ixel_mat.config import loader
 from ixel_mat.agents.oneshot import OneShotAgent
 from ixel_mat.effort import (LOW_TO_HIGH, NONE, UP_TO_MAX, UP_TO_ULTRA, UP_TO_XHIGH, agent_choices, agent_levels,
                              native_levels, program_levels, to_send, why_none)
@@ -115,3 +118,62 @@ def test_an_agents_choices_are_its_programs_native_levels_narrowed_by_its_config
     assert why_none(api) == "claude-haiku-4-5 has no effort setting, so Ixel sends none"
     mine = AgentConfig(name="x", label="X", type="oneshot", command="mine", effort_args=["--e", "{effort}"])
     assert _values(agent_choices(mine)) == ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+# -- loading and saving --
+
+def _load(**agent):
+    return loader.build_agent_configs({"agents": {"codex": {"preset": "codex", **agent}}})
+
+
+def test_a_level_the_program_takes_for_its_model_is_kept_on_load():
+    configs, warnings = _load(model="gpt-6.1-sol", effort="ultra")
+    assert configs["codex"].effort == "ultra"
+    assert not [w for w in warnings if "effort" in w]
+
+
+def test_a_level_nobody_takes_is_dropped_on_load_with_a_warning():
+    configs, warnings = _load(model="gpt-6.1-sol", effort="turbo")
+    assert configs["codex"].effort == ""
+    assert any("effort must be one of" in w for w in warnings)
+
+
+def test_a_level_on_ixels_scale_the_model_doesnt_take_is_kept_and_sent_as_the_nearest():
+    configs, _ = _load(effort="minimal")
+    cfg = configs["codex"]
+    assert cfg.effort == "minimal"
+    assert to_send(agent_levels(cfg), "minimal") == "low"
+
+
+SAVED = ('[agents.codex]\npreset = "codex"\nmodel = "gpt-6.1-sol"\n\n'
+         '[agents."claude code"]\npreset = "claude_code"\n\n'
+         '[agents.grok]\npreset = "grok_build"\n')
+
+
+@pytest.fixture
+def saved_file(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(SAVED, encoding="utf-8")
+    monkeypatch.setattr(loader, "_GLOBAL_CONFIG", path)
+    monkeypatch.setattr(loader, "find_config", lambda explicit_path=None: path)
+    return path
+
+
+def _takes(name):
+    configs, _ = loader.build_agent_configs(loader.load_config())
+    return [c["value"] for c in agent_choices(configs[name])]
+
+
+def test_ultra_saves_on_a_codex_model_that_takes_it_and_loads_back(saved_file):
+    loader.set_agent_effort(saved_file, "codex", "ultra", takes=_takes("codex"))
+    assert 'effort = "ultra"' in saved_file.read_text(encoding="utf-8")
+    configs, _ = loader.build_agent_configs(loader.load_config())
+    assert configs["codex"].effort == "ultra"
+
+
+def test_a_level_the_model_doesnt_take_isnt_saved(saved_file):
+    with pytest.raises(ValueError, match="doesn't take"):
+        loader.set_agent_effort(saved_file, "claude code", "minimal", takes=_takes("claude code"))
+    with pytest.raises(ValueError, match="doesn't take"):
+        loader.set_agent_effort(saved_file, "grok", "max", takes=_takes("grok"))
+    assert saved_file.read_text(encoding="utf-8") == SAVED

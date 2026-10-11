@@ -29,7 +29,8 @@ from ixel_mat.usage import BILLING
 from ixel_mat.config.secrets import read_text_file, write_private_file
 from ixel_mat.local_models import chat_url
 from ixel_mat.models import ALIASES, provider_for_url, valid_model_id
-from ixel_mat.presets import PRESET_FIELDS, PRESETS_BY_ID, locked_env
+from ixel_mat.effort import native_levels
+from ixel_mat.presets import PRESET_FIELDS, PRESETS_BY_ID, locked_env, preset_for
 
 # Use tomllib (3.11+) or fallback to tomli
 try:
@@ -155,7 +156,9 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
             warnings.append(f"Agent '{name}': ignoring invalid workdir {workdir!r}")
             workdir = "temp"
         effort = data.get("effort", "")
-        if effort and effort not in EFFORT_LEVELS:
+        # Ixel's scale, or a level the program takes for its model in the provider's own names (Codex's ultra)
+        if effort and not (isinstance(effort, str) and (effort in EFFORT_LEVELS or effort in {
+                c["value"] for c in native_levels(_program_of(data), _str_or_none(data.get("model")))})):
             warnings.append(f"Agent '{name}': effort must be one of {', '.join(EFFORT_LEVELS)}")
             effort = ""
         pass_env = _str_list(data, "pass_env", name, warnings)
@@ -268,6 +271,19 @@ def _with_preset(name: str, data: dict, problems: list[str]) -> dict | None:
     if "required_args" in preset:
         merged["required_args"] = preset["required_args"]  # but they still need these: they're the lockdown
     return merged
+
+
+def _program_of(data: dict) -> str:
+    """The preset id of the program an agent runs (the one it names, or the one its command is), or ""."""
+    preset = data.get("preset")
+    if isinstance(preset, str) and preset in PRESETS_BY_ID:
+        return preset
+    command = data.get("command")
+    return preset_for(command).get("id", "") if isinstance(command, str) else ""
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _args_table(value: object) -> bool:
@@ -427,7 +443,7 @@ def set_agent_model(path: Path, agent_id: str, model: str) -> None:
     _set_agent_key(path, agent_id, "model", None if model == "default" else model)
 
 
-# A program's own level outside the loader's EFFORT_LEVELS (Codex's "ultra") is saved here but dropped on load for now
+# A level is kept on load when Ixel's scale or the agent's program and model take it (effort.native_levels)
 def set_agent_effort(path: Path, agent_id: str, level: str, takes: list[str] | None = None) -> None:
     """
     Change one agent's effort (thinking level) in the config file, leaving
