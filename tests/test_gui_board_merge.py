@@ -109,8 +109,8 @@ def test_a_merge_refusal_keeps_handoffs_words(project, fake):
 
 def test_board_js_shows_the_cost_chip_and_the_header_total():
     board = (STATIC / "board.js").read_text(encoding="utf-8")
-    for text in ("cost-chip", "Spent: ", ".usage", "models",
-                 "On a subscription this counts toward your plan's limits, not your bill"):
+    for text in ("cost-chip", "Spent about ", ".usage", "models", ".spent",
+                 "On a subscription it counts toward your plan's limits instead"):
         assert text in board, text
 
 

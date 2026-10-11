@@ -41,7 +41,8 @@ const WORKER_MODELS = {
     one: "gpt-5.5", chain: [] },
 };
 const MAX_MODELS = 4;  // a planner and up to three models for its steps (Handoff's approvals.MAX_MODELS)
-const EFFORT_WORDS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" };
+const EFFORT_WORDS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max",
+  ultra: "Ultra" };
 function modelName(id) {
   const found = CLAUDE_MODELS.find(([m]) => m === id);
   return found ? found[1] : id;
@@ -49,23 +50,19 @@ function modelName(id) {
 function dollars(n) {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
 }
-// What a cost shows as on a card or in the header: $0.25, and under a cent, <$0.01
+const PRICE_NOTE = "estimated at API prices. On a subscription it counts toward your plan's limits instead.";
+// What a cost shows as on a card or at the top of the Board: $0.25, and under a cent, <$0.01
 function money(cost) {
   return cost > 0 && cost < 0.01 ? "<$0.01" : `$${cost.toFixed(2)}`;
 }
-// Each model's short name ("Opus", not "Opus 5.5") and cost in dollars, biggest first; [] without usage
+// Each model's short name ("Opus", not "Opus 5.5") and what it cost, dearest first; none without usage
 function usageParts(usage) {
   if (!usage || !usage.models) return [];
   return Object.entries(usage.models)
     .map(([id, u]) => [modelName(id).split(" ")[0], u && typeof u.cost === "number" ? u.cost : 0])
-    .sort((a, b) => b[1] - a[1]);
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, cost]) => `${name} ${money(cost)}`);
 }
-// The cost of a task's or the board's usage, at API prices; null when there's no usage to show
-function usageTotal(usage) {
-  if (!usage || !usage.models || !Object.keys(usage.models).length) return null;
-  return usageParts(usage).reduce((sum, [, cost]) => sum + cost, 0);
-}
-const SPENT_TITLE = "At API prices. On a subscription this counts toward your plan's limits, not your bill";
 
 // What an agent does on a run of `kind`, of a pull request when `of` says which (Handoff's run.of, targets)
 function kindHint(kind, of) {
@@ -314,11 +311,12 @@ function render() {
   const name = board && board.exists ? board.project.split(/[\\/]/).filter(Boolean).pop() || board.project : "";
   $("#board-where").textContent = name;
   $("#board-where").title = board ? board.project : "";
-  const spent = usageTotal(board && board.usage);  // nothing shown for an older Handoff, or a project with no runs
-  $("#board-spent").hidden = spent === null;
-  $("#board-spent").title = spent === null ? "" : SPENT_TITLE;
-  $("#board-spent").textContent = spent === null ? "" :
-    [`Spent: ${money(spent)}`, ...usageParts(board.usage).map(([name, cost]) => `${name} ${money(cost)}`)].join(" · ");
+  // What every run on the board cost, from a Handoff that says (its `spent`)
+  const spent = board && board.exists && typeof board.spent === "number" ? board.spent : 0;
+  $("#board-spent").hidden = !(spent > 0);
+  $("#board-spent").replaceChildren(...(spent > 0 ? [el("span", {}, `Spent about ${money(spent)}`),
+    ...usageParts(board.usage).map((part) => el("span", { class: "spent-part" }, ` · ${part}`))] : []));
+  $("#board-spent").title = spent > 0 ? `What this board's runs cost, ${PRICE_NOTE}` : "";
   $("#board-new").disabled = !hello || !hello.ok;  // before there's a board, it says what's needed first
   $("#board-project").hidden = !hello || !hello.ok;
 
@@ -492,8 +490,8 @@ function card(t) {
       el("span", { class: `who${t.assignee === "human" ? " you" : ""}` }, who(t.assignee)),
       t.overlaps ? el("span", { class: "overlap", title: "Its files overlap another task's" }, icon("alert"),
         String(t.overlaps)) : null,
-      usageTotal(t.usage) === null ? null : el("span", { class: "cost-chip",
-        title: usageParts(t.usage).map(([name, cost]) => `${name} ${money(cost)}`).join("\n") }, money(usageTotal(t.usage))),
+      typeof t.cost === "number" && t.cost > 0 ? el("span", { class: "cost-chip",
+        title: [...usageParts(t.usage), `What its runs cost, ${PRICE_NOTE}`].join("\n") }, money(t.cost)) : null,
       t.last_event ? el("span", { class: "when", title: t.last_event.at },
         `${who(t.last_event.actor)} ${t.last_event.summary} · ${ago(t.last_event.at)}`) : null));
   button.addEventListener("click", () => openPanel(t.ref));
@@ -1196,10 +1194,10 @@ function runPicker(asked, agent, worker) {
   const row = el("div", { class: "model-row" }, el("label", { for: "needs-run-mode" }, "Which model?"), mode, rows, hint,
     el("datalist", { id: listId }, names.suggest.map(([id, name]) => el("option", { value: id }, name))));
   const args = () => {
-    const rowsPicked = state.rows.map((r) => ({ model: (r.model || "").trim().toLowerCase(), effort: r.effort }));
-    if (state.mode === "own") return rowsPicked[0].effort ? { efforts: { "": rowsPicked[0].effort } } : {};
+    const typed = state.rows.map((r) => ({ model: (r.model || "").trim().toLowerCase(), effort: r.effort }));
+    if (state.mode === "own") return typed[0].effort ? { efforts: { "": typed[0].effort } } : {};
     // A blank row, or a model named twice, would only come back refused: leave them out
-    const picked = rowsPicked.filter((r, i) => r.model && rowsPicked.findIndex((o) => o.model === r.model) === i);
+    const picked = typed.filter((r, i) => r.model && typed.findIndex((o) => o.model === r.model) === i);
     const models = picked.map((r) => r.model);
     const efforts = Object.fromEntries(picked.filter((r) => r.effort && r.model).map((r) => [r.model, r.effort]));
     return { models, ...(Object.keys(efforts).length ? { efforts } : {}) };

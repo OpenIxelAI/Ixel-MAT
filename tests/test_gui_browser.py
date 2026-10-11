@@ -642,6 +642,8 @@ class FakeBoard:
         self.actions = []
         self.refuse = {}   # op → the error Handoff gives for it
         self.slow = 0.0    # seconds each action takes, as a real `handoff api` start does
+        self.spent = None  # what every run on the board cost, from a Handoff that says
+        self.usage = None  # and model by model
         self.tasks = {
             "T-1": self.task(1, "Pick the launch date " + HOSTILE, "open", "human"),
             "T-2": self.task(2, "Write release notes", "in_progress", "claude",
@@ -695,7 +697,8 @@ class FakeBoard:
             if query.get("since") == str(self.revision):
                 return reply({"unchanged": True, "revision": query["since"]})
             return reply({"exists": True, "revision": str(self.revision), "project": "/repos/shop", "counts": {},
-                          "tasks": list(self.tasks.values())})
+                          "tasks": list(self.tasks.values()), **({} if self.spent is None else {"spent": self.spent}),
+                          **({} if self.usage is None else {"usage": self.usage})})
         if url.path == "/api/board/task":
             return reply(self.detail(query["task"]))
         if url.path == "/api/board/levels":  # (codex hands the level to OpenAI: older models take fewer)
@@ -774,6 +777,7 @@ def test_board_shows_who_has_what_and_its_text_stays_text(gui_url, browser):
                        "Blocked": ["T-5"], "Done": ["T-4"]}
     assert "claude is on it" in page.inner_text(".task-card[data-ref=T-2]")
     assert page.inner_text("#board-where") == "shop"
+    assert page.is_hidden("#board-spent")  # a Handoff that doesn't say what its runs cost
     assert page.is_hidden("#board-prs")  # a project not hosted anywhere has no pull requests to show
 
     page.click(".task-card[data-ref=T-1]")
@@ -877,9 +881,22 @@ def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_
             data["task"]["cost"] = 0.663
         return data
     fake.detail = detail
+    fake.tasks["T-6"]["cost"] = 0.663
+    fake.tasks["T-6"]["usage"] = {"models": {"claude-fable-5-1": {"cost": 0.66}, "claude-haiku-5-5": {"cost": 0.003}}}
+    fake.spent = 1.25
+    fake.usage = {"models": {"claude-haiku-5-5": {"cost": 0.003}, "claude-opus-5-5": {"cost": 0.587},
+                             "claude-fable-5-1": {"cost": 0.66}}}
     page, errors, _ = open_board(browser, fake)
     page.goto(gui_url + "")
     page.click(".rail-item[data-view=board]")
+
+    # What each task's runs cost, on its card, and what the whole board's did, at the top
+    page.wait_for_selector(".task-card[data-ref=T-6] .cost-chip")
+    assert page.inner_text(".task-card[data-ref=T-6] .cost-chip") == "$0.66"
+    assert page.get_attribute(".task-card[data-ref=T-6] .cost-chip", "title").startswith("Fable $0.66\nHaiku <$0.01\n")
+    assert page.locator(".task-card[data-ref=T-7] .cost-chip").count() == 0
+    assert page.is_visible("#board-spent")  # with which models it went to, dearest first
+    assert page.inner_text("#board-spent") == "Spent about $1.25 · Fable $0.66 · Opus $0.59 · Haiku <$0.01"
     page.click(".task-card[data-ref=T-6]")
 
     # What it used, model by model, with the total
@@ -906,6 +923,7 @@ def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_
     shots = os.environ.get("IXEL_SCREENSHOT_DIR")
     if shots:
         page.screenshot(path=os.path.join(shots, "board-model-effort.png"))
+    page.click("[data-key=needs-add-model]")  # and left blank: it isn't sent
     page.click(".needs button[type=submit]")
     wait_until(page, "!document.querySelector('.needs')")
     approve = [args for op, args in fake.actions if op == "approve"][-1]
