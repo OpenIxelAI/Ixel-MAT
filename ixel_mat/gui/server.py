@@ -730,12 +730,13 @@ class GuiServer:
         """The effort levels a model takes through a worker that hands them straight to its company (Codex to
         OpenAI), so the Board offers only those; null for a worker whose own levels are the ones (Claude Code)."""
         from ixel_mat import effort
-        passes_on = effort.PASSES_ON.get(request.query.get("agent", ""))
-        if passes_on is None:
-            return web.json_response({"levels": None})
-        company, default = passes_on
-        model = request.query.get("model", "").strip()[:100] or default
-        return web.json_response({"levels": list(effort.model_levels(company, model))})
+        # The program each Handoff worker runs, whose own levels for a model are Ixel's (effort.program_levels):
+        # Codex's per model (gpt-6 sol takes ultra, gpt-5.5 stops at xhigh), Claude Code's (Haiku takes none)
+        program = {"codex": "codex", "claude": "claude_code"}.get(request.query.get("agent", ""))
+        model = request.query.get("model", "").strip()[:100] or None
+        if program is None or (program == "claude_code" and model is None):
+            return web.json_response({"levels": None})  # the worker's own list stands
+        return web.json_response({"levels": list(effort.program_levels(program, model))})
 
     async def _board_projects(self, request: web.Request) -> web.Response:
         """Git repositories on this computer, for the Board to offer before a project is picked."""

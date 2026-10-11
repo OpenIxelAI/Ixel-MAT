@@ -1028,6 +1028,7 @@ details.original > summary:hover { color: var(--text-2); }
   overflow-wrap: anywhere;
 }
 .board-notice.error { border-color: var(--red-line); background: var(--red-wash); }
+.board-notice .notice-lines { white-space: pre-wrap; }  /* a refusal's words, line breaks and all (a conflict list) */
 .board-notice .icon { flex: none; margin-top: 2px; color: var(--red); }
 .board-notice:not(.error) .icon { color: var(--amber); }
 .task-panel .board-notice { margin: 0 0 14px; }
@@ -1094,7 +1095,10 @@ details.original > summary:hover { color: var(--text-2); }
 .who.you { color: var(--accent); }
 .overlap { display: inline-flex; align-items: center; gap: 3px; color: var(--amber); }
 .overlap .icon { width: 12px; height: 12px; }
-.cost-chip { font-variant-numeric: tabular-nums; color: var(--text-2); }
+.cost-chip {
+  padding: 0 7px; border-radius: 999px; border: 1px solid var(--line-strong);
+  font-size: 11px; font-weight: 500; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
 .board-spent {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; padding: 0 8px; border: 1px solid var(--line-strong);
   border-radius: 999px; font-size: 12px; line-height: 20px; color: var(--text-2); white-space: nowrap;
