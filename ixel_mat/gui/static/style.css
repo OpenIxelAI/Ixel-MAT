@@ -1027,6 +1027,7 @@ details.original > summary:hover { color: var(--text-2); }
   overflow-wrap: anywhere;
 }
 .board-notice.error { border-color: var(--red-line); background: var(--red-wash); }
+.board-notice .notice-lines { white-space: pre-wrap; }  /* a refusal's words, line breaks and all (a conflict list) */
 .board-notice .icon { flex: none; margin-top: 2px; color: var(--red); }
 .board-notice:not(.error) .icon { color: var(--amber); }
 .task-panel .board-notice { margin: 0 0 14px; }

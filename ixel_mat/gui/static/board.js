@@ -91,6 +91,7 @@ let needs = null;      // an action that needs typing or picking first: { action
 let stale = false;     // the task changed while the person was typing: read it again after
 let busy = false;      // an action is under way
 let actionFailure = "";
+let actionNote = "";   // what a finished action says it did (a merge): kept until the next action or task
 let agents = null;     // { project, promise } of the agents a task can go to
 let pictures = new Map();  // name → { url } for the task in the panel, or { text }
 let shownRef = "";         // the task the panel's scroll position belongs to
@@ -835,6 +836,7 @@ async function openPanel(ref) {
   detail = null;
   taskFailure = "";
   actionFailure = "";
+  actionNote = "";
   needs = null;
   render();
   renderPanel();
@@ -941,7 +943,8 @@ function taskView(data) {
   }
   nodes.push(actionBar(data));
   if (needs && needs.ref === t.ref) nodes.push(needsForm(needs, t));
-  if (actionFailure) nodes.push(el("div", { class: "board-notice error", role: "alert" }, icon("alert"), el("span", {}, actionFailure)));
+  if (actionFailure) nodes.push(el("div", { class: "board-notice error", role: "alert" }, icon("alert"), el("span", { class: "notice-lines" }, actionFailure)));
+  if (actionNote) nodes.push(el("div", { class: "board-notice", role: "status" }, el("span", {}, actionNote)));
   if (t.body) nodes.push(section("Details", el("div", { class: "task-body" }, t.body)));
   if (t.acceptance && t.acceptance.length) {
     nodes.push(section("Done when", el("ul", { class: "acceptance" }, t.acceptance.map((a) => el("li", {}, a)))));
@@ -1071,6 +1074,7 @@ function actionBar(data) {
 function pick(a, t) {
   if (busy) return;
   actionFailure = "";
+  actionNote = "";
   if (a.needs) {
     needs = { action: a, ref: t.ref, draft: undefined };
     renderPanel();
@@ -1250,6 +1254,9 @@ function confirmWords(a, t, args) {
   if (a.op === "delete") {
     return { title: `Delete ${t.ref}?`, text: "Its history and results go too. This can't be undone.", yes: "Delete" };
   }
+  if (a.op === "merge") {
+    return { title: `Merge ${t.ref}?`, text: "Its branch merges into the checked-out branch here. Nothing is pushed.", yes: a.label };
+  }
   if (isDanger(a)) return { title: `Cancel ${t.ref}?`, text: "It moves to Done as cancelled. You can reopen it later.", yes: "Cancel the task" };
   return { title: `${a.label}?`, text: t.title, yes: a.label };
 }
@@ -1266,6 +1273,7 @@ async function act(a, t, args) {
   if (busy) return;  // one at a time: a double click mustn't send it twice
   busy = true;
   actionFailure = "";
+  actionNote = "";
   renderPanel();
   const where = board.project;
   // An approval seals the task as the panel shows it: if an agent changed it since, Handoff refuses
@@ -1277,6 +1285,8 @@ async function act(a, t, args) {
     // As a rule nothing's left; when something is (the agent's worktree and branch), Handoff says what, and how
     // to remove it
     if (a.op === "delete") deleteLeft = Array.isArray(reply && reply.left) ? reply.left.join(" ") : "";
+    // A merge only ever lands on this machine: the branch goes into the checked-out one, nothing is pushed
+    if (a.op === "merge") actionNote = "Merged into the checked-out branch. Nothing was pushed.";
     // "Run it now" approves the run, then starts it (as `handoff run T-N` would). Once approved, the
     // form is done with even if the start fails: the panel then offers Run it now on its own.
     if (a.op === "approve") {
