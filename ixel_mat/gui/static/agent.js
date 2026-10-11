@@ -7,9 +7,6 @@ import { $, el, icon, api, getJSON, postJSON, plural, copyButton, PRIVATE_TYPING
 import { renderMarkdown } from "./markdown.js";
 
 const POLL_EVERY = 1000;  // a live run is read this often while the page is on screen
-const RUN_KEY = "ixel.agent.run";
-const WORKSPACE_KEY = "ixel.agent.workspace";
-const MODEL_KEY = "ixel.agent.model";
 const ARGS_SHOWN = 80;  // characters of an action's args in a step's one-line summary
 
 const STATUS_WORDS = {
@@ -27,7 +24,8 @@ let models = null;     // GET /api/agent/models
 let runs = null;       // GET /api/agent/runs
 let files = null;      // GET /api/agent/files
 let run = null;        // the run on screen: GET /api/agent/run
-let runId = remembered(RUN_KEY);
+let runId = "";        // the run on screen; the page keeps nothing in browser storage, so a reload finds it in the run list
+let prefilled = false; // the form has been filled from the newest earlier run once
 let shownSig = "";     // the run as last drawn: a poll that changed nothing redraws nothing
 let polling = null;
 let reading = false;   // a poll is still waiting for its reply
@@ -57,14 +55,6 @@ export function hidden() {
 }
 
 // ── Small pieces ──────────────────────────────────────────────────────────
-
-function remembered(key) {
-  try { return localStorage.getItem(key) || ""; } catch (e) { return ""; }
-}
-
-function remember(key, value) {
-  try { localStorage.setItem(key, value); } catch (e) { /* storage is off */ }
-}
 
 const isLive = () => Boolean(run && LIVE.has(run.status));
 
@@ -128,10 +118,8 @@ function money(cost) {
 
 function buildForm() {
   modelPick = el("select", { id: "agent-model" }, el("option", { value: "" }, "Loading the models…"));
-  modelPick.addEventListener("change", () => remember(MODEL_KEY, modelPick.value));
   workspaceBox = el("input", { type: "text", id: "agent-workspace", class: "mono", ...PRIVATE_TYPING,
     placeholder: "A folder in your home folder, like ~/code/shop" });
-  workspaceBox.value = remembered(WORKSPACE_KEY);
   goalBox = el("textarea", { id: "agent-goal", rows: "3", ...PRIVATE_TYPING,
     placeholder: "What should it do? It reads on its own and asks before it changes anything." });
   goalBox.addEventListener("keydown", (e) => {
@@ -159,15 +147,36 @@ async function loadModels() {
     modelPick.replaceChildren(el("option", { value: "" }, "No models"));
     return;
   }
-  const wanted = remembered(MODEL_KEY);
   const ready = models.filter((m) => m.ready);
-  const pick = ready.find((m) => m.name === wanted) || ready[0];
+  const pick = ready[0];
   modelPick.replaceChildren(...models.map((m) => el("option", { value: m.name, disabled: !m.ready },
     m.ready ? (m.label || m.name) : `${m.label || m.name} (not set up)`)));
   if (!models.length) modelPick.replaceChildren(el("option", { value: "" }, "No models: set one up in Settings"));
   else if (!ready.length) modelPick.prepend(el("option", { value: "" }, "No model is ready: set one up in Settings"));
   modelPick.value = pick ? pick.name : "";
   updateButtons();
+  prefill();
+}
+
+// Once the models and the run list are both in, fill the form from the newest earlier run and
+// reopen a run that is still going. Only the first time, so it never overwrites what you type.
+function prefill() {
+  if (prefilled || !models || !runs) return;
+  prefilled = true;
+  if (!runs.length) return;
+  const newest = runs.reduce((a, b) => (startedMs(b) > startedMs(a) ? b : a));
+  if (!workspaceBox.value.trim() && newest.workspace) workspaceBox.value = newest.workspace;
+  const same = models.find((m) => m.ready && m.name === newest.model);
+  if (same) modelPick.value = same.name;
+  updateButtons();
+  const live = runs.find((r) => LIVE.has(r.status));
+  if (live && !runId) show(live.id);
+}
+
+// When a run started, in milliseconds (the server sends seconds or milliseconds)
+function startedMs(r) {
+  const s = Number(r.started) || 0;
+  return s && s < 1e12 ? s * 1000 : s;
 }
 
 async function startRun() {
@@ -182,8 +191,6 @@ async function startRun() {
   try {
     const reply = await postJSON("/api/agent/start", { model, workspace, goal });
     setStatus("");
-    remember(WORKSPACE_KEY, workspace);
-    remember(MODEL_KEY, model);
     show(reply.id);
   } catch (e) {
     setStatus(`Couldn't start the run: ${e.message}`);
@@ -204,7 +211,6 @@ function updateButtons() {
 async function show(id) {
   stopPolling();
   runId = id;
-  remember(RUN_KEY, id);
   run = null;
   shownSig = "";
   openSteps.clear();
@@ -222,7 +228,6 @@ async function refresh() {
     if (e.status === 404) {
       run = null;
       runId = "";
-      remember(RUN_KEY, "");
     } else {
       setStatus(`Couldn't read the run: ${e.message}`);
     }
@@ -398,6 +403,7 @@ async function loadRuns() {
     setStatus(`Couldn't list the earlier runs: ${e.message}`);
   }
   renderRuns();
+  prefill();
 }
 
 function renderRuns() {
