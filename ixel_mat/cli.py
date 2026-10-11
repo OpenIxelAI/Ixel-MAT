@@ -304,44 +304,16 @@ def _model_now(cfg, models: list[str], provider: str | None) -> str:
     return cfg.model or "— (set one)"
 
 
-EFFORT_LABELS = {"minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high",
-                 "max": "Max", "ultra": "Ultra", "none": "None"}
-
-
-def _effort_in_name(model: str) -> bool:
-    """Antigravity's gemini-3.8-flash-high: a model id that carries its own effort."""
-    return (model or "").endswith(("-low", "-medium", "-high", "-xhigh", "-max"))
-
-
 def _effort_choices(cfg) -> list[dict]:
     """The levels an agent takes, lowest first, in its provider's own names: [{"value", "label"}, …]; [] for none."""
     from ixel_mat import effort as effort_mod
-    from ixel_mat.presets import preset_for
-
-    if cfg.type == "oneshot":
-        program = preset_for(cfg.command).get("id", "")
-        native = getattr(effort_mod, "native_levels", None)  # each program's own names, where Ixel knows them
-        if native is not None and program:
-            return list(native(program, cfg.model or None))
-        if program == "antigravity" and _effort_in_name(cfg.model):
-            return []
-    return [{"value": v, "label": EFFORT_LABELS.get(v, v)} for v in effort_mod.agent_levels(cfg)]
+    return effort_mod.agent_choices(cfg)
 
 
 def _no_effort_reason(cfg) -> str:
     """Why an agent has no effort levels to pick from."""
-    from ixel_mat.presets import preset_for
-
-    program = preset_for(cfg.command).get("id", "") if cfg.type == "oneshot" else ""
-    if program == "gemini_cli":
-        return "Gemini CLI takes no effort flag: set thinking in Gemini's own settings.json"
-    if program == "opencode":
-        return "OpenCode's effort is the #variant in the model name: ixel model <agent> provider/model#variant"
-    if program == "antigravity" and _effort_in_name(cfg.model):
-        return "the model name carries its own effort"
-    if cfg.type == "http":
-        return f"{cfg.model or cfg.label} has no effort setting, so Ixel sends none"
-    return f"{cfg.label} doesn't take an effort level from Ixel"
+    from ixel_mat import effort as effort_mod
+    return effort_mod.why_none(cfg)
 
 
 def cmd_effort(argv: list[str] | None = None) -> int:
