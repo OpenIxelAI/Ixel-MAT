@@ -84,6 +84,31 @@ Under `~/.config/ixel-mat/agent/` (Windows: the same folder Ixel's config uses):
 - Tests in new files `tests/test_agent_*.py`, including the attacks: a file that tells the agent to read
   `~/.ssh`, path traversal, symlink escapes, a secret file, a command that reaches the network.
 
+## The app's API (the contract between the runner, the server and agent.js)
+
+All JSON, behind the app's session token like every other route.
+
+- `GET /api/agent/models` → `{"models": [{"name", "label", "ready"}]}`: Ixel's configured models.
+- `POST /api/agent/start` `{"model", "workspace", "goal", "max_steps"?}` → `{"id"}`. The workspace must be
+  an existing folder inside the home folder, and not the home folder itself.
+- `GET /api/agent/run?id=…` → the run:
+  ```json
+  {"id": "…", "status": "running|waiting|done|stopped|failed", "goal": "…", "model": "…",
+   "workspace": "…", "started": 0, "answer": "…", "error": "…",
+   "steps": [{"n": 1, "thought": "…", "action": "read_file", "args": {}, "ok": true, "result": "…",
+              "usage": {}}],
+   "pending": {"n": 4, "action": "edit_file", "args": {}, "diff": "…", "argv": [], "sandboxed": true},
+   "usage": {"calls": 3, "cost": 0.0}}
+  ```
+  `pending` is null unless `status` is `waiting`; `diff` is set for writes, `argv` and `sandboxed` for
+  commands. Results in `steps` are clipped to 4 KB for the page (the model sees more).
+- `POST /api/agent/decide` `{"id", "approve": true|false, "always": false}` → the run. `always` adds the
+  command's argv to the allowlist (refused for shells and interpreters).
+- `POST /api/agent/stop` `{"id"}` → the run, `stopped`.
+- `GET /api/agent/runs` → `{"runs": [{"id", "goal", "status", "started"}]}`, newest first, at most 50.
+- `GET /api/agent/files` → `{"soul", "user", "memory", "skills": [{"name", "description"}]}`.
+- `PUT /api/agent/files` `{"name": "soul|user|memory", "text"}` → the same as GET.
+
 ## Usage
 
 Each model call is recorded the way `ixel ask` records one (`call_usage`), and the run shows the total.
