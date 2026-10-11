@@ -706,8 +706,9 @@ class FakeBoard:
             time.sleep(self.slow_levels)
             if query.get("agent") != "codex":
                 return reply({"levels": None})
-            return reply({"levels": ["low", "medium", "high"] if query.get("model") == "gpt-5.1"
-                          else ["low", "medium", "high", "xhigh"]})
+            return reply({"levels": {"gpt-5.1": ["low", "medium", "high"],
+                                     "gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"]}.get(
+                query.get("model"), ["low", "medium", "high", "xhigh"])})
         if url.path == "/api/board/agents":
             return reply({"agents": [{"name": "claude"}, {"name": "codex"}, {"name": "grok", "label": "Grok"}],
                           "problems": []})
@@ -861,7 +862,7 @@ def test_board_actions_ask_first_and_go_to_handoff(gui_url, browser):
 
 
 WORKERS = {"claude": {"efforts": ["low", "medium", "high", "xhigh", "max"], "chain": True},
-                  "codex": {"efforts": ["minimal", "low", "medium", "high", "xhigh"], "chain": False}}
+                  "codex": {"efforts": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"], "chain": False}}
 
 
 def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_used(gui_url, browser):
@@ -960,6 +961,22 @@ def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_
     wait_until(page, "!document.querySelector('.needs')")
     approve = [args for op, args in fake.actions if op == "approve"][-1]
     assert approve["models"] == ["gpt-5.1"] and approve["efforts"] == {"gpt-5.1": "high"}
+
+    # A GPT-6 model goes past Extra high: Handoff's Codex worker takes Max and Ultra, and the menu offers them
+    fake.tasks["T-7"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-7]")
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "one")
+    page.fill("[data-key=needs-model-0]", "gpt-6-astra")
+    page.press("[data-key=needs-model-0]", "Tab")
+    wait_until(page, "document.querySelectorAll('[data-key=needs-effort-0] option').length === 7")
+    assert page.locator("[data-key=needs-effort-0] option").all_inner_texts()[-2:] == ["Max effort", "Ultra effort"]
+    page.select_option("[data-key=needs-effort-0]", "ultra")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["models"] == ["gpt-6-astra"] and approve["efforts"] == {"gpt-6-astra": "ultra"}
 
     # A model typed just before pressing the button: the level picked for the one before it, which this one doesn't
     # take, isn't sent with it
