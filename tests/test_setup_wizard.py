@@ -116,9 +116,13 @@ def test_cli_presets_are_answer_only_and_never_bypass_safety():
     assert "--standalone" not in opencode["args_by_version"]["1"]
     grok = next(p for p in wizard.CLI_PRESETS if p["id"] == "grok_build")
     taken = set(grok["args"][grok["args"].index("--disallowed-tools") + 1].split(","))
-    assert {"run_terminal_cmd", "read_file", "write", "search_replace", "web_fetch", "Agent", "use_tool"} <= taken
+    assert {"run_terminal_cmd", "run_terminal_command", "read_file", "write", "search_replace", "web_fetch", "Agent",
+            "use_tool"} <= taken
     denied = {grok["args"][i + 1] for i, a in enumerate(grok["args"]) if a == "--deny"}
     assert {"Bash", "Read", "Write", "Edit", "MCPTool"} <= denied and "--verbatim" in grok["args"]
+    # A denied tool fails at once instead of the run waiting forever for a permission nobody gives
+    assert grok["args"][grok["args"].index("--permission-mode") + 1] == "dontAsk"
+    assert "bypassPermissions" not in grok["args"]
     assert grok["env"]["GROK_TELEMETRY_ENABLED"] == "0" and grok["env"]["GROK_CLAUDE_MCPS_ENABLED"] == "0"
     assert "XAI_API_KEY" in grok["drop_env"] and "GROK_CODE_XAI_API_KEY" in grok["drop_env"]  # your login, not a key
     # A prompt is never a positional argument that a CLI could parse as a flag

@@ -560,6 +560,15 @@ def test_a_copilot_too_old_for_ixels_settings_is_said_plainly(monkeypatch, optio
     assert str(failure.value) == presets.COPILOT_TOO_OLD and len(str(failure.value)) <= 160
 
 
+def test_grok_build_has_no_terminal_tool_by_either_name_and_never_waits_for_permission():
+    # Grok Build 1.0.50 renamed its terminal tool, and only the old name was taken away: a review's 'git diff' was
+    # denied and the headless run waited for a permission for the full 300 s
+    from ixel_mat.presets import GROK_TOOLS, PRESETS_BY_ID
+    args = PRESETS_BY_ID["grok_build"]["args"]
+    assert {"run_terminal_cmd", "run_terminal_command"} <= set(GROK_TOOLS)
+    assert args[args.index("--permission-mode") + 1] == "dontAsk" and "bypassPermissions" not in args
+
+
 def test_questions_reach_the_subscription_clis_on_stdin_not_on_their_command_line():
     # Another person on this computer can read any program's command line (`ps`). Grok Build doesn't read stdin:
     # its question goes in a file only you can read

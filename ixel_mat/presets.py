@@ -29,11 +29,16 @@ _OPENCODE_LOCKDOWN = json.dumps({
 PANEL_MEMBER = ("You're answering as one member of a panel of AI models. Answer the question directly and "
                 "completely, whatever its topic, without remarking on whether it relates to coding.")
 
-# Grok Build's tools by their own names (1.0.46), all taken away, and the kinds of tool its --deny rules stop
-GROK_TOOLS = ("run_terminal_cmd", "Agent", "read_file", "search_replace", "list_dir", "grep", "todo_write", "monitor",
-              "search_tool", "use_tool", "workflow", "enter_plan_mode", "exit_plan_mode", "ask_user_question",
-              "send_feedback", "image_gen", "image_edit", "image_to_video", "reference_to_video", "write",
-              "web_search", "web_fetch", "kill_command_or_subagent", "get_command_or_subagent_output",
+# Otherwise Grok Build reaches for a tool on a review (git diff), is denied, and waits for permission it never gets
+GROK_RULES = (PANEL_MEMBER + " Everything you need, the code, diff or documents, is in the question itself. You "
+              "have no tools: don't try to run commands, read files or search; answer from what you were given.")
+
+# Grok Build's tools by their own names (1.0.46 and 1.0.50), all taken away, and the kinds of tool its --deny rules
+# stop. 1.0.50 renamed run_terminal_cmd to run_terminal_command; both are kept, for either version.
+GROK_TOOLS = ("run_terminal_cmd", "run_terminal_command", "Agent", "read_file", "search_replace", "list_dir", "grep",
+              "todo_write", "monitor", "search_tool", "use_tool", "workflow", "enter_plan_mode", "exit_plan_mode",
+              "ask_user_question", "send_feedback", "image_gen", "image_edit", "image_to_video", "reference_to_video",
+              "write", "web_search", "web_fetch", "kill_command_or_subagent", "get_command_or_subagent_output",
               "spawn_subagent", "scheduler_create", "scheduler_delete", "scheduler_list")
 GROK_DENY = ("Bash", "Edit", "Write", "Read", "Grep", "WebFetch", "MCPTool")
 
@@ -163,10 +168,13 @@ CLI_PRESETS = [
         # as one of Grok Build's /commands (/compact, /clear). --rules adds to Grok Build's own instructions.
         # Ixel also runs it with a home of its own for each question (agents/leftovers.py): your config, MCP
         # servers, hooks, plugins, memory and sessions stay out of it, and what the run keeps goes with it.
+        # --permission-mode dontAsk (never bypassPermissions): a tool call a rule denies, or a tool left in place
+        # by a name Ixel doesn't know yet, fails at once instead of the run waiting forever for an answer nobody
+        # gives, as reviews did with 1.0.50, which renamed its terminal tool.
         "args": ["--output-format", "streaming-messages-json", "--include-partial-messages", "--verbatim",
-                 "--no-auto-update", "--no-subagents", "--disable-web-search",
+                 "--no-auto-update", "--no-subagents", "--disable-web-search", "--permission-mode", "dontAsk",
                  "--disallowed-tools", ",".join(GROK_TOOLS), *[a for kind in GROK_DENY for a in ("--deny", kind)],
-                 "--rules", PANEL_MEMBER],
+                 "--rules", GROK_RULES],
         # Grok Build doesn't read stdin: the question goes in a private file of its own, out of `ps`. Its stream
         # is Claude Code's, so the answer shows as it's written
         "prompt_via": "file", "timeout": 300, "stdout_format": "claude-stream-json",
