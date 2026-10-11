@@ -51,6 +51,18 @@ function dollars(n) {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
 }
 const PRICE_NOTE = "estimated at API prices. On a subscription it counts toward your plan's limits instead.";
+// What a cost shows as on a card or at the top of the Board: $0.25, and under a cent, <$0.01
+function money(cost) {
+  return cost > 0 && cost < 0.01 ? "<$0.01" : `$${cost.toFixed(2)}`;
+}
+// Each model's short name ("Opus", not "Opus 5.5") and what it cost, dearest first; none without usage
+function usageParts(usage) {
+  if (!usage || !usage.models) return [];
+  return Object.entries(usage.models)
+    .map(([id, u]) => [modelName(id).split(" ")[0], u && typeof u.cost === "number" ? u.cost : 0])
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, cost]) => `${name} ${money(cost)}`);
+}
 
 // What an agent does on a run of `kind`, of a pull request when `of` says which (Handoff's run.of, targets)
 function kindHint(kind, of) {
@@ -301,7 +313,8 @@ function render() {
   // What every run on the board cost, from a Handoff that says (its `spent`)
   const spent = board && board.exists && typeof board.spent === "number" ? board.spent : 0;
   $("#board-spent").hidden = !(spent > 0);
-  $("#board-spent").textContent = spent > 0 ? `Spent about ${dollars(spent)}` : "";
+  $("#board-spent").replaceChildren(...(spent > 0 ? [el("span", {}, `Spent about ${money(spent)}`),
+    ...usageParts(board.usage).map((part) => el("span", { class: "spent-part" }, ` · ${part}`))] : []));
   $("#board-spent").title = spent > 0 ? `What this board's runs cost, ${PRICE_NOTE}` : "";
   $("#board-new").disabled = !hello || !hello.ok;  // before there's a board, it says what's needed first
   $("#board-project").hidden = !hello || !hello.ok;
@@ -476,8 +489,8 @@ function card(t) {
       el("span", { class: `who${t.assignee === "human" ? " you" : ""}` }, who(t.assignee)),
       t.overlaps ? el("span", { class: "overlap", title: "Its files overlap another task's" }, icon("alert"),
         String(t.overlaps)) : null,
-      typeof t.cost === "number" && t.cost > 0
-        ? el("span", { class: "cost", title: `What its runs cost, ${PRICE_NOTE}` }, dollars(t.cost)) : null,
+      typeof t.cost === "number" && t.cost > 0 ? el("span", { class: "cost-chip",
+        title: [...usageParts(t.usage), `What its runs cost, ${PRICE_NOTE}`].join("\n") }, money(t.cost)) : null,
       t.last_event ? el("span", { class: "when", title: t.last_event.at },
         `${who(t.last_event.actor)} ${t.last_event.summary} · ${ago(t.last_event.at)}`) : null));
   button.addEventListener("click", () => openPanel(t.ref));
