@@ -270,6 +270,37 @@ its flags, so when a preset is tightened, updating Ixel is enough to get the cha
 protections. An agent's own `env` adds to the preset's, and can't replace OpenCode's locked-down agent or
 its catalog setting.
 
+### Agent (beta)
+
+The Agent page lets one model work in a folder you pick. **The model never gets a shell or a file
+handle.** It asks for one action at a time, Ixel does the action itself, and anything that changes
+your computer waits for you.
+
+- **One action at a time.** The model answers with a single JSON object naming the action it wants
+  (`list_dir`, `read_file`, `search`, `load_skill`, `remember`, `write_file`, `edit_file`,
+  `run_command`, `finish`). Ixel runs it and gives the model the result as text.
+- **Paths stay in the workspace.** Every path is resolved inside the folder you picked. `..`,
+  absolute paths and symlinks that lead outside it are refused, and so is anything in `.git/`.
+- **Secret files are refused.** Files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_rsa*`,
+  `.netrc`, Ixel's own config folder) can be neither read nor written.
+- **Reads run at once; changes wait for you.** Listing a folder, reading a file, searching, loading a
+  skill and remembering to `MEMORY.md` run as asked. Writing or editing a file, and running a
+  command, become a pending approval: you see the diff, or the exact command, before anything
+  happens. "Always allow" adds a command's argv to an allowlist for that workspace, and never a shell
+  or an interpreter running `-c`.
+- **Commands are sandboxed on macOS.** An approved command runs as a list of arguments, never a
+  shell string, with the workspace as its folder, a 120-second limit and 64 KB of output kept. On
+  macOS it runs under `sandbox-exec` with network access denied and writes allowed only in the
+  workspace and the temp folder; on other systems the approval card says it is not sandboxed.
+- **None of your keys.** A command runs with the environment Ixel gives it, without any key saved
+  in Ixel.
+- **What a tool returns is fenced.** Every tool result goes into the prompt inside a random fence,
+  with the note that it's data, not instructions — the same fencing `ixel ask` uses.
+
+**How it's checked:** `tests/test_agent_*.py` includes the attacks: a file that tells the agent to
+read `~/.ssh`, path traversal, a symlink escape, a secret file, and a command that reaches the
+network.
+
 ### Model output
 
 - **Terminal:** control characters and escape sequences (colors, cursor moves, OSC 8 links, OSC 52

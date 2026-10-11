@@ -72,7 +72,10 @@ Last updated: 2026-10-04
   first.
 
 ### Agents that act (carefully)
-Letting the panel edit files or run commands is the most requested feature, and the riskiest. The plan:
+Letting the panel edit files or run commands is the most requested feature, and the riskiest. The
+beta is in progress: an **Agent** page in the app where one model works in a folder you pick. It reads,
+searches and loads skills on its own, and asks you before every write or command. No model gets a
+shell. See [AGENT_BETA.md](AGENT_BETA.md). The plan:
 - The panel proposes changes as a patch. **You** approve each one, and Ixel applies it. No model gets a
   shell.
 - When a command has to run, it runs in a real sandbox (container or OS sandbox) with no network and no
