@@ -57,7 +57,7 @@ def _keys_put_back(monkeypatch):
     """set_live changes this process's environment: each test gets it back as it was."""
     injected = set(secrets._INJECTED)
     names = ("OPENAI_API_KEY", "XAI_API_KEY", "ANTHROPIC_API_KEY", "TYPESAFE_API_KEY", "GOOGLE_API_KEY",
-             "GROQ_API_KEY")
+             "GROQ_API_KEY", "GEMINI_API_KEY")
     saved = {n: os.environ.get(n) for n in names}
     for name in names:
         monkeypatch.delenv(name, raising=False)
@@ -595,7 +595,9 @@ def asked(monkeypatch):
     calls = []
     lists = {"openai": [{"id": "gpt-5.5", "created": 5}, {"id": "gpt-6-astra", "created": 8},
                         {"id": "gpt-4o-2024-08-06", "created": 1}, {"id": "gpt-6.1-sol", "created": 9}],
-             "anthropic": [{"id": "claude-fable-5-1"}, {"id": "claude-opus-5-5"}]}
+             "anthropic": [{"id": "claude-fable-5-1"}, {"id": "claude-opus-5-5"}],
+             "gemini": [{"id": "gemini-3.1-pro-preview"}, {"id": "gemini-3.8-flash"}],
+             "xai": [{"id": "grok-4.7"}, {"id": "grok-4-0709"}]}
 
     def company(provider, key):
         calls.append((provider, key))
@@ -872,3 +874,89 @@ model = "deepseek/deepseek-r2"
     assert lists["local"]["where"] == "your model server"
     assert model_choices._server_name("http://100.101.1.2:8080/v1/chat/completions") == "your model server"  # Tailscale
     assert model_choices._server_name("http://gpu-box:11434/v1/chat/completions") == "your model server"
+
+
+# ── Subscription programs: Grok Build and Antigravity ─────────────────────────
+
+SUBSCRIPTIONS = CONFIG.replace('agents = [\n  "claude",\n  "gpt",  # not the local one\n]\n', "") + \
+    '\n[agents.grok]\npreset = "grok_build"\n\n[agents.anti]\npreset = "antigravity"\n'
+
+
+@pytest.fixture
+def antigravity(monkeypatch):
+    """The Antigravity preset: Ixel's own, or one standing in for it until it's there."""
+    from ixel_mat import presets
+    if "antigravity" in presets.PRESETS_BY_ID:
+        return presets.PRESETS_BY_ID["antigravity"]
+    stub = {"id": "antigravity", "label": "Antigravity", "command": "antigravity",
+            "why": "uses your Google account's Antigravity login", "args": ["-p"], "prompt_via": "stdin",
+            "timeout": 300, "model_args": ["-m", "{model}"],
+            "model_hint": "a model name such as gemini-3.1-pro-preview"}
+    # The loader and settings_api hold this same dict; preset_for and model_choices read CLI_PRESETS when called
+    monkeypatch.setitem(presets.PRESETS_BY_ID, "antigravity", stub)
+    monkeypatch.setattr(presets, "CLI_PRESETS", [*presets.CLI_PRESETS, stub])
+    return stub
+
+
+def test_subscription_programs_say_what_login_they_use_and_antigravity_starts_off(config, antigravity):
+    from ixel_mat.ask import agent_list
+    from ixel_mat.gui.settings_api import ANTIGRAVITY_WARNING
+    config.write_text(SUBSCRIPTIONS, encoding="utf-8")
+    assert "agents" not in loader.tomllib.loads(SUBSCRIPTIONS)["review"]  # the panel is every model
+    agents = {a["name"]: a for a in snapshot()["agents"]}
+    grok, anti = agents["grok"], agents["anti"]
+    assert grok["about"] == "uses your SuperGrok login" and grok["program"] == "grok_build"
+    assert grok["warning"] == "" and grok["on_panel"] and not grok["off_by_default"]
+    assert anti["on_panel"] is False and anti["off_by_default"] is True and anti["program"] == "antigravity"
+    assert anti["warning"] == ("Google's Antigravity terms may restrict using it from tools other than Google's "
+                               "own; using it here could put your Google account at risk.") == ANTIGRAVITY_WARNING
+    assert agents["claude"]["about"] == "uses your Claude subscription login"
+    assert (agents["gpt"]["about"], agents["gpt"]["program"], agents["gpt"]["warning"]) == ("", "", "")
+    settings = load_settings()
+    assert "anti" not in settings.panel_configs() and {"claude", "gpt", "local", "grok"} <= set(settings.panel_configs())
+    assert settings.program_of("anti") == "antigravity" and settings.program_of("gpt") == ""
+    # Off the panel, but still one of your models: `ixel ask --list` gives it to Handoff, so the Board can send
+    # answers and reviews to it
+    assert {"anti", "grok"} <= {a["name"] for a in agent_list(settings.agent_configs)}
+
+
+def test_switching_antigravity_on_writes_the_panel_out_in_full(config, antigravity):
+    config.write_text(SUBSCRIPTIONS, encoding="utf-8")
+    every = ["claude", "gpt", "local", "grok", "anti"]
+    assert change("panel", {"on": every})[0] == 200
+    parsed = loader.tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["review"]["agents"] == every  # written out: an empty list would leave Antigravity out again
+    assert "anti" in load_settings().panel_configs()
+    assert {a["name"]: a for a in snapshot()["agents"]}["anti"]["on_panel"]
+    assert change("panel", {"on": ["claude", "gpt", "local", "grok"]})[0] == 200
+    assert "anti" not in load_settings().panel_configs()
+    assert not {a["name"]: a for a in snapshot()["agents"]}["anti"]["on_panel"]
+
+
+def test_grok_build_and_antigravity_pick_from_their_companies_lists(config, antigravity, asked, monkeypatch):
+    from ixel_mat.gui import model_choices
+    config.write_text(SUBSCRIPTIONS, encoding="utf-8")
+    lists = model_lists()
+    grok = lists["grok"]
+    assert (grok["source"], grok["where"], grok["models"]) == ("built_in", "xAI", model_choices.BUILT_IN["xai"])
+    assert "xAI key under Keys" in grok["note"]
+    takes_a_model = bool(load_settings().agent_configs["anti"].model_args)
+    if takes_a_model:
+        anti = lists["anti"]
+        assert (anti["source"], anti["where"], anti["models"]) == ("built_in", "Google",
+                                                                   model_choices.BUILT_IN["gemini"])
+        assert "Save a Google key under Keys" in anti["note"]
+    assert all(who == "server" for who, _ in asked)  # no key: no company was asked
+    # With the companies' keys, each lists its own company's models
+    monkeypatch.setenv("XAI_API_KEY", "xai-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    lists = model_lists()
+    grok = lists["grok"]
+    assert (grok["source"], grok["where"]) == ("company", "xAI") and "grok-4.7" in grok["models"]
+    assert "grok-4-0709" not in grok["models"]  # a dated snapshot
+    assert ("xai", "xai-test") in asked
+    if takes_a_model:
+        anti = lists["anti"]
+        assert (anti["source"], anti["where"]) == ("company", "Google")
+        assert set(anti["models"]) == {"gemini-3.1-pro-preview", "gemini-3.8-flash"}
+        assert ("gemini", "gemini-test") in asked

@@ -342,6 +342,9 @@ function models() {
               save("models", { section: "panel", values: { on } });
             }, !data.editable, `${a.label} on the panel`),
             el("span", {}, "On the panel"))),
+        // A program's login ("uses your SuperGrok login"), and its warning (Antigravity: Google's terms)
+        a.about ? el("small", { class: "set-sub" }, cap(a.about)) : null,
+        a.warning ? el("small", { class: "set-warn", role: "note" }, a.warning) : null,
         el("div", { class: "set-agent-fields" },
           el("label", { class: "set-field" }, el("span", {}, "Model"), modelPicker(a, own)),
           naming.has(a.name) && own
