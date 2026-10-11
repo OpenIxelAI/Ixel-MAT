@@ -1152,6 +1152,17 @@ details.original > summary:hover { color: var(--text-2); }
 .needs textarea:focus-visible, .needs select:focus-visible, .field input:focus-visible,
 .field textarea:focus-visible, .field select:focus-visible { outline: none; box-shadow: var(--ring); }
 
+.needs .model-row { display: flex; flex-direction: column; gap: 6px; }
+.needs .model-row[hidden] { display: none; }
+.needs .model-row small { color: var(--muted); font-size: 12px; }
+.usage { width: 100%; border-collapse: collapse; font-size: 13px; }
+.usage th, .usage td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; font-weight: 400; }
+.usage th:first-child { text-align: left; color: var(--text); }
+.usage thead th { color: var(--muted); font-size: 12px; }
+.usage tbody td { color: var(--text-2); font-variant-numeric: tabular-nums; }
+.usage .total th, .usage .total td { font-weight: 600; color: var(--text); border-bottom: 0; }
+.usage-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+
 .panel-section + .panel-section { margin-top: 20px; }
 .panel-section h3 {
   margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;

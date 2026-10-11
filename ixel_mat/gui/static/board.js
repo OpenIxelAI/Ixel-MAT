@@ -26,6 +26,26 @@ const KIND_HINTS = {
   review: "reviews your changes. Nothing in the project changes.",
   image: "makes pictures. Nothing in the project changes.",
 };
+// The models Claude's edits can run on, and the chain: the biggest plans the steps and hands each one down to the
+// smallest that can do it well (Handoff's approve args.models, biggest first)
+const CLAUDE_MODELS = [
+  ["claude-fable-5-1", "Fable 5.1"], ["claude-opus-5-5", "Opus 5.5"], ["claude-sonnet-5-5", "Sonnet 5.5"],
+  ["claude-haiku-5-5", "Haiku 5.5"],
+];
+const CHAIN = ["claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5"];
+const MODEL_CHOICES = [
+  { value: "", label: "Claude Code's own model" },
+  { value: "chain", label: "Fable 5.1 plans, then Opus 5.5 and Haiku 5.5 build", models: CHAIN },
+  ...CLAUDE_MODELS.map(([id, name]) => ({ value: id, label: `${name} only`, models: [id] })),
+];
+function modelName(id) {
+  const found = CLAUDE_MODELS.find(([m]) => m === id);
+  return found ? found[1] : id;
+}
+function dollars(n) {
+  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
+}
+
 // What an agent does on a run of `kind`, of a pull request when `of` says which (Handoff's run.of, targets)
 function kindHint(kind, of) {
   if (of && kind === "review") return `reviews ${of}. Nothing in the project changes.`;
@@ -901,6 +921,9 @@ function taskView(data) {
   const facts = [["Assigned to", who(t.assignee)]];
   if (t.waiting_on) facts.push(["Waiting on", who(t.waiting_on)]);
   if (t.branch) facts.push(["Branch", el("code", {}, t.branch)]);
+  if (t.usage && t.usage.models) {
+    facts.push(["Used", `about ${dollars(t.cost || 0)} · ${Object.keys(t.usage.models).map(modelName).join(", ")}`]);
+  }
   if (t.parent) facts.push(["Part of", t.parent]);
   facts.push(["Added", `by ${t.created_by === "human" ? "you" : t.created_by} ${ago(t.created_at)}`]);
   const nodes = [
@@ -920,6 +943,7 @@ function taskView(data) {
     nodes.push(section("Done when", el("ul", { class: "acceptance" }, t.acceptance.map((a) => el("li", {}, a)))));
   }
   if (data.outputs && data.outputs.length) nodes.push(section("What the run left", outputs(t.ref, data.outputs)));
+  if (t.usage && t.usage.models) nodes.push(section("What it used", usageTable(t.usage, t.cost || 0)));
   if (data.overlaps && data.overlaps.length) {
     nodes.push(section("Overlaps", el("ul", { class: "plain warn" }, data.overlaps.map((o) => el("li", {}, o)))));
   }
@@ -931,6 +955,29 @@ function taskView(data) {
   }
   nodes.push(section("History", history(data.events || [])));
   return nodes;
+}
+
+// Every run's tokens and cost, model by model, as Claude Code reported them (at API prices: on a subscription it's
+// what the work would have cost, and it counts toward the plan's limits instead)
+function usageTable(usage, total) {
+  const rows = Object.entries(usage.models).map(([id, u]) => el("tr", {},
+    el("th", { scope: "row", title: id }, modelName(id)), el("td", {}, tokens(u.in + u.cache_read + u.cache_write)),
+    el("td", {}, tokens(u.out)), el("td", {}, dollars(u.cost))));
+  if (rows.length > 1) {
+    rows.push(el("tr", { class: "total" }, el("th", { scope: "row" }, "Total"), el("td", {}), el("td", {}),
+      el("td", {}, dollars(total))));
+  }
+  return el("div", {},
+    el("table", { class: "usage" },
+      el("thead", {}, el("tr", {}, el("th", {}, "Model"), el("th", {}, "Read"), el("th", {}, "Wrote"), el("th", {}, "Cost"))),
+      el("tbody", {}, rows)),
+    el("p", { class: "usage-note" }, "Estimated at API prices. On a subscription it counts toward your plan's limits instead."));
+}
+
+function tokens(n) {
+  if (n < 1000) return String(n);
+  if (n < 1000000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1000000).toFixed(1)}M`;
 }
 
 function section(title, ...children) {
@@ -1067,7 +1114,28 @@ function needsForm(asked, t) {
           el("small", {}, `${(a.args && a.args.agent) || t.assignee} ${kindHint(kind, t.targets && t.targets[kind])}`)));
     });
     form.append(el("fieldset", {}, el("legend", {}, "What should it do?"), options));
-    read = () => ({ ...(a.args || {}), kind: (form.querySelector("input[name=needs-kind]:checked") || {}).value || chosen });
+    const kindNow = () => (form.querySelector("input[name=needs-kind]:checked") || {}).value || chosen;
+    // Which model Claude's edit runs on, or the chain (a Handoff that reports usage takes it)
+    const agent = (a.args && a.args.agent) || t.assignee;
+    let model = null;
+    if (agent === "claude" && kinds.includes("edit") && "usage" in t) {
+      model = el("select", { id: "needs-model", "data-key": "needs-model" },
+        MODEL_CHOICES.map((c) => el("option", { value: c.value }, c.label)));
+      model.value = asked.model || "";
+      model.addEventListener("change", () => { asked.model = model.value; });
+      const row = el("div", { class: "model-row" }, el("label", { for: "needs-model" }, "Which model?"), model,
+        el("small", {}, "A chain plans with the biggest model and gives each step to the smallest that can do it. "
+          + "The task shows what each model used."));
+      const show = () => { row.hidden = kindNow() !== "edit"; };
+      form.addEventListener("change", show);
+      show();
+      form.append(row);
+    }
+    read = () => {
+      const kind = kindNow();
+      const picked = model && kind === "edit" ? MODEL_CHOICES.find((c) => c.value === model.value) : null;
+      return { ...(a.args || {}), kind, ...(picked && picked.models ? { models: picked.models } : {}) };
+    };
   }
   const cancel = el("button", { type: "button", class: "btn", "data-key": "needs-cancel" }, "Cancel");
   cancel.addEventListener("click", closeNeeds);
