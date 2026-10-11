@@ -8,6 +8,7 @@ Usage:
   ixel status             Show single-screen status dashboard
   ixel config             Show resolved config + validation
   ixel agents             List configured agents + status
+  ixel effort             Show each agent's thinking level, or change one (ixel effort AGENT LEVEL)
   ixel help               Show all commands
   ixel version            Show version
   ixel doctor             Check that each part of Ixel is ready (--check tests models too)
@@ -303,26 +304,162 @@ def _model_now(cfg, models: list[str], provider: str | None) -> str:
     return cfg.model or "— (set one)"
 
 
+EFFORT_LABELS = {"minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high",
+                 "max": "Max", "ultra": "Ultra", "none": "None"}
+
+
+def _effort_in_name(model: str) -> bool:
+    """Antigravity's gemini-3.8-flash-high: a model id that carries its own effort."""
+    return (model or "").endswith(("-low", "-medium", "-high", "-xhigh", "-max"))
+
+
+def _effort_choices(cfg) -> list[dict]:
+    """The levels an agent takes, lowest first, in its provider's own names: [{"value", "label"}, …]; [] for none."""
+    from ixel_mat import effort as effort_mod
+    from ixel_mat.presets import preset_for
+
+    if cfg.type == "oneshot":
+        program = preset_for(cfg.command).get("id", "")
+        native = getattr(effort_mod, "native_levels", None)  # each program's own names, where Ixel knows them
+        if native is not None and program:
+            return list(native(program, cfg.model or None))
+        if program == "antigravity" and _effort_in_name(cfg.model):
+            return []
+    return [{"value": v, "label": EFFORT_LABELS.get(v, v)} for v in effort_mod.agent_levels(cfg)]
+
+
+def _no_effort_reason(cfg) -> str:
+    """Why an agent has no effort levels to pick from."""
+    from ixel_mat.presets import preset_for
+
+    program = preset_for(cfg.command).get("id", "") if cfg.type == "oneshot" else ""
+    if program == "gemini_cli":
+        return "Gemini CLI takes no effort flag: set thinking in Gemini's own settings.json"
+    if program == "opencode":
+        return "OpenCode's effort is the #variant in the model name: ixel model <agent> provider/model#variant"
+    if program == "antigravity" and _effort_in_name(cfg.model):
+        return "the model name carries its own effort"
+    if cfg.type == "http":
+        return f"{cfg.model or cfg.label} has no effort setting, so Ixel sends none"
+    return f"{cfg.label} doesn't take an effort level from Ixel"
+
+
+def cmd_effort(argv: list[str] | None = None) -> int:
+    """`ixel effort`: every agent's thinking level; `ixel effort AGENT`: the levels it takes; `ixel effort AGENT
+    LEVEL`: change it."""
+    from rich import box as rbox
+    from rich.table import Table
+
+    from ixel_mat.config.loader import build_agent_configs, find_config, load_config, set_agent_effort
+    from ixel_mat.config.secrets import load_env
+
+    argv = list(sys.argv[2:] if argv is None else argv)
+    if argv[:1] in (["-h"], ["--help"]):
+        console.print("usage: ixel effort [AGENT [LEVEL]]\n\n"
+                      "  ixel effort               every agent's thinking level, and the levels it takes\n"
+                      "  ixel effort AGENT         the levels that agent takes, in its provider's own names\n"
+                      "  ixel effort AGENT LEVEL   change it: one of those levels, or default",
+                      markup=False, highlight=False)
+        return 0
+    load_env()
+    config = load_config()
+    configs, _ = build_agent_configs(config)
+    if not configs:
+        console.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]No agents configured yet. Run:[/] [{C['blue']}]ixel setup[/]")
+        return 1
+
+    if len(argv) >= 2:  # change one
+        agent, level = argv[0], argv[1].lower()
+        path = find_config()
+        if agent not in configs or path is None:
+            console.print(f"  [{C['red']}]✗[/] No agent named {safe_markup(agent)}. "
+                          f"Agents: {safe_markup(', '.join(configs))}")
+            return 1
+        cfg = configs[agent]
+        choices = [] if level == "default" else _effort_choices(cfg)
+        try:
+            set_agent_effort(path, agent, level, takes=None if level == "default" else [c["value"] for c in choices])
+        except (ValueError, KeyError) as exc:
+            console.print(f"  [{C['red']}]✗[/] {safe_markup(exc)}")
+            if level != "default" and not choices:
+                console.print(f"  [{C['dim']}]{safe_markup(_no_effort_reason(cfg))}.[/]")
+            return 1
+        shown = "its default" if level == "default" else level
+        console.print(f"  [{C['green']}]✓[/] {safe_markup(cfg.label)} now thinks at "
+                      f"[{C['moon']}]{safe_markup(shown)}[/] [{C['dim']}](saved to {safe_markup(path)})[/]")
+        return 0
+
+    names = [argv[0]] if argv else list(configs)
+    unknown = [n for n in names if n not in configs]
+    if unknown:
+        console.print(f"  [{C['red']}]✗[/] No agent named {safe_markup(unknown[0])}. "
+                      f"Agents: {safe_markup(', '.join(configs))}")
+        return 1
+
+    choices = {n: _effort_choices(configs[n]) for n in names}
+    table = Table(box=rbox.SIMPLE, header_style=f"bold {C['moon']}", border_style=C["dim"], padding=(0, 1))
+    table.add_column("Agent", style=C["blue"])
+    table.add_column("Label", style=C["moon"])
+    table.add_column("Setting", style=C["dim"])
+    table.add_column("Takes", style=C["green"])
+    for n in names:
+        cfg = configs[n]
+        takes = ", ".join(c["label"] for c in choices[n]) or "—"
+        table.add_row(safe_markup(n), safe_markup(cfg.label), safe_markup(cfg.effort or "default"), safe_markup(takes))
+    console.print()
+    console.print(table)
+
+    if argv:  # one agent: its levels, as `ixel effort AGENT LEVEL` takes them
+        mine = choices[names[0]]
+        if mine:
+            listed = " · ".join(f"{c['value']} ({c['label']})" for c in mine)
+            console.print(f"  [{C['dim']}]{safe_markup(listed)}[/]")
+        else:
+            console.print(f"  [{C['dim']}]{safe_markup(_no_effort_reason(configs[names[0]]))}.[/]")
+    console.print(f"  [{C['dim']}]Change one:[/] [{C['blue']}]ixel effort <agent> <level>[/]"
+                  f"[{C['dim']}]  (a level it takes, or default)[/]")
+    console.print()
+    return 0
+
+
 def cmd_model(argv: list[str] | None = None) -> int:
-    """`ixel model`: every agent's model; `ixel model AGENT`: its choices; `ixel model AGENT NAME`: change it."""
+    """`ixel model`: every agent's model; `ixel model AGENT`: its choices; `ixel model AGENT NAME`: change it
+    (`--effort LEVEL`: its thinking level too)."""
     from concurrent.futures import ThreadPoolExecutor
 
     from rich import box as rbox
     from rich.table import Table
 
-    from ixel_mat.config.loader import build_agent_configs, find_config, load_config, set_agent_model
+    from ixel_mat.config.loader import (build_agent_configs, check_effort_level, find_config, load_config,
+                                        set_agent_effort, set_agent_model)
     from ixel_mat.config.secrets import load_env
     from ixel_mat.config.setup import CLI_PRESETS
     from ixel_mat.models import ALIASES, pick_latest, provider_for_url
 
     argv = list(sys.argv[2:] if argv is None else argv)
     if argv[:1] in (["-h"], ["--help"]):
-        console.print("usage: ixel model [AGENT [MODEL]]\n\n"
-                      "  ixel model               every agent's model, and what it uses now\n"
-                      "  ixel model AGENT         that agent's choices\n"
-                      "  ixel model AGENT MODEL   change it: a model name, latest, latest-fast, or default",
+        console.print("usage: ixel model [AGENT [MODEL [--effort LEVEL]]]\n\n"
+                      "  ixel model                              every agent's model, and what it uses now\n"
+                      "  ixel model AGENT                        that agent's choices\n"
+                      "  ixel model AGENT MODEL                  change it: a model name, latest, latest-fast, "
+                      "or default\n"
+                      "  ixel model AGENT MODEL --effort LEVEL   and its thinking level (ixel effort AGENT lists them)",
                       markup=False, highlight=False)
         return 0
+    level = None
+    at = next((i for i, a in enumerate(argv) if a == "--effort" or a.startswith("--effort=")), None)
+    if at is not None:
+        if argv[at] == "--effort":
+            level = argv[at + 1] if at + 1 < len(argv) else ""
+            del argv[at:at + 2]
+        else:
+            level = argv[at].partition("=")[2]
+            del argv[at]
+        level = level.lower()
+        if not level or len(argv) < 2:
+            console.print(f"  [{C['red']}]✗[/] --effort goes with an agent and a model: "
+                          f"[{C['blue']}]ixel model AGENT MODEL --effort LEVEL[/]")
+            return 1
     load_env()
     config = load_config()
     configs, _ = build_agent_configs(config)
@@ -345,7 +482,13 @@ def cmd_model(argv: list[str] | None = None) -> int:
                           f"so {safe_markup(model)} can't work there. Name the model instead "
                           f"([{C['blue']}]ixel model {safe_markup(repr(agent) if ' ' in agent else agent)}[/] shows what it has).")
             return 1
+        takes = None
+        if level is not None and level != "default":  # checked against the new model before either is saved
+            new = dataclasses.replace(cfg, model="" if model == "default" else model)
+            takes = [c["value"] for c in _effort_choices(new)]
         try:
+            if level is not None:
+                check_effort_level(agent, level, takes)
             set_agent_model(path, agent, model)
         except (ValueError, KeyError) as exc:
             console.print(f"  [{C['red']}]✗[/] {safe_markup(exc)}")
@@ -355,6 +498,15 @@ def cmd_model(argv: list[str] | None = None) -> int:
                       f"[{C['moon']}]{safe_markup(shown)}[/] [{C['dim']}](saved to {safe_markup(path)})[/]")
         if model in ALIASES or (model == "default" and configs[agent].type == "http"):
             console.print(f"  [{C['dim']}]Ixel looks up the newest matching model every time it starts.[/]")
+        if level is not None:
+            try:
+                set_agent_effort(path, agent, level, takes)
+            except (ValueError, KeyError) as exc:
+                console.print(f"  [{C['red']}]✗[/] {safe_markup(exc)}")
+                return 1
+            shown = "its default" if level == "default" else level
+            console.print(f"  [{C['green']}]✓[/] {safe_markup(cfg.label)} now thinks at "
+                          f"[{C['moon']}]{safe_markup(shown)}[/] [{C['dim']}](saved to {safe_markup(path)})[/]")
         return 0
 
     names = [argv[0]] if argv else list(configs)
@@ -401,7 +553,8 @@ def cmd_model(argv: list[str] | None = None) -> int:
                 if preset.get("warning"):  # an opt-in preset's (Antigravity's terms)
                     console.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{safe_markup(preset['warning'])}[/]")
     console.print(f"  [{C['dim']}]Change one:[/] [{C['blue']}]ixel model <agent> <model>[/]"
-                  f"[{C['dim']}]  (latest, latest-fast, a model name, or default)[/]")
+                  f"[{C['dim']}]  (latest, latest-fast, a model name, or default; "
+                  f"--effort LEVEL sets its thinking level too)[/]")
     console.print()
     return 0
 
@@ -785,7 +938,9 @@ def cmd_ask(argv: list[str]) -> int:
     import json
 
     from ixel_mat.ask import AskError, agent_list, ask_in_order, find_agent
+    from ixel_mat.config.loader import check_effort_level
     from ixel_mat.material import MaterialError, code_for_review
+    from ixel_mat.models import ALIASES, provider_for_url, valid_model_id
     from ixel_mat.runtime import load_settings
 
     parser = argparse.ArgumentParser(
@@ -797,6 +952,9 @@ def cmd_ask(argv: list[str]) -> int:
     parser.add_argument("--agent", metavar="NAME", help="who answers: an agent's name or label, e.g. gemini or Grok. "
                                                         "Several, in order (codex,claude,local): when one is "
                                                         "out of usage, the next answers")
+    parser.add_argument("--model", metavar="NAME", help="the model for this run only, nothing saved")
+    parser.add_argument("--effort", metavar="LEVEL",
+                        help="the thinking level for this run only; ixel effort AGENT lists them")
     parser.add_argument("--list", action="store_true", help="list the models you can ask, and stop")
     parser.add_argument("--timeout", type=float, help="seconds to wait for the answer")
     code = parser.add_argument_group("code or documents to attach (read-only: nothing runs, nothing changes)")
@@ -845,7 +1003,8 @@ def cmd_ask(argv: list[str]) -> int:
         agents = agent_list({name: cfg for name, cfg in settings.agent_configs.items() if settings.yours(name)})
         if args.json:
             # features: what this ixel ask can do, for programs that call it (Handoff)
-            print(json.dumps({"agents": agents, "features": ["new-files", "head", "fallback", "error-kind"]},
+            print(json.dumps({"agents": agents,
+                              "features": ["new-files", "head", "fallback", "error-kind", "model", "effort"]},
                              indent=2))
             return 0
         if not agents and settings.private and settings.agent_configs:
@@ -876,6 +1035,27 @@ def cmd_ask(argv: list[str]) -> int:
                 cfgs.append(cfg)
         if not cfgs:
             parser.error("--agent needs a name (--list shows the choices)")
+        if args.model is not None or args.effort is not None:  # this run only: the config file isn't touched
+            if len(cfgs) > 1:
+                parser.error("--model and --effort go with one --agent")
+            cfg = cfgs[0]
+            if args.model is not None:
+                newest = cfg.type == "http" and provider_for_url(cfg.url) is not None
+                if not (args.model in ALIASES or valid_model_id(args.model)):
+                    return fail(f"{args.model!r} isn't a valid model name")
+                if (args.model in ALIASES or (args.model == "default" and cfg.type == "http")) and not newest:
+                    return fail(f"{cfg.label} has no list of newest models to pick from, so {args.model} can't work "
+                                "there. Name the model instead.")
+                cfg = dataclasses.replace(cfg, model="" if args.model == "default" else args.model)
+            if args.effort is not None:
+                level = args.effort.lower()
+                try:
+                    check_effort_level(cfg.name, level, None if level == "default" else
+                                       [c["value"] for c in _effort_choices(cfg)])
+                except ValueError as exc:
+                    return fail(str(exc))
+                cfg = dataclasses.replace(cfg, effort="" if level == "default" else level)
+            cfgs = [cfg]
         for cfg in cfgs:
             if not settings.yours(cfg.name):
                 return fail(f"Private is on, and {cfg.label} isn't on your computers. Ask one of your own models, or "
@@ -1399,6 +1579,8 @@ def _main():
         sys.exit(cmd_image(args[1:]))
     if resolved == 'model':
         sys.exit(cmd_model(args[1:]))
+    if resolved == 'effort':
+        sys.exit(cmd_effort(args[1:]))
     if resolved == 'mcp':
         sys.exit(cmd_mcp(args[1:]))
     if resolved == 'gui':

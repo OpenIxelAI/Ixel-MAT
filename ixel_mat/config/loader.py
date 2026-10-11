@@ -418,6 +418,35 @@ def set_agent_model(path: Path, agent_id: str, model: str) -> None:
     """
     if model != "default" and not (model in ALIASES or valid_model_id(model)):
         raise ValueError(f"{model!r} isn't a valid model name")
+    _set_agent_key(path, agent_id, "model", None if model == "default" else model)
+
+
+# A program's own level outside the loader's EFFORT_LEVELS (Codex's "ultra") is saved here but dropped on load for now
+def set_agent_effort(path: Path, agent_id: str, level: str, takes: list[str] | None = None) -> None:
+    """
+    Change one agent's effort (thinking level) in the config file, leaving
+    everything else as written. "default" removes the setting (the model's or
+    program's own). takes: the levels the agent's model takes, when known; a
+    level outside them is refused. The previous version is kept as config.toml.bak.
+    """
+    check_effort_level(agent_id, level, takes)
+    _set_agent_key(path, agent_id, "effort", None if level == "default" else level)
+
+
+def check_effort_level(agent_id: str, level: str, takes: list[str] | None = None) -> None:
+    """ValueError unless level is "default" or a level the agent takes (any well-formed one when takes is None)."""
+    if level == "default":
+        return
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", level):  # never something a command line reads as a flag
+        raise ValueError(f"{level!r} isn't an effort level")
+    if takes is not None and not takes:
+        raise ValueError(f"{agent_id} takes no effort level")
+    if takes is not None and level not in takes:
+        raise ValueError(f"{agent_id} doesn't take {level!r}; it takes: {', '.join(takes)}")
+
+
+def _set_agent_key(path: Path, agent_id: str, key: str, value: str | None) -> None:
+    """Set `key = "value"` in one agent's table (None removes the line), re-read to confirm, keeping a .toml.bak."""
     text = read_text_file(path)
     agents = tomllib.loads(text).get("agents", {})
     if agent_id not in agents:
@@ -426,25 +455,25 @@ def set_agent_model(path: Path, agent_id: str, model: str) -> None:
     header = re.compile(r'^\s*\[\s*agents\s*\.\s*("?)' + re.escape(agent_id) + r'\1\s*\](\s*#.*)?\s*$')
     start = next((i for i, line in enumerate(lines) if header.match(line)), None)
     if start is None:
-        raise ValueError(f"couldn't find the [agents.{agent_id}] table to edit; change its model by hand")
+        raise ValueError(f"couldn't find the [agents.{agent_id}] table to edit; change its {key} by hand")
     end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
-    model_line = next((i for i in range(start + 1, end) if re.match(r"^\s*model\s*=", lines[i])), None)
+    key_line = next((i for i in range(start + 1, end) if re.match(rf"^\s*{key}\s*=", lines[i])), None)
     newline = "\r\n" if lines[start].endswith("\r\n") else "\n"
-    new_line = f"model = {json.dumps(model)}{newline}"
-    if model == "default":
-        if model_line is not None:
-            del lines[model_line]
-    elif model_line is not None:
+    new_line = f"{key} = {json.dumps(value)}{newline}"
+    if value is None:
+        if key_line is not None:
+            del lines[key_line]
+    elif key_line is not None:
         # Keep the line's indent and any comment after its value
-        kept = re.match(r"""^(\s*)model\s*=\s*(?:"(?:[^"\\]|\\.)*"|'[^']*')(\s*#.*?)?\s*$""", lines[model_line])
+        kept = re.match(rf"""^(\s*){key}\s*=\s*(?:"(?:[^"\\]|\\.)*"|'[^']*')(\s*#.*?)?\s*$""", lines[key_line])
         if kept:
-            new_line = f"{kept.group(1)}model = {json.dumps(model)}{kept.group(2) or ''}{newline}"
-        lines[model_line] = new_line
+            new_line = f"{kept.group(1)}{key} = {json.dumps(value)}{kept.group(2) or ''}{newline}"
+        lines[key_line] = new_line
     else:
         lines.insert(start + 1, new_line)
     updated = "".join(lines)
     check = tomllib.loads(updated)["agents"][agent_id]
-    if check.get("model") != (None if model == "default" else model):
-        raise ValueError("the edit didn't come out right; change the model by hand")
+    if check.get(key) != value:
+        raise ValueError(f"the edit didn't come out right; change the {key} by hand")
     write_private_file(path.with_suffix(".toml.bak"), text.encode("utf-8"))
     write_private_file(path, updated.encode("utf-8"))
