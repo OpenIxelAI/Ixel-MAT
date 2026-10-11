@@ -182,6 +182,7 @@ preset = "antigravity"
 # env = { MYCLI_COLOR = "never" } # fixed settings (not secrets)
 # model_args = ["--model", "{model}"]     # how it takes `model`
 # effort_args = ["--effort", "{effort}"]  # how it takes `effort`
+# effort_in_model = "{model}#{effort}"    # or inside the model name (OpenCode's #variant)
 # effort_levels = ["low", "high"]         # the levels it has
 
 # ── Review defaults ────────────────────────────────────────────────────────────
