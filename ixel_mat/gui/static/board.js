@@ -26,6 +26,44 @@ const KIND_HINTS = {
   review: "reviews your changes. Nothing in the project changes.",
   image: "makes pictures. Nothing in the project changes.",
 };
+// The models an edit can run on, by worker: suggestions (any model name can be typed), the one model a run starts on,
+// and the chain Claude's edits start with, biggest first, each with its effort: the biggest plans the steps and hands
+// each one down to the smallest that can do it well (Handoff's approve args.models, and args.efforts). Fable plans at
+// low effort: its planning was three quarters of what a chain cost, and low effort plans well enough for most tasks.
+const CLAUDE_MODELS = [
+  ["claude-fable-5-1", "Fable 5.1"], ["claude-opus-5-5", "Opus 5.5"], ["claude-sonnet-5-5", "Sonnet 5.5"],
+  ["claude-haiku-5-5", "Haiku 5.5"],
+];
+const WORKER_MODELS = {
+  claude: { suggest: CLAUDE_MODELS, one: "claude-opus-5-5",
+    chain: [["claude-fable-5-1", "low"], ["claude-opus-5-5", ""], ["claude-haiku-5-5", ""]] },
+  codex: { suggest: ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.5", "gpt-5.5-mini"].map((m) => [m, m]),
+    one: "gpt-5.5", chain: [] },
+};
+const MAX_MODELS = 4;  // a planner and up to three models for its steps (Handoff's approvals.MAX_MODELS)
+const EFFORT_WORDS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max",
+  ultra: "Ultra" };
+function modelName(id) {
+  const found = CLAUDE_MODELS.find(([m]) => m === id);
+  return found ? found[1] : id;
+}
+function dollars(n) {
+  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
+}
+const PRICE_NOTE = "estimated at API prices. On a subscription it counts toward your plan's limits instead.";
+// What a cost shows as on a card or at the top of the Board: $0.25, and under a cent, <$0.01
+function money(cost) {
+  return cost > 0 && cost < 0.01 ? "<$0.01" : `$${cost.toFixed(2)}`;
+}
+// Each model's short name ("Opus", not "Opus 5.5") and what it cost, dearest first; none without usage
+function usageParts(usage) {
+  if (!usage || !usage.models) return [];
+  return Object.entries(usage.models)
+    .map(([id, u]) => [modelName(id).split(" ")[0], u && typeof u.cost === "number" ? u.cost : 0])
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, cost]) => `${name} ${money(cost)}`);
+}
+
 // What an agent does on a run of `kind`, of a pull request when `of` says which (Handoff's run.of, targets)
 function kindHint(kind, of) {
   if (of && kind === "review") return `reviews ${of}. Nothing in the project changes.`;
@@ -272,6 +310,12 @@ function render() {
   const name = board && board.exists ? board.project.split(/[\\/]/).filter(Boolean).pop() || board.project : "";
   $("#board-where").textContent = name;
   $("#board-where").title = board ? board.project : "";
+  // What every run on the board cost, from a Handoff that says (its `spent`)
+  const spent = board && board.exists && typeof board.spent === "number" ? board.spent : 0;
+  $("#board-spent").hidden = !(spent > 0);
+  $("#board-spent").replaceChildren(...(spent > 0 ? [el("span", {}, `Spent about ${money(spent)}`),
+    ...usageParts(board.usage).map((part) => el("span", { class: "spent-part" }, ` · ${part}`))] : []));
+  $("#board-spent").title = spent > 0 ? `What this board's runs cost, ${PRICE_NOTE}` : "";
   $("#board-new").disabled = !hello || !hello.ok;  // before there's a board, it says what's needed first
   $("#board-project").hidden = !hello || !hello.ok;
 
@@ -445,6 +489,8 @@ function card(t) {
       el("span", { class: `who${t.assignee === "human" ? " you" : ""}` }, who(t.assignee)),
       t.overlaps ? el("span", { class: "overlap", title: "Its files overlap another task's" }, icon("alert"),
         String(t.overlaps)) : null,
+      typeof t.cost === "number" && t.cost > 0 ? el("span", { class: "cost-chip",
+        title: [...usageParts(t.usage), `What its runs cost, ${PRICE_NOTE}`].join("\n") }, money(t.cost)) : null,
       t.last_event ? el("span", { class: "when", title: t.last_event.at },
         `${who(t.last_event.actor)} ${t.last_event.summary} · ${ago(t.last_event.at)}`) : null));
   button.addEventListener("click", () => openPanel(t.ref));
@@ -901,6 +947,9 @@ function taskView(data) {
   const facts = [["Assigned to", who(t.assignee)]];
   if (t.waiting_on) facts.push(["Waiting on", who(t.waiting_on)]);
   if (t.branch) facts.push(["Branch", el("code", {}, t.branch)]);
+  if (t.usage && t.usage.models) {
+    facts.push(["Used", `about ${dollars(t.cost || 0)} · ${Object.keys(t.usage.models).map(modelName).join(", ")}`]);
+  }
   if (t.parent) facts.push(["Part of", t.parent]);
   facts.push(["Added", `by ${t.created_by === "human" ? "you" : t.created_by} ${ago(t.created_at)}`]);
   const nodes = [
@@ -920,6 +969,7 @@ function taskView(data) {
     nodes.push(section("Done when", el("ul", { class: "acceptance" }, t.acceptance.map((a) => el("li", {}, a)))));
   }
   if (data.outputs && data.outputs.length) nodes.push(section("What the run left", outputs(t.ref, data.outputs)));
+  if (t.usage && t.usage.models) nodes.push(section("What it used", usageTable(t.usage, t.cost || 0)));
   if (data.overlaps && data.overlaps.length) {
     nodes.push(section("Overlaps", el("ul", { class: "plain warn" }, data.overlaps.map((o) => el("li", {}, o)))));
   }
@@ -931,6 +981,29 @@ function taskView(data) {
   }
   nodes.push(section("History", history(data.events || [])));
   return nodes;
+}
+
+// Every run's tokens and cost, model by model, as Claude Code reported them (at API prices: on a subscription it's
+// what the work would have cost, and it counts toward the plan's limits instead)
+function usageTable(usage, total) {
+  const rows = Object.entries(usage.models).map(([id, u]) => el("tr", {},
+    el("th", { scope: "row", title: id }, modelName(id)), el("td", {}, tokens(u.in + u.cache_read + u.cache_write)),
+    el("td", {}, tokens(u.out)), el("td", {}, dollars(u.cost))));
+  if (rows.length > 1) {
+    rows.push(el("tr", { class: "total" }, el("th", { scope: "row" }, "Total"), el("td", {}), el("td", {}),
+      el("td", {}, dollars(total))));
+  }
+  return el("div", {},
+    el("table", { class: "usage" },
+      el("thead", {}, el("tr", {}, el("th", {}, "Model"), el("th", {}, "Read"), el("th", {}, "Wrote"), el("th", {}, "Cost"))),
+      el("tbody", {}, rows)),
+    el("p", { class: "usage-note" }, "Estimated at API prices. On a subscription it counts toward your plan's limits instead."));
+}
+
+function tokens(n) {
+  if (n < 1000) return String(n);
+  if (n < 1000000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1000000).toFixed(1)}M`;
 }
 
 function section(title, ...children) {
@@ -1036,11 +1109,121 @@ function closeNeeds() {
   else renderPanel();
 }
 
+// How an edit runs: on the worker's own model, on one model, or as a chain of up to four, biggest first, each at an
+// effort the worker takes (and, where Ixel knows them, the model takes). What's picked lives in `asked.run`, so a
+// redraw keeps it. Returns the row and args(), the approve args it makes ({} for the worker's own model, as it is).
+function runPicker(asked, agent, worker) {
+  const names = WORKER_MODELS[agent] || { suggest: [], one: "", chain: [] };
+  const state = asked.run || (asked.run = { mode: "own", rows: [{ model: "", effort: "" }] });
+  const levels = new Map();  // model -> the levels it takes, once the server has said
+  const asking = new Map();  // model -> the server's answer on its way
+  const listId = `needs-models-${agent}`;
+  const rows = el("div", { class: "pick-rows" });
+  const mode = el("select", { id: "needs-run-mode", "data-key": "needs-run-mode" },
+    el("option", { value: "own" }, `${agent}'s own model`), el("option", { value: "one" }, "One model"),
+    worker.chain ? el("option", { value: "chain" }, "A chain of models, biggest first") : null);
+  mode.value = state.mode;
+  const hint = el("small", {});
+
+  const allowed = (model) => {
+    const takes = levels.get((model || "").trim().toLowerCase());
+    return takes ? worker.efforts.filter((l) => takes.includes(l)) : worker.efforts;
+  };
+  const effortSelect = (row, i) => {
+    const select = el("select", { "aria-label": `Effort for ${row.model || "its own model"}`, "data-key": `needs-effort-${i}` },
+      [["", "Default effort"], ...allowed(row.model).map((l) => [l, `${EFFORT_WORDS[l] || l} effort`])]
+        .map(([value, text]) => el("option", { value }, text)));
+    if (![...select.options].some((o) => o.value === row.effort)) row.effort = "";
+    select.value = row.effort;
+    select.disabled = !allowed(row.model).length;
+    if (select.disabled) select.title = `${row.model} has no effort setting, so it thinks at its default`;
+    select.addEventListener("change", () => { row.effort = select.value; });
+    return select;
+  };
+  const ask = (row, i) => {  // the levels this model takes, where Ixel knows its company's
+    const model = (row.model || "").trim().toLowerCase();
+    if (!model || levels.has(model)) return;
+    if (!asking.has(model)) {
+      asking.set(model, getJSON(`/api/board/levels?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`)
+        .then((found) => { if (Array.isArray(found.levels)) levels.set(model, found.levels); })
+        .catch(() => { /* the worker's own levels stand */ })
+        .finally(() => asking.delete(model)));
+    }
+    asking.get(model).then(() => {
+      const old = rows.querySelector(`[data-key="needs-effort-${i}"]`);
+      if (levels.has(model) && old && (state.rows[i] || {}).model === row.model) old.replaceWith(effortSelect(row, i));
+    });
+  };
+  const draw = () => {
+    const changed = state.mode !== mode.value;  // (a redraw keeps what was typed, a blank model too)
+    state.mode = mode.value;
+    if (state.mode === "own") state.rows = [{ model: "", effort: state.rows[0] && !state.rows[0].model ? state.rows[0].effort : "" }];
+    if (state.mode === "one" && (state.rows.length !== 1 || (changed && !state.rows[0].model))) {
+      state.rows = [{ model: names.one, effort: "" }];
+    }
+    if (state.mode === "chain" && state.rows.length < 2) state.rows = names.chain.map(([model, effort]) => ({ model, effort }));
+    rows.replaceChildren(...state.rows.map((row, i) => {
+      const parts = [];
+      if (state.mode !== "own") {
+        parts.push(el("span", { class: "pick-role" }, state.mode === "chain" ? (i === 0 ? "Plans" : `Step model ${i}`) : "Model"));
+        const box = el("input", { type: "text", list: listId, value: row.model, spellcheck: "false", autocomplete: "off",
+          maxlength: "64", placeholder: "a model name", "aria-label": state.mode === "chain" && i === 0 ? "Planning model" : "Model",
+          "data-key": `needs-model-${i}` });
+        box.addEventListener("input", () => { row.model = box.value; });
+        box.addEventListener("change", () => ask(row, i));
+        parts.push(box);
+      }
+      parts.push(effortSelect(row, i));
+      if (state.mode === "chain" && state.rows.length > 2) {
+        const remove = el("button", { type: "button", class: "btn icon-only", title: "Take this model out",
+          "aria-label": `Take ${row.model || "this model"} out`, "data-key": `needs-remove-${i}` }, "×");
+        remove.addEventListener("click", () => { state.rows.splice(i, 1); draw(); });
+        parts.push(remove);
+      }
+      ask(row, i);
+      return el("div", { class: "pick-row" }, parts);
+    }));
+    if (state.mode === "chain" && state.rows.length < MAX_MODELS) {
+      const add = el("button", { type: "button", class: "btn", "data-key": "needs-add-model" }, "Add a model");
+      add.addEventListener("click", () => { state.rows.push({ model: "", effort: "" }); draw(); });
+      rows.append(add);
+    }
+    hint.textContent = state.mode === "chain"
+      ? "The first model plans and gives each step to the smallest of the others that can do it. The task shows what each model used."
+      : "Higher effort thinks longer and uses more. The task shows what each model used.";
+  };
+  mode.addEventListener("change", draw);
+  draw();
+  const row = el("div", { class: "model-row" }, el("label", { for: "needs-run-mode" }, "Which model?"), mode, rows, hint,
+    el("datalist", { id: listId }, names.suggest.map(([id, name]) => el("option", { value: id }, name))));
+  const args = () => {
+    const typed = state.rows.map((r) => ({ model: (r.model || "").trim().toLowerCase(), effort: r.effort }));
+    if (state.mode === "own") return typed[0].effort ? { efforts: { "": typed[0].effort } } : {};
+    // A blank row, or a model named twice, would only come back refused: leave them out
+    const picked = typed.filter((r, i) => r.model && typed.findIndex((o) => o.model === r.model) === i);
+    const models = picked.map((r) => r.model);
+    // Only a level the model takes: one picked for the model typed before goes, and the new one thinks at its default
+    const efforts = Object.fromEntries(picked.filter((r) => r.effort && allowed(r.model).includes(r.effort))
+      .map((r) => [r.model, r.effort]));
+    return { models, ...(Object.keys(efforts).length ? { efforts } : {}) };
+  };
+  // Before args(): the levels of every model as typed now (a model typed just before pressing the button is still
+  // being looked up), and why it can't go yet, if it can't
+  const ready = async () => {
+    state.rows.forEach((r, i) => ask(r, i));
+    await Promise.all([...asking.values()]);
+  };
+  const problem = () => state.mode !== "own" && !args().models.length
+    ? `Name a model to run it on, or pick ${agent}'s own model.` : "";
+  return { row, args, ready, problem };
+}
+
 // What the person typed or picked lives in `asked.draft`, so a redraw (or a refusal) keeps it
 function needsForm(asked, t) {
   const a = asked.action;
   const form = el("form", { class: "needs" });
   let read;
+  let check = async () => "";  // why what was picked can't go yet, if it can't ("" when it can)
   if (a.needs === "text") {
     const box = el("textarea", { rows: "3", maxlength: "4000", "data-first": true, id: "needs-text", "data-key": "needs-text",
       required: TEXT_NEEDED[a.op] || false, ...PRIVATE_TYPING });
@@ -1067,14 +1250,41 @@ function needsForm(asked, t) {
           el("small", {}, `${(a.args && a.args.agent) || t.assignee} ${kindHint(kind, t.targets && t.targets[kind])}`)));
     });
     form.append(el("fieldset", {}, el("legend", {}, "What should it do?"), options));
-    read = () => ({ ...(a.args || {}), kind: (form.querySelector("input[name=needs-kind]:checked") || {}).value || chosen });
+    const kindNow = () => (form.querySelector("input[name=needs-kind]:checked") || {}).value || chosen;
+    // Which model the edit runs on, or a chain of them, and how hard each thinks (a Handoff that says what its
+    // workers take: the task's `workers`)
+    const agent = (a.args && a.args.agent) || t.assignee;
+    const worker = t.workers && t.workers[agent];
+    const picker = worker && kinds.includes("edit") ? runPicker(asked, agent, worker) : null;
+    if (picker) {
+      const show = () => { picker.row.hidden = kindNow() !== "edit"; };
+      form.addEventListener("change", show);
+      show();
+      form.append(picker.row);
+    }
+    read = () => {
+      const kind = kindNow();
+      return { ...(a.args || {}), kind, ...(picker && kind === "edit" ? picker.args() : {}) };
+    };
+    check = async () => {
+      if (!picker || kindNow() !== "edit") return "";
+      await picker.ready();
+      return picker.problem();
+    };
   }
   const cancel = el("button", { type: "button", class: "btn", "data-key": "needs-cancel" }, "Cancel");
   cancel.addEventListener("click", closeNeeds);
   form.append(el("div", { class: "needs-buttons" }, cancel,
     el("button", { type: "submit", class: "btn primary", disabled: busy, "data-key": "needs-submit" }, a.label)));
-  form.addEventListener("submit", (e) => {
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (busy) return;
+    const problem = await check();
+    if (problem) {
+      actionFailure = problem;
+      renderPanel();
+      return;
+    }
     if (!busy) act(a, t, read());  // the form says what will happen: pressing its button is the yes
   });
   form.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); closeNeeds(); } });

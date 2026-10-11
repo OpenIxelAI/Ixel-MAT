@@ -316,6 +316,7 @@ class GuiServer:
         app.router.add_get("/api/board/task", self._board_task)
         app.router.add_get("/api/board/output", self._board_output)
         app.router.add_get("/api/board/agents", self._board_agents)
+        app.router.add_get("/api/board/levels", self._board_levels)
         app.router.add_post("/api/board/action", self._board_action)
         app.router.add_get("/api/connections", self._connections)
         app.router.add_post("/api/connections/host", self._connections_host)
@@ -724,6 +725,17 @@ class GuiServer:
         update = "handoff update" if self._board_hello.get("problem") == "outdated" else ""
         return web.json_response(_clean({**self._board_hello, "install": handoff.how_to_install(), "update": update,
                                          "project": handoff.default_project()}))
+
+    async def _board_levels(self, request: web.Request) -> web.Response:
+        """The effort levels a model takes through a worker that hands them straight to its company (Codex to
+        OpenAI), so the Board offers only those; null for a worker whose own levels are the ones (Claude Code)."""
+        from ixel_mat import effort
+        passes_on = effort.PASSES_ON.get(request.query.get("agent", ""))
+        if passes_on is None:
+            return web.json_response({"levels": None})
+        company, default = passes_on
+        model = request.query.get("model", "").strip()[:100] or default
+        return web.json_response({"levels": list(effort.model_levels(company, model))})
 
     async def _board_projects(self, request: web.Request) -> web.Response:
         """Git repositories on this computer, for the Board to offer before a project is picked."""

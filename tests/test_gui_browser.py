@@ -642,6 +642,9 @@ class FakeBoard:
         self.actions = []
         self.refuse = {}   # op → the error Handoff gives for it
         self.slow = 0.0    # seconds each action takes, as a real `handoff api` start does
+        self.slow_levels = 0.0  # seconds a model's levels take to come back
+        self.spent = None  # what every run on the board cost, from a Handoff that says
+        self.usage = None  # and model by model
         self.tasks = {
             "T-1": self.task(1, "Pick the launch date " + HOSTILE, "open", "human"),
             "T-2": self.task(2, "Write release notes", "in_progress", "claude",
@@ -695,9 +698,16 @@ class FakeBoard:
             if query.get("since") == str(self.revision):
                 return reply({"unchanged": True, "revision": query["since"]})
             return reply({"exists": True, "revision": str(self.revision), "project": "/repos/shop", "counts": {},
-                          "tasks": list(self.tasks.values())})
+                          "tasks": list(self.tasks.values()), **({} if self.spent is None else {"spent": self.spent}),
+                          **({} if self.usage is None else {"usage": self.usage})})
         if url.path == "/api/board/task":
             return reply(self.detail(query["task"]))
+        if url.path == "/api/board/levels":  # (codex hands the level to OpenAI: older models take fewer)
+            time.sleep(self.slow_levels)
+            if query.get("agent") != "codex":
+                return reply({"levels": None})
+            return reply({"levels": ["low", "medium", "high"] if query.get("model") == "gpt-5.1"
+                          else ["low", "medium", "high", "xhigh"]})
         if url.path == "/api/board/agents":
             return reply({"agents": [{"name": "claude"}, {"name": "codex"}, {"name": "grok", "label": "Grok"}],
                           "problems": []})
@@ -769,6 +779,7 @@ def test_board_shows_who_has_what_and_its_text_stays_text(gui_url, browser):
                        "Blocked": ["T-5"], "Done": ["T-4"]}
     assert "claude is on it" in page.inner_text(".task-card[data-ref=T-2]")
     assert page.inner_text("#board-where") == "shop"
+    assert page.is_hidden("#board-spent")  # a Handoff that doesn't say what its runs cost
     assert page.is_hidden("#board-prs")  # a project not hosted anywhere has no pull requests to show
 
     page.click(".task-card[data-ref=T-1]")
@@ -846,6 +857,158 @@ def test_board_actions_ask_first_and_go_to_handoff(gui_url, browser):
     page.wait_for_selector("#task-title:has-text('Translate the app')")
     assert fake.actions[-1] == ("add", {"title": "Translate the app", "body": "", "acceptance": ["Spanish", "French"],
                                         "assignee": "grok"})
+    assert not errors, errors
+
+
+WORKERS = {"claude": {"efforts": ["low", "medium", "high", "xhigh", "max"], "chain": True},
+                  "codex": {"efforts": ["minimal", "low", "medium", "high", "xhigh"], "chain": False}}
+
+
+def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_used(gui_url, browser):
+    fake = FakeBoard()
+    fake.tasks["T-6"] = fake.task(6, "Add a parser", "open", "claude")
+    fake.tasks["T-7"] = fake.task(7, "Tidy the CLI", "open", "codex")
+    base = fake.detail
+
+    def detail(ref):
+        data = base(ref)
+        if ref in ("T-6", "T-7"):  # a Handoff that says what its workers take: an edit, with what runs used
+            agent = "claude" if ref == "T-6" else "codex"
+            data["actions"][0] = {**data["actions"][0], "args": {"agent": agent, "kind": "edit"},
+                                  "kinds": ["edit", "answer", "review"]}
+            data["task"]["workers"] = WORKERS
+            data["task"]["usage"] = {"models": {
+                "claude-fable-5-1": {"in": 1200, "out": 5389, "cache_read": 24000, "cache_write": 8000, "cost": 0.66},
+                "claude-haiku-5-5": {"in": 900, "out": 2500, "cache_read": 0, "cache_write": 0, "cost": 0.003}}}
+            data["task"]["cost"] = 0.663
+        return data
+    fake.detail = detail
+    fake.tasks["T-6"]["cost"] = 0.663
+    fake.tasks["T-6"]["usage"] = {"models": {"claude-fable-5-1": {"cost": 0.66}, "claude-haiku-5-5": {"cost": 0.003}}}
+    fake.spent = 1.25
+    fake.usage = {"models": {"claude-haiku-5-5": {"cost": 0.003}, "claude-opus-5-5": {"cost": 0.587},
+                             "claude-fable-5-1": {"cost": 0.66}}}
+    page, errors, _ = open_board(browser, fake)
+    page.goto(gui_url + "")
+    page.click(".rail-item[data-view=board]")
+
+    # What each task's runs cost, on its card, and what the whole board's did, at the top
+    page.wait_for_selector(".task-card[data-ref=T-6] .cost-chip")
+    assert page.inner_text(".task-card[data-ref=T-6] .cost-chip") == "$0.66"
+    assert page.get_attribute(".task-card[data-ref=T-6] .cost-chip", "title").startswith("Fable $0.66\nHaiku <$0.01\n")
+    assert page.locator(".task-card[data-ref=T-7] .cost-chip").count() == 0
+    assert page.is_visible("#board-spent")  # with which models it went to, dearest first
+    assert page.inner_text("#board-spent") == "Spent about $1.25 · Fable $0.66 · Opus $0.59 · Haiku <$0.01"
+    page.click(".task-card[data-ref=T-6]")
+
+    # What it used, model by model, with the total
+    page.wait_for_selector("table.usage")
+    table = page.inner_text("table.usage")
+    assert "Fable 5.1" in table and "$0.6600" in table and "Haiku 5.5" in table and "$0.6630" in table
+    assert "about $0.6630 · Fable 5.1, Haiku 5.5" in page.inner_text(".facts")
+
+    # A chain: starts as Fable plans, Opus and Haiku build; any model can be swapped in, and each has its own effort
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "chain")
+    assert [page.input_value(f"[data-key=needs-model-{i}]") for i in range(3)] == [
+        "claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5"]
+    assert page.input_value("[data-key=needs-effort-0]") == "low"  # Fable plans at low effort, unless you say
+    efforts = page.locator("[data-key=needs-effort-0] option").all_inner_texts()
+    assert efforts == ["Default effort", "Low effort", "Medium effort", "High effort", "Extra high effort", "Max effort"]
+    page.select_option("[data-key=needs-effort-0]", "max")
+    page.fill("[data-key=needs-model-1]", "claude-sonnet-5-5")
+    page.select_option("[data-key=needs-effort-1]", "high")
+    page.click("[data-key=needs-add-model]")
+    page.fill("[data-key=needs-model-3]", "haiku")
+    page.click("[data-key=needs-remove-2]")
+    assert page.locator("[data-key=needs-add-model]").count() == 1
+    shots = os.environ.get("IXEL_SCREENSHOT_DIR")
+    if shots:
+        page.screenshot(path=os.path.join(shots, "board-model-effort.png"))
+    page.click("[data-key=needs-add-model]")  # and left blank: it isn't sent
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["models"] == ["claude-fable-5-1", "claude-sonnet-5-5", "haiku"]
+    assert approve["efforts"] == {"claude-fable-5-1": "max", "claude-sonnet-5-5": "high"}
+
+    # Its own model, a little harder: only the effort goes, for the worker's own model
+    fake.tasks["T-6"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "own")
+    page.select_option("[data-key=needs-effort-0]", "xhigh")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert "models" not in approve and approve["efforts"] == {"": "xhigh"}
+
+    # Codex: one model at a time, with Codex's own levels, narrowed to what that model takes
+    page.click(".task-card[data-ref=T-7]")
+    page.click("#task-panel .actions .btn.primary")
+    assert page.locator("#needs-run-mode option[value=chain]").count() == 0
+    page.select_option("#needs-run-mode", "one")
+    assert page.input_value("[data-key=needs-model-0]") == "gpt-5.5"
+    wait_until(page, "document.querySelectorAll('[data-key=needs-effort-0] option').length === 5")
+    page.fill("[data-key=needs-model-0]", "gpt-5.1")
+    page.press("[data-key=needs-model-0]", "Tab")
+    wait_until(page, "document.querySelectorAll('[data-key=needs-effort-0] option').length === 4")
+    assert page.locator("[data-key=needs-effort-0] option").all_inner_texts()[-1] == "High effort"
+    page.select_option("[data-key=needs-effort-0]", "high")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["models"] == ["gpt-5.1"] and approve["efforts"] == {"gpt-5.1": "high"}
+
+    # A model typed just before pressing the button: the level picked for the one before it, which this one doesn't
+    # take, isn't sent with it
+    fake.tasks["T-7"]["run"] = None
+    fake.slow_levels = 0.5
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-7]")
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "one")
+    page.fill("[data-key=needs-model-0]", "gpt-5.5")
+    wait_until(page, "document.querySelectorAll('[data-key=needs-effort-0] option').length === 5")
+    page.select_option("[data-key=needs-effort-0]", "xhigh")
+    page.fill("[data-key=needs-model-0]", "gpt-5.1")
+    page.press("[data-key=needs-model-0]", "Enter")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["models"] == ["gpt-5.1"] and "efforts" not in approve
+    fake.slow_levels = 0
+
+    # No model named: it says so, and nothing is sent
+    fake.tasks["T-7"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-7]")
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "one")
+    page.fill("[data-key=needs-model-0]", "")
+    sent = len(fake.actions)
+    page.click(".needs button[type=submit]")
+    page.wait_for_selector(".board-notice.error")
+    assert "Name a model to run it on, or pick codex's own model." in page.inner_text(".board-notice.error")
+    assert len(fake.actions) == sent and page.input_value("[data-key=needs-model-0]") == ""
+    page.click("[data-key=needs-cancel]")
+
+    # An answer names no model, and the choice is hidden
+    fake.tasks["T-6"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    page.check("input[name=needs-kind][value=answer]")
+    assert page.is_hidden(".model-row")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approvals = [args for op, args in fake.actions if op == "approve"]
+    assert approvals[-1]["kind"] == "answer" and "models" not in approvals[-1] and "efforts" not in approvals[-1]
+
+    # A task from a Handoff that doesn't say what its workers take offers no model choice
+    page.click(".task-card[data-ref=T-3]")
+    page.click("#task-panel .actions .btn.primary")
+    assert page.locator("#needs-run-mode").count() == 0
     assert not errors, errors
 
 
