@@ -28,9 +28,12 @@ from ixel_mat.config import edit, secrets
 from ixel_mat.models import ALIASES, provider_for_url, valid_model_id
 from ixel_mat.modes.review import ESCALATE_POLICIES as ESCALATE
 from ixel_mat.modes.review import ON_WRONG_POLICIES as ON_WRONG
-from ixel_mat.presets import preset_for
+from ixel_mat.presets import PRESETS_BY_ID, preset_for
 from ixel_mat.runtime import MODE_CHOICES as MODES
 from ixel_mat.runtime import PLAIN_CHOICES as PLAIN
+
+# Shown next to a program's switch (by preset id): an opt-in preset's own warning (Antigravity's terms)
+PROGRAM_WARNINGS = {p["id"]: p["warning"] for p in PRESETS_BY_ID.values() if p.get("warning")}
 
 TRIAGE_PROVIDERS = ("typesafe", "model")
 KEY_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
@@ -154,6 +157,7 @@ def snapshot(settings, version: str | None = None) -> dict:
     agents = []
     for name, cfg in settings.agent_configs.items():
         levels = effort.agent_levels(cfg)
+        program = settings.program_of(name)
         agents.append({
             "name": name, "label": cfg.label, "kind": _kind(cfg), "model": raw.get(name, {}).get("model", "") or "",
             # Only the levels this model (or program) takes; one set before that it doesn't is sent as the nearest
@@ -161,7 +165,12 @@ def snapshot(settings, version: str | None = None) -> dict:
             "effort_sent": effort.to_send(levels, cfg.effort) or "", "effort_note": _effort_note(cfg, levels),
             # A model server of your own has no default to fall back on: a model has to be named
             "needs_model": cfg.type == "http" and not _follows_newest(cfg),
-            "on_panel": panel is None or name in panel, "in_file": name in raw,
+            # A program's login ("uses your SuperGrok login"), and a warning where there is one. A program that's
+            # off by default (Antigravity) sits out of the panel until it's switched on
+            "program": program, "about": PRESETS_BY_ID.get(program, {}).get("why", "") if program else "",
+            "warning": PROGRAM_WARNINGS.get(program, ""), "off_by_default": settings.off_by_default(name),
+            "on_panel": name in panel if panel is not None else not settings.off_by_default(name),
+            "in_file": name in raw,
             # Models Ixel calls itself, and programs that take pictures (Claude Code, Codex, Gemini CLI…)
             "can_see": cfg.can_see_pictures, "pictures": cfg.sees_pictures,
             # A model server on your own computers: its address can change here, and it can be taken off
@@ -502,7 +511,9 @@ def plan_change(settings, section: str, values: Any, agent: Any = None) -> tuple
         if set(values) != {"on"}:
             raise SettingsError("Nothing to change.")
         on = _names(values["on"], settings, "the panel")
-        out["agents"] = edit.REMOVE if set(on) == set(settings.agent_configs) else on
+        # An empty list means every model, which would leave an off-by-default program out again
+        every = set(on) == set(settings.agent_configs) and not any(settings.off_by_default(n) for n in on)
+        out["agents"] = edit.REMOVE if every else on
         return ("review",), out
     if section == "review":
         for key, value in values.items():

@@ -22,6 +22,10 @@ from ixel_mat.usage import Price, billing_for, parse_pricing
 
 CONNECT_TIMEOUT = 30.0
 
+# Programs that sit out of the panel until switched on in Settings or named in [review] agents: the opt-in
+# presets, the ones with a "warning" (Antigravity: Google's terms may restrict using it from other tools)
+OFF_BY_DEFAULT = frozenset({"antigravity"})
+
 
 # "Auto": Triage (see triage.py) picks quick, review or deep for each question
 AUTO = "auto"
@@ -88,13 +92,34 @@ class Settings:
             return []
         return [c.label for n, c in self._panel().items() if not self.yours(n)]
 
+    def program_of(self, name: str) -> str:
+        """The preset id of the program a CLI agent runs, or ""."""
+        from ixel_mat.presets import PRESETS_BY_ID, preset_for
+        agents = self.config.get("agents")
+        agents = agents if isinstance(agents, dict) else {}
+        raw = agents.get(name)
+        raw = raw if isinstance(raw, dict) else {}
+        if isinstance(raw.get("preset"), str) and raw["preset"] in PRESETS_BY_ID:
+            return raw["preset"]
+        cfg = self.agent_configs.get(name)
+        if cfg is not None and cfg.type == "oneshot":
+            return preset_for(cfg.command).get("id", "")
+        return ""
+
+    def off_by_default(self, name: str) -> bool:
+        """Whether this agent sits out of the panel unless [review] agents names it."""
+        return self.program_of(name) in OFF_BY_DEFAULT
+
     def _panel(self) -> dict[str, AgentConfig]:
         if not self.review.agents:
-            return dict(self.agent_configs)
+            return {n: c for n, c in self.agent_configs.items() if not self.off_by_default(n)}
         return {n: c for n, c in self.agent_configs.items() if n in self.review.agents}
 
     def panel_configs(self) -> dict[str, AgentConfig]:
-        """Agents that take part in /review (the [review] agents list, if set; with Private, only yours)."""
+        """
+        Agents that take part in /review: the [review] agents list, if set, otherwise every agent but the
+        programs that are off by default (OFF_BY_DEFAULT); with Private, only yours.
+        """
         return {n: c for n, c in self._panel().items() if self.yours(n)}
 
     @property

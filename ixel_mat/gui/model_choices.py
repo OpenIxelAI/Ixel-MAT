@@ -3,9 +3,9 @@ The Models list in Settings: what each model on your panel can be set to, so nob
 
 Each list comes from the company whenever Ixel can ask it. A model Ixel calls itself shows its API's own
 list, with the key it already uses. A program shows its company's list when Ixel has that company's key
-(Claude Code: Anthropic's, Codex: OpenAI's, Gemini CLI and Antigravity: Google's), OpenCode shows the models it already
-knows (`opencode models`, kept from fetching OpenCode's catalog), and a model server on your own computer
-shows what it has. Otherwise the list built in below is
+(Claude Code: Anthropic's, Codex: OpenAI's, Gemini CLI and Antigravity: Google's, Grok Build: xAI's),
+OpenCode shows the models it already knows (`opencode models`, kept from fetching OpenCode's catalog), and a
+model server on your own computer shows what it has. Otherwise the list built in below is
 shown, and the page says so: it's a fallback that goes stale, while the live one doesn't.
 
 Only model names reach the page. A key goes only to its own company (as with every question), never over
