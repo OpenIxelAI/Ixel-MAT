@@ -51,3 +51,18 @@ def test_config_shows_agents_as_ixel_runs_them(tmp_path):
     llama = out[out.index("llama —"):].split("\n\n")[0]
     assert "not needed" in llama and "missing" not in llama
     assert "type: ?" not in out
+
+
+def test_ixel_version_does_not_load_the_model_sdks(tmp_path):
+    # Every command looks for the model programs as it starts (launch.add_install_folders), and that mustn't load
+    # a transport's SDK: anthropic alone made `ixel version`, `ixel help` and the MCP plugin's start a second slower
+    env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path),
+           "XDG_CONFIG_HOME": str(tmp_path / ".config"), "IXEL_TEST_KEYCHAIN": "memory",
+           "IXEL_NO_UPDATE_CHECK": "1", "PYTHONIOENCODING": "utf-8"}
+    proc = subprocess.run([sys.executable, "-X", "importtime", "-m", "ixel_mat", "version"], cwd=tmp_path, env=env,
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    imported = {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines()
+                if line.startswith("import time:")}
+    assert "ixel_mat.cli" in imported  # -X importtime listed what was imported
+    assert not {name.split(".")[0] for name in imported} & {"anthropic", "aiohttp", "websockets", "mcp"}

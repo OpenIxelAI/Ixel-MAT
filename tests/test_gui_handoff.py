@@ -117,7 +117,8 @@ def test_handoff_in_its_own_folder_is_found_without_path(project, fake_handoff, 
     status, plan = post("/api/handoff/plan", {"project": str(project), "request": "gemini list ideas"})
     [call] = fake_handoff()
     assert status == 200 and plan["steps"][0]["agent"] == "gemini"
-    assert call["path"].split(os.pathsep)[-1] == os.path.dirname(sys.executable)
+    # Added at the end unless PATH has it already, as it does when this Python is the one in /usr/bin
+    assert os.path.dirname(sys.executable) in call["path"].split(os.pathsep)
 
 
 @pytest.mark.parametrize("body,message", [
