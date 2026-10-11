@@ -43,13 +43,14 @@ _WRAPPERS = frozenset({"env", "sudo", "doas", "xargs", "nohup", "time", "nice", 
 # Interpreters, and the one-letter options (alone or in a cluster like perl's -ne) that make them run code
 # given on the command line rather than a file
 _INTERPRETERS: dict[str, frozenset[str]] = {
-    "python": frozenset("c"), "pypy": frozenset("c"),
+    "python": frozenset("c"), "pypy": frozenset("c"), "py": frozenset("c"),
     "node": frozenset("ep"), "nodejs": frozenset("ep"), "bun": frozenset("ep"), "deno": frozenset("ep"),
     "ruby": frozenset("e"), "perl": frozenset("eE"), "php": frozenset("rRBE"), "osascript": frozenset("e"),
     "lua": frozenset("e"), "tclsh": frozenset(), "rscript": frozenset("e"),
 }
 _EVAL_WORDS = frozenset({"--eval", "-eval", "--print", "--command", "--execute", "eval"})
 _PYTHON_NAME = re.compile(r"(python|pypy)(\d+(\.\d+)*)?[a-z]?")
+_VERSIONED_INTERPRETER = re.compile(r"(ruby|perl|php|lua|tclsh|rscript)(\d+(\.\d+)*)?")
 
 
 @dataclass
@@ -61,6 +62,7 @@ class CommandResult:
     output: str
     timed_out: bool
     sandboxed: bool
+    cancelled: bool = False
 
 
 def _program(word: str) -> str:
@@ -72,6 +74,9 @@ def _program(word: str) -> str:
 def _interpreter(name: str) -> str | None:
     """Which of _INTERPRETERS a program name is (python3.12 is python), or None."""
     match = _PYTHON_NAME.fullmatch(name)
+    if match:
+        return match.group(1)
+    match = _VERSIONED_INTERPRETER.fullmatch(name)
     if match:
         return match.group(1)
     return name if name in _INTERPRETERS else None
@@ -87,6 +92,8 @@ def _runs_code(kind: str, args: list[str]) -> bool:
         if arg == "-":
             return True   # the program comes from its input
         if arg.split("=", 1)[0].lower() in _EVAL_WORDS:
+            return True
+        if kind == "php" and arg.split("=", 1)[0] in ("--run", "--process-code", "--run-begin", "--run-end"):
             return True
         if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1 and set(arg[1:]) & letters:
             return True
@@ -108,7 +115,8 @@ def is_shell_or_interpreter(argv: list[str]) -> bool:
     if name in _WRAPPERS:
         # The wrapped command can start at any later word (wrappers' options differ, and some take values),
         # so each is tried: `env -i FOO=1 bash` and `sudo -u x python -c …` are both caught
-        if name == "env" and any(word.startswith("-S") or word == "--split-string" for word in argv[1:]):
+        if name == "env" and any(word.startswith("-S") or word.split("=", 1)[0] == "--split-string"
+                                 for word in argv[1:]):
             return True  # env -S splits a string into a command line, like a shell
         return any(is_shell_or_interpreter(list(argv[i:])) for i in range(1, len(argv)))
     return False
@@ -177,9 +185,11 @@ class _Output:
         return text
 
 
-def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEOUT) -> CommandResult:
+def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEOUT,
+                cancel: threading.Event | None = None) -> CommandResult:
     """Run an approved command in the workspace and wait for it, at most timeout seconds (then it and
-    everything it started are stopped). Output and errors come back together, secrets masked.
+    everything it started are stopped). cancel lets Stop end it sooner. Output and errors come back
+    together, secrets masked.
 
     ValueError when argv isn't a non-empty list of text; nothing has run then."""
     if not isinstance(argv, list) or not argv or not all(isinstance(word, str) for word in argv):
@@ -193,6 +203,8 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
         raise ValueError("the workspace isn't a folder")
     argv = list(argv)
     sandboxed = can_sandbox()
+    if cancel is not None and cancel.is_set():
+        return CommandResult(argv, None, "[stopped by the person]", False, sandboxed, cancelled=True)
     command = [SANDBOX_EXEC, "-p", sandbox_profile(folder), *argv] if sandboxed else argv
     options: dict = {"start_new_session": True} if os.name == "posix" else {}
     if os.name == "nt":
@@ -214,15 +226,24 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
     output = _Output(proc.stdout)
     deadline = time.monotonic() + timeout
     timed_out = False
+    cancelled = False
     note = ""
     try:
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _kill_tree(proc)
-            note = f"\n[stopped after {timeout:g} seconds, the time limit]"
-        if not timed_out:
+        while proc.poll() is None:
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                _kill_tree(proc)
+                note = "\n[stopped by the person]"
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                _kill_tree(proc)
+                note = f"\n[stopped after {timeout:g} seconds, the time limit]"
+                break
+            with suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=min(remaining, 0.1) if cancel is not None else remaining)
+        if not timed_out and not cancelled:
             # Programs it started in the background can keep its output open after it ended
             output.thread.join(max(min(deadline - time.monotonic(), _DRAIN_WAIT), 0.1))
             if output.thread.is_alive():
@@ -237,4 +258,5 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
         with suppress(OSError):
             proc.stdout.close()
     return CommandResult(argv=argv, returncode=None if timed_out else proc.returncode,
-                         output=mask_secrets(output.text()) + note, timed_out=timed_out, sandboxed=sandboxed)
+                         output=mask_secrets(output.text()) + note, timed_out=timed_out, sandboxed=sandboxed,
+                         cancelled=cancelled)

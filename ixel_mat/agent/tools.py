@@ -60,7 +60,7 @@ class PendingWrite:
 
 def is_secret_name(name: str) -> bool:
     """Whether a file or folder name looks like it holds a secret: .env*, *.pem, *.key, id_rsa*, .netrc …"""
-    low = name.lower()
+    low = name.split(":", 1)[0].lower()  # Windows may name an alternate stream after a colon.
     return low in _SECRET_NAMES or low.startswith(_SECRET_PREFIXES) or low.endswith(_SECRET_SUFFIXES)
 
 
@@ -69,16 +69,24 @@ def _config_folder() -> str:
     return os.path.realpath(_secrets._ENV_DIR)
 
 
-def _fingerprint(path: Path) -> tuple[int, int, str] | None:
-    """Size, modification time and SHA-256 of a file's bytes; None when there's no file."""
+def _snapshot(path: Path) -> tuple[bytes, tuple[int, int, str] | None]:
+    """A file's bytes and fingerprint from the same bounded read; empty bytes and None for a new file."""
     try:
-        info = path.stat()
-        data = path.read_bytes()
+        with path.open("rb") as handle:
+            info = os.fstat(handle.fileno())
+            data = handle.read(MAX_WRITE_BYTES + 1)
     except FileNotFoundError:
-        return None
+        return b"", None
     except OSError as exc:
         raise WorkspaceError(f"can't read the file: {exc.strerror or type(exc).__name__}") from exc
-    return (info.st_size, info.st_mtime_ns, hashlib.sha256(data).hexdigest())
+    if len(data) > MAX_WRITE_BYTES:
+        raise WorkspaceError("the file is over 1 MB, too big for the agent to change")
+    return data, (len(data), info.st_mtime_ns, hashlib.sha256(data).hexdigest())
+
+
+def _fingerprint(path: Path) -> tuple[int, int, str] | None:
+    """Size, modification time and SHA-256 of a file's bytes; None when there's no file."""
+    return _snapshot(path)[1]
 
 
 def _looks_binary(data: bytes) -> bool:
@@ -125,6 +133,7 @@ class Workspace:
         parts = path.replace("\\", "/").split("/")
         if ".." in parts:
             raise WorkspaceError(f"{path!r} goes outside the workspace ('..' isn't allowed)")
+        self._check_parts(path, self.root.parts)
         self._check_parts(path, parts)
         try:
             real = (self.root / path).resolve(strict=False)
@@ -137,11 +146,18 @@ class Workspace:
         config = _config_folder()
         if str(real) == config or str(real).startswith(config.rstrip(os.sep) + os.sep):
             raise WorkspaceError(f"{path!r} is in Ixel's own config folder, which the agent can't use")
+        # On a case-insensitive disk, a different spelling of the config path is the same folder.
+        for parent in (real, *real.parents):
+            try:
+                if parent.samefile(config):
+                    raise WorkspaceError(f"{path!r} is in Ixel's own config folder, which the agent can't use")
+            except OSError:
+                continue
         return real
 
     def _check_parts(self, path: str, parts: list[str] | tuple[str, ...]) -> None:
         for part in parts:
-            if part.lower() == ".git":
+            if part.split(":", 1)[0].lower() == ".git":
                 raise WorkspaceError(f"{path!r} is inside .git, which the agent can't use (Git's own files)")
             if is_secret_name(part):
                 raise WorkspaceError(f"{path!r} looks like a secret ({part}), so the agent can't read or "
@@ -296,33 +312,26 @@ class Workspace:
 
     # ── Writing ──────────────────────────────────────────────────────────────
 
-    def _current_text(self, real: Path, path: str) -> str:
-        """The text of a file about to be changed ('' when there's none yet), refusing what can't be edited."""
+    def _current_text(self, real: Path, path: str) -> tuple[str, tuple[int, int, str] | None]:
+        """The text and fingerprint of a file about to be changed, refusing what can't be edited."""
         if real.exists() and not real.is_file():
             raise WorkspaceError(f"{path!r} isn't a file")
-        if not real.exists():
-            return ""
-        try:
-            data = real.read_bytes()
-        except OSError as exc:
-            raise WorkspaceError(f"can't read {path!r}: {exc.strerror or type(exc).__name__}") from exc
-        if len(data) > MAX_WRITE_BYTES:
-            raise WorkspaceError(f"{path!r} is over 1 MB, too big for the agent to change")
+        data, fingerprint = _snapshot(real)
         if _looks_binary(data):
             raise WorkspaceError(f"{path!r} isn't a text file, so the agent can't change it")
         try:
-            return data.decode("utf-8")
+            return data.decode("utf-8"), fingerprint
         except UnicodeDecodeError as exc:
             raise WorkspaceError(f"{path!r} isn't UTF-8 text, so the agent can't change it") from exc
 
-    def _pending(self, real: Path, old: str, new: str) -> PendingWrite:
+    def _pending(self, real: Path, old: str, new: str,
+                 fingerprint: tuple[int, int, str] | None) -> PendingWrite:
         if "\x00" in new:
             raise WorkspaceError("the new text contains a NUL character; the agent only writes text")
         if len(new.encode("utf-8")) > MAX_WRITE_BYTES:
             raise WorkspaceError("the new text is over 1 MB, too big to write")
         if real.exists() and new == old:
             raise WorkspaceError("that changes nothing: the file already says that")
-        fingerprint = _fingerprint(real)
         diff = _unified_diff(self._rel(real), old, new, is_new=fingerprint is None)
         return PendingWrite(path=real, new_text=new, diff=diff, fingerprint=fingerprint)
 
@@ -333,7 +342,8 @@ class Workspace:
         real = self.resolve(path)
         if real == self.root:
             raise WorkspaceError("name a file to write, not the workspace itself")
-        return self._pending(real, self._current_text(real, path), content)
+        old, fingerprint = self._current_text(real, path)
+        return self._pending(real, old, content, fingerprint)
 
     def prepare_edit(self, path: str, old: str, new: str) -> PendingWrite:
         """Check an edit that replaces old with new, where old appears exactly once, and make its diff."""
@@ -344,14 +354,14 @@ class Workspace:
         real = self.resolve(path)
         if not real.is_file():
             raise WorkspaceError(f"there's no file {path!r} to edit; use write_file to make one")
-        text = self._current_text(real, path)
+        text, fingerprint = self._current_text(real, path)
         count = text.count(old)
         if count == 0:
             raise WorkspaceError(f"old appears 0 times in {path!r}; copy it exactly from read_file")
         if count > 1:
             raise WorkspaceError(f"old appears {count} times in {path!r}; include more of the lines around it "
                                  "so it appears once")
-        return self._pending(real, text, text.replace(old, new, 1))
+        return self._pending(real, text, text.replace(old, new, 1), fingerprint)
 
     def apply(self, pending: PendingWrite) -> str:
         """Write an approved change: refused if the file changed since its diff was made, else written to a
@@ -379,6 +389,8 @@ class Workspace:
                     raise
             try:
                 os.chmod(tmp_path, mode)
+                if self.resolve(rel) != pending.path or _fingerprint(pending.path) != pending.fingerprint:
+                    raise WorkspaceError(f"{rel} changed while the change was being written; propose it again")
                 os.replace(tmp_path, pending.path)
             except BaseException:
                 tmp_path.unlink(missing_ok=True)
