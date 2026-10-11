@@ -97,7 +97,9 @@ class Verdict(str, Enum):
 
     @classmethod
     def parse(cls, value: Any) -> "Verdict":
-        text = re.sub(r"[\s\-]+", "_", _coerce_text(value).lower())
+        # "incorrect." or "Correct!" is still a grade: punctuation around the word doesn't change it
+        bare = re.sub(r"^[\W_]+|[\W_]+$", "", _coerce_text(value))
+        text = re.sub(r"[\s\-]+", "_", bare.lower())
         if text in ("correct", "right", "accurate", "true"):
             return cls.CORRECT
         if text.startswith(("partial", "partly")) or text in ("mostly_correct", "mixed"):
@@ -246,9 +248,11 @@ class ReviewResult:
     def agreement(self) -> str:
         """
         'strong' when reviewers are consistent about every answer (even if
-        several answers are right), 'split' when they contradict each other.
+        several answers are right), 'split' when they contradict each other,
+        'unknown' when no answer has a grade to compare: no review round, or
+        every grade was "unsure" (nobody committed, so nobody agreed either).
         """
-        if not any(not r.is_self for r in self.reviews):
+        if all(s.score is None for s in self.standings()):
             return "unknown"
         return "split" if self.disputed() else "strong"
 
@@ -488,7 +492,8 @@ def _short_list(value: Any) -> list[str]:
 
 
 def _parse_label(value: Any, known: set[str]) -> str | None:
-    m = re.fullmatch(r"(?:answer\s*)?([A-Za-z])", _coerce_text(value).strip(), re.IGNORECASE)
+    # "(A)", "A." and "Answer: A" name answer A; "A/B" or "1" name none
+    m = re.fullmatch(r"[\W_]*(?:answer[\W_]*)?([A-Za-z])[\W_]*", _coerce_text(value).strip(), re.IGNORECASE)
     label = m.group(1).upper() if m else None
     return label if label in known else None
 
@@ -504,10 +509,15 @@ def _slowest_wait(value: Any) -> float | str:
 
 def _parse_verdict(raw: str, notes_marker: str) -> FinalAnswer:
     """The answer, then `<fence> notes` with a small JSON object. Older-style replies (one JSON
-    object with an "answer") still work, and a reply without notes is taken as the answer."""
+    object with an "answer") still work, and a reply without notes is taken as the answer.
+    Notes written first still work too: the answer is then in them ("answer"), or after them."""
+    closing = "</" + notes_marker[1:].split(" ", 1)[0] + ">"  # the marker is "<{fence} notes>"
     if notes_marker in raw:
         answer, _, notes = raw.partition(notes_marker)
-        data = extract_json_object(notes) or {}
+        inside, closed, after = notes.partition(closing)
+        data = extract_json_object(inside) or {}
+        if not answer.strip():
+            answer = _coerce_text(data.get("answer")) or (after if closed else "")
         if answer.strip():
             return FinalAnswer(
                 answer=answer.strip(),
@@ -525,8 +535,11 @@ def _parse_verdict(raw: str, notes_marker: str) -> FinalAnswer:
                 disagreements=_short_list(data.get("disagreements")),
                 corrections=_short_list(data.get("corrections")),
             )
-    if raw.strip():
-        return FinalAnswer(answer=raw.split(notes_marker, 1)[0].strip() or raw.strip())
+    # Anything else is the answer as written, less its notes: they're for Ixel, never for the user
+    before, marked, rest = raw.partition(notes_marker)
+    answer = (before + rest.partition(closing)[2] if marked else raw).strip()
+    if answer:
+        return FinalAnswer(answer=answer)
     raise RuntimeError("returned an empty verdict")
 
 
@@ -563,6 +576,22 @@ def _keys_of(agent) -> list[str]:
     """The agent's own key, if it has one: blanked out of any error it reports, whatever it looks like."""
     token = getattr(getattr(agent, "config", None), "token", "")
     return [token] if isinstance(token, str) and token else []
+
+
+def _fallback_order(standings: Sequence[Standing]) -> list[Standing]:
+    """
+    The order to fall back in when nobody chose an answer (the moderator or verifier failed), and to
+    pick the moderator by. The scoreboard puts an answer no reviewer could grade (every grade "unsure")
+    below one every reviewer called incorrect; here an answer rated above zero comes first, then one
+    nobody could grade, and only then one rated wrong.
+    """
+    return sorted(standings, key=lambda s: (s.score == 0.0, s.score is None, -(s.score or 0), -s.best_votes,
+                                            s.answer.latency_ms))
+
+
+def _rated(standing: Standing, rated: str) -> str:
+    """How a fallback note names its pick: `rated` ("top-rated") only if reviewers rated it above zero."""
+    return rated if standing.score else "best available"
 
 
 class _Run:
@@ -711,9 +740,13 @@ class _Run:
     async def calls(self, round_name: str, jobs: list[tuple[Any, Awaitable[None]]]) -> None:
         """
         Run one round's calls together. With three or more, once all but one are done, the
-        last one gets as long again as the others took (at least SLOWEST_WAIT_MIN seconds;
-        or slowest_wait seconds) and is then left out, so one slow model can't hold up the
-        whole panel. slowest_wait = "always" waits for every model.
+        last one gets as long again as the others took to answer (at least SLOWEST_WAIT_MIN
+        seconds; or slowest_wait seconds) and is then left out, so one slow model can't hold
+        up the whole panel. slowest_wait = "always" waits for every model.
+
+        A call that failed (a bad key, a program that isn't installed) is done but didn't
+        answer, often at once: it doesn't set the pace, and if no call has answered yet, the
+        last one is waited for, within its own time limit.
         """
         tasks = {asyncio.ensure_future(job): agent for agent, job in jobs}
         if self.slowest_wait == "always" or len(tasks) < 3:
@@ -722,13 +755,19 @@ class _Run:
         try:
             started = time.perf_counter()
             pending = set(tasks)
+            took = None  # seconds from the round's start to the latest reply among the calls that are done
             while len(pending) > 1:
-                _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                if any((round_name, tasks[t].name) in self._replied for t in done):
+                    took = time.perf_counter() - started
             if not pending:
                 return
-            took = time.perf_counter() - started
+            if took is None:  # every other call failed: nobody has answered, so there's no pace to hold it to
+                await asyncio.wait(pending)
+                return
             grace = self.slowest_wait if isinstance(self.slowest_wait, float) else max(SLOWEST_WAIT_MIN, took)
             _, pending = await asyncio.wait(pending, timeout=grace)
+            waited = time.perf_counter() - started
         except BaseException:
             # The review was cancelled (the page closed, Stop was pressed): unlike gather,
             # wait() leaves its tasks running, and every one of them is a paid model call
@@ -743,8 +782,8 @@ class _Run:
         await asyncio.gather(*pending, return_exceptions=True)
         for task in left_out:
             agent = tasks[task]
-            failure = self.fail(agent, round_name, f"left out: still working {took + grace:.0f}s in, when the "
-                                                   f"others had finished in {took:.0f}s")
+            failure = self.fail(agent, round_name, f"left out: still working after {waited:.0f}s, when the "
+                                                   f"others had answered in {took:.0f}s")
             await self.emit("agent_failed", round=round_name, agent=agent.name, agent_label=agent.label,
                             error=failure.error)
 
@@ -786,7 +825,8 @@ class _Run:
         blocks = []
         for ans in answers:
             tag = f"answer {ans.label}"
-            if with_scores and scores.get(ans.label) is not None:
+            # A revised answer (deep mode) was scored as it read before: that score isn't the new text's
+            if with_scores and scores.get(ans.label) is not None and not ans.was_revised:
                 tag += f" (peer score {scores[ans.label]:.2f})"
             blocks.append(_fenced(self.fence, tag, _clean_for_prompt(ans.text, self.fence)))
         return "\n\n".join(blocks)
@@ -840,6 +880,13 @@ class _Run:
                 ))
             ballot = Ballot(agent.name, agent.label, _parse_label(data.get("best"), known),
                             _clip(_coerce_text(data.get("summary")), 600), own)
+            if not reviews and ballot.best is None:
+                # Valid JSON, but no grade and no pick of any answer it was shown ("reviews": [], labels
+                # like "1" or "A/B"): nothing of it counts, so it didn't review
+                failure = self.fail(agent, "review", RuntimeError("review named no answer"))
+                await self.emit("agent_failed", round="review", agent=agent.name,
+                                agent_label=agent.label, error=failure.error)
+                return
             self.result.reviews.extend(reviews)
             self.result.ballots.append(ballot)
             await self.emit("review", reviewer=agent.name, reviewer_label=agent.label, best=ballot.best,
@@ -898,7 +945,7 @@ class _Run:
         connected = {a.name: a for a in self.agents}
         if self.moderator_name and self.moderator_name in connected:
             return connected[self.moderator_name]
-        for standing in self.result.standings():   # best-rated author, else fastest
+        for standing in _fallback_order(self.result.standings()):   # best-rated author, else fastest
             if standing.answer.agent in connected:
                 return connected[standing.answer.agent]
         return self.agents[0]
@@ -909,6 +956,10 @@ class _Run:
             if not s.reviews:
                 continue
             verdicts = ", ".join(r.verdict.value for r in s.reviews)
+            if s.answer.was_revised:  # deep mode: the reviewers graded the text it had before, not this one
+                lines.append(f"Answer {s.answer.label}: peer verdicts {verdicts}, of its text before revision.")
+                lines += [f"  - flagged before revision: {e}" for _, e in s.flagged_errors]
+                continue
             lines.append(f"Answer {s.answer.label}: peer verdicts {verdicts}.")
             lines += [f"  - flagged: {e}" for _, e in s.flagged_errors]
         if not lines:
@@ -969,10 +1020,11 @@ class _Run:
             failure = self.fail(moderator, "verdict", exc)
             await self.emit("agent_failed", round="verdict", agent=moderator.name,
                             agent_label=moderator.label, error=failure.error)
-            top = self.result.standings()[0].answer
-            final = FinalAnswer(answer=top.text,
+            top = _fallback_order(self.result.standings())[0]
+            final = FinalAnswer(answer=top.answer.text,
                                 note=f"The moderator failed ({failure.error}); showing the "
-                                     f"{'highest-rated' if reviewed else 'first'} answer ({top.agent_label}).")
+                                     f"{_rated(top, 'highest-rated') if reviewed else 'first'} answer "
+                                     f"({top.answer.agent_label}).")
         final.moderator, final.moderator_label = moderator.name, moderator.label
         self.result.final = final
 
@@ -1077,6 +1129,8 @@ class _Run:
             data = extract_json_object(raw) or {}
             status = _coerce_text(data.get("status")).lower()
             use = _parse_label(data.get("use"), known)
+            if status == "confirmed" and use is None and len(answers) == 1:
+                use = answers[0].label  # one draft: there's nothing to name, so models often don't
             corrected = _coerce_text(data.get("answer"))
             issues = _short_list(data.get("issues"))
             if status == "confirmed" and use:
@@ -1086,6 +1140,14 @@ class _Run:
                 final = FinalAnswer(answer=draft.text, confidence=Confidence.HIGH,
                                     note=f"{verifier.label} checked the drafts and confirmed answer {use} "
                                          f"({draft.agent_label}){fixed}.")
+            elif status == "confirmed":
+                # A draft is right, but which wasn't said ("use" left out, or "Draft A"). The top-rated one
+                # is shown, not recorded as accepted: that's a guess, so it's neither a save nor a miss.
+                top = _fallback_order(self.result.standings())[0]
+                self.result.verifier_outcome = "confirmed"
+                final = FinalAnswer(answer=top.answer.text, confidence=Confidence.MEDIUM,
+                                    note=f"{verifier.label} didn't say which draft; showing the "
+                                         f"{_rated(top, 'top-rated')} one ({top.answer.agent_label}).")
             elif status == "send_back" and issues and allow_send_back:
                 self.result.sent_back = True
                 await self.emit("sent_back", verifier_label=verifier.label, issues=issues)
@@ -1098,28 +1160,39 @@ class _Run:
                 self.result.verifier_outcome = "corrected"
                 final = FinalAnswer(answer=corrected, corrections=issues,
                                     note=f"{verifier.label} corrected the drafts.")
-            elif status == "send_back" and issues:
-                # Still wrong (after the fix round, or with no fix round to ask for), and no correction written
-                top = self.result.standings()[0].answer
+            elif status == "send_back":
+                # Still wrong (after the fix round, or with no fix round to ask for, or no issues to send
+                # back with), and no correction written
+                top = _fallback_order(self.result.standings())[0]
                 self.result.verifier_outcome = "unresolved"
                 found = ("still found problems after the fix round" if second_pass
                          else "found problems in the drafts but didn't write a correction")
-                final = FinalAnswer(answer=top.text, corrections=issues,
-                                    note=f"{verifier.label} {found}; showing the best draft ({top.agent_label}) "
-                                         f"with the problems listed.")
+                final = FinalAnswer(answer=top.answer.text, corrections=issues,
+                                    note=f"{verifier.label} {found}; showing the {_rated(top, 'best')} draft "
+                                         f"({top.answer.agent_label})"
+                                         + (" with the problems listed." if issues else "."))
             elif raw:
-                self.result.verifier_outcome = "corrected"
-                final = FinalAnswer(answer=raw, note=f"{verifier.label} replied without the requested format.")
+                # Not the reply asked for: it doesn't say which draft is right, and it isn't an answer to show
+                # (often it's the JSON itself). The verifier's check didn't happen, as if its call had failed.
+                failure = self.fail(verifier, "verify", "replied without the requested format")
+                await self.emit("agent_failed", round="verify", agent=verifier.name,
+                                agent_label=verifier.label, error=failure.error)
+                top = _fallback_order(self.result.standings())[0]
+                self.result.verifier_outcome = "failed"
+                final = FinalAnswer(answer=top.answer.text,
+                                    note=f"{verifier.label} replied without the requested format; showing the "
+                                         f"{_rated(top, 'top-rated')} draft ({top.answer.agent_label}), unverified.")
             else:
                 raise RuntimeError("returned an empty verification")
         except Exception as exc:  # noqa: BLE001 — fall back to the best-rated draft
             failure = self.fail(verifier, "verify", exc)
             await self.emit("agent_failed", round="verify", agent=verifier.name,
                             agent_label=verifier.label, error=failure.error)
-            top = self.result.standings()[0].answer
+            top = _fallback_order(self.result.standings())[0]
             self.result.verifier_outcome = "failed"
-            final = FinalAnswer(answer=top.text, note=f"The verifier failed ({failure.error}); showing the "
-                                                      f"best-rated draft ({top.agent_label}), unverified.")
+            final = FinalAnswer(answer=top.answer.text,
+                                note=f"The verifier failed ({failure.error}); showing the "
+                                     f"{_rated(top, 'best-rated')} draft ({top.answer.agent_label}), unverified.")
         final.moderator, final.moderator_label = verifier.name, verifier.label
         self.result.final = final
         await self.emit("verified", outcome=self.result.verifier_outcome, verifier_label=verifier.label,

@@ -7,7 +7,7 @@ import re
 import pytest
 
 from ixel_mat.modes.review import (
-    MAX_PANEL, ReviewMode, Verdict, _parse_label, _unfenced, run_review,
+    MAX_PANEL, ReviewMode, Verdict, _parse_label, _parse_verdict, _unfenced, run_review,
 )
 from fake_providers import verdict_reply
 from ixel_mat.schema.response import Confidence
@@ -139,6 +139,15 @@ def test_reviewers_disagreeing_is_reported_as_split():
     assert gpt.label in result.disputed()
 
 
+def test_reviewers_who_were_all_unsure_are_not_reported_as_consistent():
+    # Nobody committed to a grade, so there's nothing they agreed on either
+    unsure = json.dumps({"reviews": [{"answer": x, "verdict": "unsure"} for x in "ABC"], "best": None})
+    result = review([PanelAgent(name, text, replies={"review": unsure}) for name, text in
+                     (("gpt", "It's 391."), ("claude", "17 × 23 = 391"), ("gemini", "The answer is 381."))])
+    assert len(result.reviews) == 9 and not result.disputed()
+    assert result.agreement() == "unknown" and result.to_dict()["agreement"] == "unknown"
+
+
 # ── Anonymity and injection resistance ───────────────────────────────────────
 
 def test_reviewers_never_see_who_wrote_what():
@@ -234,6 +243,19 @@ def test_deep_mode_revises_before_the_verdict():
     assert "391 — corrected after review" in verdict_prompt
 
 
+def test_the_moderator_is_told_a_revised_answers_grades_are_of_its_earlier_text():
+    # gemini's 381 was graded incorrect, then revised to 391: that 0.00 and those errors describe text that's gone
+    agents = panel(gpt=PanelAgent("gpt", "It's 391.", replies={"revise": "It's 391."}))
+    result = review(agents, mode="deep", moderator="gpt")
+    gpt, gemini = by_agent(result, "gpt"), by_agent(result, "gemini")
+    assert not gpt.was_revised and gemini.was_revised
+    prompt = agents[0].prompts_of("verdict")[0]
+    assert f"answer {gpt.label} (peer score 1.00)>\nIt's 391." in prompt  # unrevised: its grades still describe it
+    assert f"answer {gemini.label}>\n391 — corrected after review" in prompt and "(peer score 0.00)" not in prompt
+    assert f"Answer {gemini.label}: peer verdicts incorrect, incorrect, of its text before revision." in prompt
+    assert prompt.count("  - flagged before revision: 17 × 23 is 391") == 2 and "  - flagged: " not in prompt
+
+
 def test_moderator_can_be_chosen():
     result = review(panel(), moderator="gemini")
     assert result.final.moderator == "gemini"
@@ -260,13 +282,57 @@ def test_invalid_review_json_is_a_failure_not_a_crash():
     assert len(result.ballots) == 2
 
 
+@pytest.mark.parametrize("reply", [
+    '{"reviews": [], "best": "Z"}',
+    '{"reviews": {"A": "correct"}}',
+    '{"reviews": [{"answer": "1", "verdict": "correct"}, {"answer": "A/B", "verdict": "correct"}]}',
+])
+def test_a_review_that_names_no_answer_is_a_failure_not_a_review(reply):
+    events = []
+    result = review(panel(claude=PanelAgent("claude", "17 × 23 = 391", replies={"review": reply})),
+                    on_event=events.append)
+    assert [(f.agent, f.round, f.error) for f in result.failures] == [("claude", "review", "review named no answer")]
+    assert [e.data["agent"] for e in events if e.kind == "agent_failed"] == ["claude"]
+    assert "claude" not in [e.data["reviewer"] for e in events if e.kind == "review"]
+    assert len(result.ballots) == 2 and "claude" not in [b.reviewer for b in result.ballots]
+
+
 def test_moderator_failure_falls_back_to_the_best_answer():
     agents = panel(gpt=PanelAgent("gpt", "It's 391.", fail_on={"verdict"}),
                    claude=PanelAgent("claude", "17 × 23 = 391", fail_on={"verdict"}))
     result = review(agents, moderator="gpt")
     assert "391" in result.final.answer
-    assert "moderator failed" in result.final.note
+    assert "moderator failed" in result.final.note and "highest-rated answer" in result.final.note
     assert ("gpt", "verdict") in [(f.agent, f.round) for f in result.failures]
+
+
+SYDNEY, UNCHECKED, MELBOURNE = ("The capital is Sydney.", "It depends on records I can't check.",
+                                "The capital is Melbourne.")
+
+
+class Grader(PanelAgent):
+    """Knows Sydney and Melbourne are wrong, and can't check anything else."""
+
+    async def send_and_receive(self, message, **kwargs):
+        if classify(message) != "review":
+            return await super().send_and_receive(message, **kwargs)
+        reviews = [{"answer": label, "verdict": "incorrect" if text in (SYDNEY, MELBOURNE) else "unsure",
+                    "errors": ["Canberra is the capital."] if text in (SYDNEY, MELBOURNE) else []}
+                   for _, label, text in FENCED_ANSWER.findall(message)]
+        return json.dumps({"reviews": reviews, "best": None})
+
+
+def test_a_failed_moderator_falls_back_to_an_unchecked_answer_before_one_rated_wrong():
+    agents = [Grader("a", SYDNEY, fail_on={"verdict"}), Grader("b", UNCHECKED), Grader("c", MELBOURNE)]
+    result = review(agents, moderator="a")
+    assert result.standings()[-1].answer.text == UNCHECKED  # the scoreboard keeps its order
+    assert result.final.answer == UNCHECKED
+    assert "showing the best available answer (B)" in result.final.note and "highest-rated" not in result.final.note
+
+
+def test_the_author_of_an_unchecked_answer_moderates_before_one_rated_wrong():
+    result = review([Grader("a", SYDNEY), Grader("b", UNCHECKED), Grader("c", MELBOURNE)])
+    assert result.final.moderator == "b"
 
 
 def test_moderator_ignoring_the_format_still_gives_an_answer():
@@ -353,6 +419,47 @@ def test_verdict_parsing(raw, expected):
 @pytest.mark.parametrize("raw,expected", [("B", "B"), ("b", "B"), ("Answer C", "C"), ("Z", None), ("", None), (None, None)])
 def test_label_parsing(raw, expected):
     assert _parse_label(raw, {"A", "B", "C"}) == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("incorrect.", Verdict.INCORRECT), ("Correct!", Verdict.CORRECT), ("(partially correct)", Verdict.PARTIAL),
+    ('"wrong"', Verdict.INCORRECT), ("**correct**", Verdict.CORRECT), (" Partly correct. ", Verdict.PARTIAL),
+])
+def test_punctuation_around_a_grade_does_not_change_it(raw, expected):
+    assert Verdict.parse(raw) is expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("(A)", "A"), ("A.", "A"), ("A:", "A"), ("[b]", "B"), ("Answer: C", "C"), ("answer B.", "B"),
+    ("A/B", None), ("1", None), ("Draft A", None), ("A and B", None),
+])
+def test_punctuation_around_a_label_does_not_change_it(raw, expected):
+    assert _parse_label(raw, {"A", "B", "C"}) == expected
+
+
+class Punctuating(PanelAgent):
+    """Reviews like the others, but writes "A." for a label, "(A)" for its pick and "correct." for a grade."""
+
+    async def send_and_receive(self, message, **kwargs):
+        reply = await super().send_and_receive(message, **kwargs)
+        if classify(message) != "review":
+            return reply
+        data = json.loads(reply)
+        for item in data["reviews"]:
+            item["answer"], item["verdict"] = item["answer"] + ".", item["verdict"] + "."
+        data["best"] = f"({data['best']})"
+        return json.dumps(data)
+
+
+def test_a_reviewer_that_punctuates_its_labels_and_grades_still_counts():
+    result = review(panel(gemini=Punctuating("gemini", "The answer is 381.")))
+    graded = {r.target: r.verdict for r in result.reviews if r.reviewer == "gemini"}
+    label = {a.agent: a.label for a in result.answers}
+    assert graded == {label["gpt"]: Verdict.CORRECT, label["claude"]: Verdict.CORRECT,
+                      label["gemini"]: Verdict.INCORRECT}
+    best = next(b.best for b in result.ballots if b.reviewer == "gemini")
+    assert best in (label["gpt"], label["claude"])
+    assert not result.failures
 
 
 # ── Saver mode: cheap drafters, one big verifier ──────────────────────────────
@@ -460,7 +567,14 @@ def test_saver_verifier_failure_falls_back_to_best_draft():
     opus = Verifier("", fail_on={"verify"})
     result = saver(panel() + [opus])
     assert result.verifier_outcome == "failed" and "unverified" in result.final.note
-    assert "391" in result.final.answer
+    assert "391" in result.final.answer and "best-rated draft" in result.final.note
+
+
+def test_saver_verifier_failure_falls_back_to_an_unchecked_draft_before_one_rated_wrong():
+    agents = [Grader("a", SYDNEY), Grader("b", UNCHECKED), Grader("c", MELBOURNE), Verifier("", fail_on={"verify"})]
+    result = saver(agents)
+    assert result.verifier_outcome == "failed" and result.final.answer == UNCHECKED
+    assert "showing the best available draft (B), unverified" in result.final.note
 
 
 def test_saver_with_no_drafts_lets_the_verifier_answer():
@@ -549,6 +663,78 @@ def test_saver_on_wrong_correct_skips_the_send_back():
     prompt = opus.prompts[0][1]
     assert "write the corrected answer" in prompt and '"send_back"' not in prompt
     assert not result.sent_back and result.verifier_outcome == "corrected"
+
+
+def _stats_after_two_saves(result, tmp_path) -> dict:
+    """The saved stats once `result` is counted after two saves in a row."""
+    from ixel_mat import stats
+    path = tmp_path / "stats.json"
+    for _ in range(2):
+        stats.record_run(saver([PanelAgent("haiku", "17 × 23 = 391"),
+                                Verifier(json.dumps({"status": "confirmed", "use": "A"}))]), path=path)
+    assert json.loads(path.read_text())["streak"] == 2
+    stats.record_run(result, path=path)
+    return json.loads(path.read_text())
+
+
+@pytest.mark.parametrize("drafters", [
+    [PanelAgent("haiku", "17 × 23 = 391")],
+    [PanelAgent("haiku", "17 × 23 = 391"), PanelAgent("flash", "", fail_on={"answer"})],
+], ids=["one drafter", "the other drafter failed"])
+def test_saver_verifier_confirming_the_only_draft_without_naming_it_accepts_it(drafters, tmp_path):
+    result = saver(drafters + [Verifier(json.dumps({"status": "confirmed"}))])
+    assert result.verifier_outcome == "confirmed" and result.accepted == "A"
+    assert result.final.answer == "17 × 23 = 391" and "confirmed answer A (Haiku)" in result.final.note
+    stats = _stats_after_two_saves(result, tmp_path)
+    assert stats["saves"] == 3 and stats["streak"] == 3 and stats["big_model_answers"] == 0
+
+
+@pytest.mark.parametrize("reply", [{"status": "confirmed"}, {"status": "confirmed", "use": "Draft A"},
+                                   {"status": "confirmed", "use": "A and B"}])
+def test_saver_verifier_confirming_without_naming_a_draft_shows_the_top_rated_one(reply, tmp_path):
+    drafters = [PanelAgent("haiku", "It's 381."), PanelAgent("flash", "17 × 23 = 391")]
+    result = saver(drafters + [Verifier(json.dumps(reply))])
+    assert result.final.answer == "17 × 23 = 391"  # flash's: the other drafter graded it correct
+    assert result.verifier_outcome == "confirmed" and result.final.confidence is Confidence.MEDIUM
+    assert result.final.note == "Opus didn't say which draft; showing the top-rated one (Flash)."
+    assert not result.accepted  # which draft it confirmed is a guess: neither a save nor a miss
+    stats = _stats_after_two_saves(result, tmp_path)
+    assert stats["saves"] == 2 and stats["streak"] == 2 and stats["big_model_answers"] == 0
+
+
+@pytest.mark.parametrize("second_pass", [False, True], ids=["at once", "after the fix round"])
+def test_saver_send_back_with_no_issues_shows_a_draft_as_unresolved(second_pass, tmp_path):
+    def reply(prompt):
+        if second_pass and "You already sent them back once" not in prompt:
+            return json.dumps({"status": "send_back", "issues": ["Redo the multiplication."]})
+        return json.dumps({"status": "send_back", "issues": []})
+
+    drafters = wrong_drafters()
+    for d in drafters:
+        d.replies = {"fix": "Still 381."}
+    result = saver(drafters + [Verifier(reply)])
+    assert result.final.answer in ("It's 381.", "About 380.", "Still 381.")  # a draft, never the verifier's JSON
+    assert result.verifier_outcome == "unresolved" and result.sent_back is second_pass
+    assert not result.final.corrections and "showing the best available draft (" in result.final.note
+    assert "problems listed" not in result.final.note
+    # Like any unresolved run: the verifier turned every draft down, so that's no save
+    stats = _stats_after_two_saves(result, tmp_path)
+    assert stats["saves"] == 2 and stats["streak"] == 0
+
+
+@pytest.mark.parametrize("reply", ["The drafts look fine to me.", '{"status": "done"}', '{"status": "corrected"}'])
+def test_saver_verifier_reply_in_no_known_format_shows_a_draft_unverified(reply, tmp_path):
+    drafters = [PanelAgent("haiku", "It's 381."), PanelAgent("flash", "17 × 23 = 391")]
+    events = []
+    result = saver(drafters + [Verifier(reply)], on_event=events.append)
+    assert result.final.answer == "17 × 23 = 391" and result.verifier_outcome == "failed"
+    assert result.final.note == ("Opus replied without the requested format; showing the top-rated draft (Flash), "
+                                 "unverified.")
+    assert [(f.agent, f.round, f.error) for f in result.failures] == [
+        ("opus", "verify", "replied without the requested format")]
+    assert [e.data["agent"] for e in events if e.kind == "agent_failed"] == ["opus"]
+    stats = _stats_after_two_saves(result, tmp_path)  # the verifier didn't check, so the run isn't counted
+    assert stats["saves"] == 2 and stats["streak"] == 2 and stats["big_model_answers"] == 0
 
 
 def test_saver_accepted_label_is_recorded():
@@ -660,6 +846,50 @@ def test_verdict_in_the_older_json_format_still_parses():
     assert result.final.confidence == Confidence.HIGH
 
 
+NOTES = "<IXEL-0123456789ab notes>"
+
+
+@pytest.mark.parametrize("raw", [
+    NOTES + '\n{"confidence": "high", "corrections": ["One answer said 381."]}\n</IXEL-0123456789ab>\n17 × 23 = 391',
+    NOTES + '\n{"answer": "17 × 23 = 391", "confidence": "high", "corrections": ["One answer said 381."]}\n'
+            '</IXEL-0123456789ab>',
+], ids=["answer after the notes", "answer inside the notes"])
+def test_a_verdict_with_its_notes_first_shows_only_the_answer(raw):
+    final = _parse_verdict(raw, NOTES)
+    assert final.answer == "17 × 23 = 391" and final.confidence is Confidence.HIGH
+    assert final.corrections == ["One answer said 381."]
+
+
+def test_a_verdict_in_the_requested_format_parses_as_it_did():
+    raw = ("17 × 23 = 391\n\n" + NOTES + '\n{"confidence": "medium", "disagreements": ["rounding"]}\n'
+           "</IXEL-0123456789ab>")
+    final = _parse_verdict(raw, NOTES)
+    assert final.answer == "17 × 23 = 391" and final.confidence is Confidence.MEDIUM
+    assert final.disagreements == ["rounding"]
+
+
+def test_a_verdict_of_notes_alone_is_no_answer():
+    with pytest.raises(RuntimeError, match="empty verdict"):
+        _parse_verdict(NOTES + '\n{"confidence": "high"}\n</IXEL-0123456789ab>', NOTES)
+
+
+class NotesFirstModerator(PanelAgent):
+    """Writes its verdict's notes before the answer."""
+
+    async def send_and_receive(self, message, **kwargs):
+        reply = await super().send_and_receive(message, **kwargs)
+        if classify(message) != "verdict":
+            return reply
+        answer, notes = reply.split("\n\n", 1)
+        return notes + "\n" + answer
+
+
+def test_a_moderator_writing_its_notes_first_still_gives_just_the_answer():
+    result = review(panel(gpt=NotesFirstModerator("gpt", "It's 391.")), moderator="gpt")
+    assert result.final.answer == "17 × 23 = 391" and "IXEL-" not in result.final.answer
+    assert result.final.confidence is Confidence.HIGH and result.final.corrections == ["One answer said 381."]
+
+
 def test_high_confidence_needs_an_answer_every_reviewer_called_correct():
     # Both answers are wrong and graded so, but the moderator still claims "high"
     result = review([PanelAgent("haiku", "It's 381."), PanelAgent("flash", "About 380.")])
@@ -751,6 +981,34 @@ def test_auto_waits_as_long_again_as_the_others_took(monkeypatch):
     started = time.perf_counter()
     result = review(_slow_panel(), mode="quick")
     assert time.perf_counter() - started < 3 and "gemini" not in [a.agent for a in result.answers]
+
+
+def test_a_model_is_not_left_out_because_the_others_failed_at_once(monkeypatch):
+    """Failures (a bad key, a program that isn't installed) can come back at once. That isn't the others answering
+    in no time: the one still working is waited for, within its own time limit."""
+    from ixel_mat.modes import review as engine
+    monkeypatch.setattr(engine, "SLOWEST_WAIT_MIN", 0.5)
+    agents = [PanelAgent("gpt", "", fail_on={"answer"}), PanelAgent("claude", "", fail_on={"answer"}),
+              PanelAgent("gemini", "17 × 23 = 391", delay=2)]
+    result = review(agents, mode="quick")
+    assert [a.agent for a in result.answers] == ["gemini"] and result.final.answer == "17 × 23 = 391"
+    assert sorted(f.agent for f in result.failures) == ["claude", "gpt"]
+    assert not [f for f in result.failures if f.error.startswith("left out")]
+
+
+def test_the_slowest_model_gets_as_long_again_as_the_others_took_to_answer(monkeypatch):
+    """One call fails at once and one answers after a second: the last one's time is measured by that answer."""
+    from ixel_mat.modes import review as engine
+    import time
+    monkeypatch.setattr(engine, "SLOWEST_WAIT_MIN", 0.5)
+    agents = [PanelAgent("gpt", "", fail_on={"answer"}), PanelAgent("claude", "17 × 23 = 391", delay=1),
+              PanelAgent("gemini", "The answer is 381.", delay=10)]
+    started = time.perf_counter()
+    result = review(agents, mode="quick")
+    assert 1.9 < time.perf_counter() - started < 5  # an answer at 1 s, then as long again
+    assert [a.agent for a in result.answers] == ["claude"]
+    left_out = next(f for f in result.failures if f.agent == "gemini")
+    assert re.fullmatch(r"left out: still working after [23]s, when the others had answered in 1s", left_out.error)
 
 
 def test_always_waits_for_every_model():

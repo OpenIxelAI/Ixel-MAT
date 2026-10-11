@@ -112,7 +112,7 @@ and the MCP plugin (as progress notifications) all render the same events.
 
 - **Answer:** every agent answers in parallel. Failures are recorded (`AgentFailure`) and the run continues
   with the rest. Every round's calls go through `_Run.calls`. With three or more models, once all but one
-  are done, the last gets `slowest_wait` longer (`"auto"`: as long again as the others took, at least
+  are done, the last gets `slowest_wait` longer (`"auto"`: as long again as the others took to answer, at least
   `SLOWEST_WAIT_MIN`) and is then left out, recorded as a failure.
 - **Review:** each agent gets the other answers labeled A, B, C… in an order rotated per reviewer, and
   returns JSON: a verdict per answer (`correct`, `partially_correct`, `incorrect`, `unsure`), issues, and
