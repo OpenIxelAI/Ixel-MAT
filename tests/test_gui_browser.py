@@ -698,6 +698,11 @@ class FakeBoard:
                           "tasks": list(self.tasks.values())})
         if url.path == "/api/board/task":
             return reply(self.detail(query["task"]))
+        if url.path == "/api/board/levels":  # (codex hands the level to OpenAI: older models take fewer)
+            if query.get("agent") != "codex":
+                return reply({"levels": None})
+            return reply({"levels": ["low", "medium", "high"] if query.get("model") == "gpt-5.1"
+                          else ["low", "medium", "high", "xhigh"]})
         if url.path == "/api/board/agents":
             return reply({"agents": [{"name": "claude"}, {"name": "codex"}, {"name": "grok", "label": "Grok"}],
                           "problems": []})
@@ -846,6 +851,112 @@ def test_board_actions_ask_first_and_go_to_handoff(gui_url, browser):
     page.wait_for_selector("#task-title:has-text('Translate the app')")
     assert fake.actions[-1] == ("add", {"title": "Translate the app", "body": "", "acceptance": ["Spanish", "French"],
                                         "assignee": "grok"})
+    assert not errors, errors
+
+
+WORKERS = {"claude": {"efforts": ["low", "medium", "high", "xhigh", "max"], "chain": True},
+                  "codex": {"efforts": ["minimal", "low", "medium", "high", "xhigh"], "chain": False}}
+
+
+def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_used(gui_url, browser):
+    fake = FakeBoard()
+    fake.tasks["T-6"] = fake.task(6, "Add a parser", "open", "claude")
+    fake.tasks["T-7"] = fake.task(7, "Tidy the CLI", "open", "codex")
+    base = fake.detail
+
+    def detail(ref):
+        data = base(ref)
+        if ref in ("T-6", "T-7"):  # a Handoff that says what its workers take: an edit, with what runs used
+            agent = "claude" if ref == "T-6" else "codex"
+            data["actions"][0] = {**data["actions"][0], "args": {"agent": agent, "kind": "edit"},
+                                  "kinds": ["edit", "answer", "review"]}
+            data["task"]["workers"] = WORKERS
+            data["task"]["usage"] = {"models": {
+                "claude-fable-5-1": {"in": 1200, "out": 5389, "cache_read": 24000, "cache_write": 8000, "cost": 0.66},
+                "claude-haiku-5-5": {"in": 900, "out": 2500, "cache_read": 0, "cache_write": 0, "cost": 0.003}}}
+            data["task"]["cost"] = 0.663
+        return data
+    fake.detail = detail
+    page, errors, _ = open_board(browser, fake)
+    page.goto(gui_url + "")
+    page.click(".rail-item[data-view=board]")
+    page.click(".task-card[data-ref=T-6]")
+
+    # What it used, model by model, with the total
+    page.wait_for_selector("table.usage")
+    table = page.inner_text("table.usage")
+    assert "Fable 5.1" in table and "$0.6600" in table and "Haiku 5.5" in table and "$0.6630" in table
+    assert "about $0.6630 · Fable 5.1, Haiku 5.5" in page.inner_text(".facts")
+
+    # A chain: starts as Fable plans, Opus and Haiku build; any model can be swapped in, and each has its own effort
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "chain")
+    assert [page.input_value(f"[data-key=needs-model-{i}]") for i in range(3)] == [
+        "claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5"]
+    assert page.input_value("[data-key=needs-effort-0]") == "low"  # Fable plans at low effort, unless you say
+    efforts = page.locator("[data-key=needs-effort-0] option").all_inner_texts()
+    assert efforts == ["Default effort", "Low effort", "Medium effort", "High effort", "Extra high effort", "Max effort"]
+    page.select_option("[data-key=needs-effort-0]", "max")
+    page.fill("[data-key=needs-model-1]", "claude-sonnet-5-5")
+    page.select_option("[data-key=needs-effort-1]", "high")
+    page.click("[data-key=needs-add-model]")
+    page.fill("[data-key=needs-model-3]", "haiku")
+    page.click("[data-key=needs-remove-2]")
+    assert page.locator("[data-key=needs-add-model]").count() == 1
+    shots = os.environ.get("IXEL_SCREENSHOT_DIR")
+    if shots:
+        page.screenshot(path=os.path.join(shots, "board-model-effort.png"))
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["models"] == ["claude-fable-5-1", "claude-sonnet-5-5", "haiku"]
+    assert approve["efforts"] == {"claude-fable-5-1": "max", "claude-sonnet-5-5": "high"}
+
+    # Its own model, a little harder: only the effort goes, for the worker's own model
+    fake.tasks["T-6"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "own")
+    page.select_option("[data-key=needs-effort-0]", "xhigh")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert "models" not in approve and approve["efforts"] == {"": "xhigh"}
+
+    # Codex: one model at a time, with Codex's own levels, narrowed to what that model takes
+    page.click(".task-card[data-ref=T-7]")
+    page.click("#task-panel .actions .btn.primary")
+    assert page.locator("#needs-run-mode option[value=chain]").count() == 0
+    page.select_option("#needs-run-mode", "one")
+    assert page.input_value("[data-key=needs-model-0]") == "gpt-5.5"
+    wait_until(page, "document.querySelectorAll('[data-key=needs-effort-0] option').length === 5")
+    page.fill("[data-key=needs-model-0]", "gpt-5.1")
+    page.press("[data-key=needs-model-0]", "Tab")
+    wait_until(page, "document.querySelectorAll('[data-key=needs-effort-0] option').length === 4")
+    assert page.locator("[data-key=needs-effort-0] option").all_inner_texts()[-1] == "High effort"
+    page.select_option("[data-key=needs-effort-0]", "high")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["models"] == ["gpt-5.1"] and approve["efforts"] == {"gpt-5.1": "high"}
+
+    # An answer names no model, and the choice is hidden
+    fake.tasks["T-6"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    page.check("input[name=needs-kind][value=answer]")
+    assert page.is_hidden(".model-row")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approvals = [args for op, args in fake.actions if op == "approve"]
+    assert approvals[-1]["kind"] == "answer" and "models" not in approvals[-1] and "efforts" not in approvals[-1]
+
+    # A task from a Handoff that doesn't say what its workers take offers no model choice
+    page.click(".task-card[data-ref=T-3]")
+    page.click("#task-panel .actions .btn.primary")
+    assert page.locator("#needs-run-mode").count() == 0
     assert not errors, errors
 
 
