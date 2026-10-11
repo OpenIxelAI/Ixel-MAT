@@ -161,7 +161,14 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
                 c["value"] for c in native_levels(_program_of(data), _str_or_none(data.get("model")))})):
             warnings.append(f"Agent '{name}': effort must be one of {', '.join(EFFORT_LEVELS)}")
             effort = ""
-        pass_env = _str_list(data, "pass_env", name, warnings)
+        ultracode = data.get("ultracode", False)
+        if not isinstance(ultracode, bool):
+            warnings.append(f"Agent '{name}': ultracode is on or off (true or false)")
+            ultracode = False
+        elif ultracode and _program_of(data) != "claude_code":
+            warnings.append(f"Agent '{name}': ultracode is Claude Code's own switch, so it does nothing here")
+            ultracode = False
+        pass_env =_str_list(data, "pass_env", name, warnings)
         drop_env = _str_list(data, "drop_env", name, warnings)
         effort_args = _str_list(data, "effort_args", name, warnings)
         effort_levels = _str_list(data, "effort_levels", name, warnings)
@@ -238,6 +245,7 @@ def build_agent_configs(config: dict[str, Any]) -> tuple[dict[str, AgentConfig],
             output_flag=data.get("output_flag", "") if isinstance(data.get("output_flag", ""), str) else "",
             stdout_format=stdout_format,
             effort=effort,
+            ultracode=ultracode,
             env=env,
             drop_env=drop_env,
             effort_args=effort_args,
