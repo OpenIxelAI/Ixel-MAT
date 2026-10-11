@@ -139,6 +139,14 @@ preset = "opencode"
 [agents.grok_build]
 preset = "grok_build"
 
+# Antigravity (`agy`), signed in with your Google account (Google AI Pro):
+# Gemini CLI no longer takes a personal Google sign-in. Opt-in: it sits out of
+# the panel until you switch it on in Settings or name it in [review] agents.
+# Google's Antigravity terms may restrict using it from tools other than
+# Google's own; using it here could put your Google account at risk.
+[agents.antigravity]
+preset = "antigravity"
+
 # ── Other agents ───────────────────────────────────────────────────────────────
 # An OpenClaw gateway on this machine (or over wss:// elsewhere):
 #

@@ -14,7 +14,7 @@
 
 Ixel MAT puts the models you already use on one panel: Claude, GPT, Gemini, Grok, local models through Ollama
 or LM Studio, and your Claude Code, Codex, Gemini CLI, GitHub Copilot, OpenCode and Grok Build (SuperGrok)
-sign-ins. Each model answers
+sign-ins, and Antigravity (Google AI Pro) if you switch it on (Google's terms may restrict it). Each model answers
 on its own, grades the others' answers without knowing whose they are, and a moderator writes the verdict, with
 the mistakes the panel caught. Attach Word, PDF, Excel or PowerPoint files and pictures: documents are read on
 your computer, and pictures go to the models that see them, your subscription sign-ins included (all but Grok
