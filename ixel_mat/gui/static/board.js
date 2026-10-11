@@ -41,7 +41,7 @@ const WORKER_MODELS = {
     one: "gpt-5.5", chain: [] },
 };
 const MAX_MODELS = 4;  // a planner and up to three models for its steps (Handoff's approvals.MAX_MODELS)
-const EFFORT_WORDS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
+const EFFORT_WORDS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra" };
 function modelName(id) {
   const found = CLAUDE_MODELS.find(([m]) => m === id);
   return found ? found[1] : id;
@@ -1168,8 +1168,10 @@ function runPicker(asked, agent, worker) {
   const row = el("div", { class: "model-row" }, el("label", { for: "needs-run-mode" }, "Which model?"), mode, rows, hint,
     el("datalist", { id: listId }, names.suggest.map(([id, name]) => el("option", { value: id }, name))));
   const args = () => {
-    const picked = state.rows.map((r) => ({ model: (r.model || "").trim().toLowerCase(), effort: r.effort }));
-    if (state.mode === "own") return picked[0].effort ? { efforts: { "": picked[0].effort } } : {};
+    const rowsPicked = state.rows.map((r) => ({ model: (r.model || "").trim().toLowerCase(), effort: r.effort }));
+    if (state.mode === "own") return rowsPicked[0].effort ? { efforts: { "": rowsPicked[0].effort } } : {};
+    // A blank row, or a model named twice, would only come back refused: leave them out
+    const picked = rowsPicked.filter((r, i) => r.model && rowsPicked.findIndex((o) => o.model === r.model) === i);
     const models = picked.map((r) => r.model);
     const efforts = Object.fromEntries(picked.filter((r) => r.effort && r.model).map((r) => [r.model, r.effort]));
     return { models, ...(Object.keys(efforts).length ? { efforts } : {}) };

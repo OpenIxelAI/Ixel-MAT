@@ -311,7 +311,7 @@ def test_the_board_offers_only_the_effort_levels_a_codex_model_takes():
         "/api/board/levels?agent=claude&model=claude-haiku-5-5", "/api/board/levels?agent=codex")
     assert (s1, s2, s3, s4) == (200, 200, 200, 200)
     assert older["levels"] == ["low", "medium", "high"] and newer["levels"] == ["low", "medium", "high", "xhigh"]
-    assert claude["levels"] is None and isinstance(unnamed["levels"], list)
+    assert claude["levels"] == [] and isinstance(unnamed["levels"], list)  # Haiku takes no effort in Claude Code
 
 
 def test_a_handoff_too_old_for_the_board_says_update(project, fake):
