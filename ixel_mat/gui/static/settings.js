@@ -389,7 +389,7 @@ function effortNote(a) {
 }
 
 // The nearest level a model takes, as a question sends it (ties go to the lower one)
-const LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 function nearest(level, levels) {
   const at = LEVELS.indexOf(level);
   return levels.reduce((best, l) => {
@@ -616,11 +616,18 @@ function add(server, model) {
   });
 }
 
+// The levels a model takes, named by its provider when the server sends them (levels); a live list has values only, so it keeps Ixel's names.
 // Only the levels this model takes; one saved before that it doesn't take says what's sent instead
+function levelLabel(a, value) {
+  const found = (a.levels || []).find((l) => l.value === value);
+  return found ? found.label : cap(value);
+}
+
 function effortChoices(a) {
   const levels = effortsOf(a);
-  const choices = [["", "Default"], ...levels.map((e) => [e, cap(e)])];
-  if (a.effort && !levels.includes(a.effort)) choices.push([a.effort, `${cap(a.effort)} (sent as ${cap(nearest(a.effort, levels))})`]);
+  const name = (e) => (liveEfforts(a) ? cap(e) : levelLabel(a, e));
+  const choices = [["", "Default"], ...levels.map((e) => [e, name(e)])];
+  if (a.effort && !levels.includes(a.effort)) choices.push([a.effort, `${name(a.effort)} (sent as ${name(nearest(a.effort, levels))})`]);
   return choices;
 }
 
