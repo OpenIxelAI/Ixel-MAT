@@ -49,6 +49,23 @@ function modelName(id) {
 function dollars(n) {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
 }
+// What a cost shows as on a card or in the header: $0.25, and under a cent, <$0.01
+function money(cost) {
+  return cost > 0 && cost < 0.01 ? "<$0.01" : `$${cost.toFixed(2)}`;
+}
+// Each model's short name ("Opus", not "Opus 5.5") and cost in dollars, biggest first; [] without usage
+function usageParts(usage) {
+  if (!usage || !usage.models) return [];
+  return Object.entries(usage.models)
+    .map(([id, u]) => [modelName(id).split(" ")[0], u && typeof u.cost === "number" ? u.cost : 0])
+    .sort((a, b) => b[1] - a[1]);
+}
+// The cost of a task's or the board's usage, at API prices; null when there's no usage to show
+function usageTotal(usage) {
+  if (!usage || !usage.models || !Object.keys(usage.models).length) return null;
+  return usageParts(usage).reduce((sum, [, cost]) => sum + cost, 0);
+}
+const SPENT_TITLE = "At API prices. On a subscription this counts toward your plan's limits, not your bill";
 
 // What an agent does on a run of `kind`, of a pull request when `of` says which (Handoff's run.of, targets)
 function kindHint(kind, of) {
@@ -91,6 +108,7 @@ let needs = null;      // an action that needs typing or picking first: { action
 let stale = false;     // the task changed while the person was typing: read it again after
 let busy = false;      // an action is under way
 let actionFailure = "";
+let actionNote = "";   // what a finished action says it did (a merge): kept until the next action or task
 let agents = null;     // { project, promise } of the agents a task can go to
 let pictures = new Map();  // name → { url } for the task in the panel, or { text }
 let shownRef = "";         // the task the panel's scroll position belongs to
@@ -296,6 +314,11 @@ function render() {
   const name = board && board.exists ? board.project.split(/[\\/]/).filter(Boolean).pop() || board.project : "";
   $("#board-where").textContent = name;
   $("#board-where").title = board ? board.project : "";
+  const spent = usageTotal(board && board.usage);  // nothing shown for an older Handoff, or a project with no runs
+  $("#board-spent").hidden = spent === null;
+  $("#board-spent").title = spent === null ? "" : SPENT_TITLE;
+  $("#board-spent").textContent = spent === null ? "" :
+    [`Spent: ${money(spent)}`, ...usageParts(board.usage).map(([name, cost]) => `${name} ${money(cost)}`)].join(" · ");
   $("#board-new").disabled = !hello || !hello.ok;  // before there's a board, it says what's needed first
   $("#board-project").hidden = !hello || !hello.ok;
 
@@ -469,6 +492,8 @@ function card(t) {
       el("span", { class: `who${t.assignee === "human" ? " you" : ""}` }, who(t.assignee)),
       t.overlaps ? el("span", { class: "overlap", title: "Its files overlap another task's" }, icon("alert"),
         String(t.overlaps)) : null,
+      usageTotal(t.usage) === null ? null : el("span", { class: "cost-chip",
+        title: usageParts(t.usage).map(([name, cost]) => `${name} ${money(cost)}`).join("\n") }, money(usageTotal(t.usage))),
       t.last_event ? el("span", { class: "when", title: t.last_event.at },
         `${who(t.last_event.actor)} ${t.last_event.summary} · ${ago(t.last_event.at)}`) : null));
   button.addEventListener("click", () => openPanel(t.ref));
@@ -835,6 +860,7 @@ async function openPanel(ref) {
   detail = null;
   taskFailure = "";
   actionFailure = "";
+  actionNote = "";
   needs = null;
   render();
   renderPanel();
@@ -941,7 +967,8 @@ function taskView(data) {
   }
   nodes.push(actionBar(data));
   if (needs && needs.ref === t.ref) nodes.push(needsForm(needs, t));
-  if (actionFailure) nodes.push(el("div", { class: "board-notice error", role: "alert" }, icon("alert"), el("span", {}, actionFailure)));
+  if (actionFailure) nodes.push(el("div", { class: "board-notice error", role: "alert" }, icon("alert"), el("span", { class: "notice-lines" }, actionFailure)));
+  if (actionNote) nodes.push(el("div", { class: "board-notice", role: "status" }, el("span", {}, actionNote)));
   if (t.body) nodes.push(section("Details", el("div", { class: "task-body" }, t.body)));
   if (t.acceptance && t.acceptance.length) {
     nodes.push(section("Done when", el("ul", { class: "acceptance" }, t.acceptance.map((a) => el("li", {}, a)))));
@@ -1071,6 +1098,7 @@ function actionBar(data) {
 function pick(a, t) {
   if (busy) return;
   actionFailure = "";
+  actionNote = "";
   if (a.needs) {
     needs = { action: a, ref: t.ref, draft: undefined };
     renderPanel();
@@ -1250,6 +1278,9 @@ function confirmWords(a, t, args) {
   if (a.op === "delete") {
     return { title: `Delete ${t.ref}?`, text: "Its history and results go too. This can't be undone.", yes: "Delete" };
   }
+  if (a.op === "merge") {
+    return { title: `Merge ${t.ref}?`, text: "Its branch merges into the checked-out branch here. Nothing is pushed.", yes: a.label };
+  }
   if (isDanger(a)) return { title: `Cancel ${t.ref}?`, text: "It moves to Done as cancelled. You can reopen it later.", yes: "Cancel the task" };
   return { title: `${a.label}?`, text: t.title, yes: a.label };
 }
@@ -1266,6 +1297,7 @@ async function act(a, t, args) {
   if (busy) return;  // one at a time: a double click mustn't send it twice
   busy = true;
   actionFailure = "";
+  actionNote = "";
   renderPanel();
   const where = board.project;
   // An approval seals the task as the panel shows it: if an agent changed it since, Handoff refuses
@@ -1277,6 +1309,8 @@ async function act(a, t, args) {
     // As a rule nothing's left; when something is (the agent's worktree and branch), Handoff says what, and how
     // to remove it
     if (a.op === "delete") deleteLeft = Array.isArray(reply && reply.left) ? reply.left.join(" ") : "";
+    // A merge only ever lands on this machine: the branch goes into the checked-out one, nothing is pushed
+    if (a.op === "merge") actionNote = "Merged into the checked-out branch. Nothing was pushed.";
     // "Run it now" approves the run, then starts it (as `handoff run T-N` would). Once approved, the
     // form is done with even if the start fails: the panel then offers Run it now on its own.
     if (a.op === "approve") {
