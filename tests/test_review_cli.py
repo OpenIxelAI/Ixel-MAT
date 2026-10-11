@@ -444,6 +444,19 @@ def test_review_panel_respects_configured_subset(monkeypatch):
     assert [a.name for a in mat.review_panel(agents)] == ["gpt"]
 
 
+def test_review_panel_leaves_out_antigravity_until_it_is_switched_on(monkeypatch):
+    from ixel_mat.runtime import SaverSettings
+    monkeypatch.setattr(mat, "_CONFIG", {"agents": {"anti": {"preset": "antigravity"}}})
+    monkeypatch.setattr(mat, "_REVIEW", ReviewSettings())
+    monkeypatch.setattr(mat, "_SAVER", SaverSettings(verifier="claude"))
+    agents = {n: _Agent(n, f"m-{n}") for n in ("gpt", "anti", "claude")}
+    assert [a.name for a in mat.review_panel(agents)] == ["gpt", "claude"]
+    assert [a.name for a in mat.review_panel(agents, ReviewMode.SAVER)] == ["gpt", "claude"]
+    monkeypatch.setattr(mat, "_REVIEW", ReviewSettings(agents=["gpt", "anti", "claude"]))
+    assert [a.name for a in mat.review_panel(agents)] == ["gpt", "anti", "claude"]
+    assert [a.name for a in mat.review_panel(agents, ReviewMode.SAVER)] == ["gpt", "anti", "claude"]
+
+
 def test_parse_saver_settings():
     from ixel_mat.runtime import SaverSettings, parse_saver_settings
     names = {"opus", "haiku", "llama"}

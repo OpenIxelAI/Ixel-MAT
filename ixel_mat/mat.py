@@ -606,10 +606,12 @@ def review_panel(agents: dict[str, BaseAgent], mode: ReviewMode = ReviewMode.REV
     connected = {name: a for name, a in agents.items() if a.is_connected and settings.yours(name)}
     if mode is ReviewMode.SAVER:
         verifier = settings.verifier
-        drafters = _SAVER.drafters or [n for n in connected if n != _SAVER.verifier]
+        # As Settings.saver_configs: an opt-in program (Antigravity) drafts only once it's switched on
+        drafters = _SAVER.drafters or [n for n in connected if n != _SAVER.verifier and settings.opted_in(n)]
         names = [n for n in drafters if n != verifier] + ([verifier] if verifier else [])
         return [connected[n] for n in names if n in connected]
-    return [a for name, a in connected.items() if not _REVIEW.agents or name in _REVIEW.agents]
+    return [a for name, a in connected.items()
+            if (not _REVIEW.agents or name in _REVIEW.agents) and settings.opted_in(name)]
 
 
 async def run_review_cmd(raw: str, agents: dict[str, BaseAgent]):

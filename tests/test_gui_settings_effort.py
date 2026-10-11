@@ -150,3 +150,11 @@ def test_ultracode_goes_into_claude_codes_settings_json_at_any_effort(config):
         assert ("--effort" in cmd) == bool(level)
     # A config with its own args and no --settings gets one
     assert _with_ultracode(["claude", "-p"]) == ["claude", "-p", "--settings", '{"ultracode": true}']
+    # Claude Code reads the last --settings, written either way: that's the one the switch goes into
+    lockdown = '{"disableAllHooks": true}'
+    assert _with_ultracode(["claude", "--settings", "{}", "--settings", lockdown]) == [
+        "claude", "--settings", "{}", "--settings", '{"disableAllHooks": true, "ultracode": true}']
+    assert _with_ultracode(["claude", f"--settings={lockdown}"]) == [
+        "claude", '--settings={"disableAllHooks": true, "ultracode": true}']
+    assert _with_ultracode(["claude", "--settings=/home/x/settings.json"]) == [
+        "claude", "--settings=/home/x/settings.json"]  # a file's path: left as it is

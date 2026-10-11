@@ -303,21 +303,27 @@ def _claude_message(message: str, pictures) -> bytes:
 
 
 def _with_ultracode(cmd: list[str]) -> list[str]:
-    """cmd with Claude Code's Ultracode on. Claude Code keeps only the last --settings it's given, so the switch
-    goes into the --settings JSON already there (the preset's lockdown) rather than a second one that would
-    drop it; with no --settings (a config with its own args), one is added. A --settings that isn't JSON (a
-    file's path) is left as it is, without Ultracode: a second one would drop it."""
+    """cmd with Claude Code's Ultracode on. Claude Code keeps only the last --settings it's given (`--settings
+    JSON` or `--settings=JSON`), so the switch goes into that one's JSON (the preset's lockdown) rather than a
+    new one that would drop it; with no --settings (a config with its own args), one is added. A --settings
+    that isn't JSON (a file's path) is left as it is, without Ultracode: another one would drop it."""
     cmd = list(cmd)
-    if "--settings" not in cmd:
+    at = [i for i, a in enumerate(cmd) if a == "--settings" or a.startswith("--settings=")]
+    if not at:
         return cmd + ["--settings", json.dumps({"ultracode": True})]
-    i = cmd.index("--settings")
+    i = at[-1]
+    joined = cmd[i] != "--settings"
+    raw = cmd[i].partition("=")[2] if joined else (cmd[i + 1] if i + 1 < len(cmd) else None)
     try:
-        settings = json.loads(cmd[i + 1]) if i + 1 < len(cmd) else None
+        settings = json.loads(raw) if raw is not None else None
     except ValueError:
         settings = None
     if isinstance(settings, dict):
         settings["ultracode"] = True
-        cmd[i + 1] = json.dumps(settings)
+        if joined:
+            cmd[i] = "--settings=" + json.dumps(settings)
+        else:
+            cmd[i + 1] = json.dumps(settings)
     else:
         logger.warning("Ultracode not turned on: this agent's --settings isn't JSON Ixel can add it to")
     return cmd

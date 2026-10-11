@@ -1828,6 +1828,28 @@ def test_settings_a_refused_change_drops_only_file_changes_and_shows_the_file(se
     assert not errors, errors
 
 
+def test_settings_antigravity_doesnt_draft_for_saver_until_it_is_switched_on(tmp_path, browser):
+    home = tmp_path / "home"
+    path = home / ".config" / "ixel-mat" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(SETTINGS_TOML + '\n[agents.anti]\npreset = "antigravity"\n\n[saver]\nverifier = "claude"\n',
+                    encoding="utf-8")
+    with launch_gui(home, {"IXEL_TEST_PANEL_KEY": "sk-test"}) as url:
+        page, errors, _ = open_settings(browser, url)
+        assert not setting(page, "agent:anti:on").is_checked()
+        assert not setting(page, "saver:draft:anti").is_checked() and setting(page, "saver:draft:gemini").is_checked()
+        setting(page, "saver:draft:gemini").uncheck()
+        wait_for_file(path, 'drafters = ["gpt"]')
+        # Ticked back, the drafters are the usual ones again: no list, so Antigravity still sits out
+        setting(page, "saver:draft:gemini").check()
+        deadline = time.monotonic() + 10
+        while "drafters" in path.read_text(encoding="utf-8"):
+            assert time.monotonic() < deadline, path.read_text(encoding="utf-8")
+            time.sleep(0.05)
+        assert not setting(page, "saver:draft:anti").is_checked()
+        assert not errors, errors
+
+
 def test_settings_saver_drafters_labels_time_limit_and_asks_warning(tmp_path, browser):
     home = tmp_path / "home"
     path = home / ".config" / "ixel-mat" / "config.toml"

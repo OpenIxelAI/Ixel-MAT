@@ -211,7 +211,7 @@ moderator = "opus"       # writes the verdict; default: author of the best-rated
 
 [saver]
 verifier = "opus"             # default: the [review] moderator
-# drafters = ["gpt", "gemini", "llama"]   # default: every agent except the verifier
+# drafters = ["gpt", "gemini", "llama"]   # default: every agent except the verifier (and Antigravity until it is switched on)
 escalate = "always"           # or "disagreement": skip the verifier when every draft was rated correct
                               # (with triage on, it must also be sure the drafts agree)
 on_wrong = "send_back"        # or "correct": the verifier fixes wrong drafts itself

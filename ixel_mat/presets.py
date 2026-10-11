@@ -246,6 +246,10 @@ PRESET_FIELDS = ("command", "args", "args_by_version", "prompt_via", "output_fla
                  "env", "drop_env", "effort_args", "effort_levels", "effort_in_model", "model_args", "picture_args",
                  "picture_prompt", "picture_stdin")
 PRESETS_BY_ID = {p["id"]: p for p in CLI_PRESETS}
+# Programs that sit out of the panel, and out of Saver's drafters, until switched on in Settings or named in [review]
+# agents: the opt-in presets, the ones with a "warning" (Antigravity: Google's terms may restrict using it from
+# other tools). Here rather than in runtime, so setup can use it without loading runtime.
+OFF_BY_DEFAULT = frozenset({"antigravity"})
 # Fields that describe a preset for people (setup, `ixel model`) and never reach an agent's config.
 PRESET_ABOUT = ("id", "why", "install", "free", "free_then", "model_hint", "warning")
 

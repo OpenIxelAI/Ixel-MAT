@@ -27,7 +27,8 @@ from ixel_mat.asking import Prompt, Confirm
 from ixel_mat.config.secrets import (KeyStoreError, load_env, normalize_secret_input, save_secret, where_keys_are,
                                      write_private_file)
 from ixel_mat.models import ALIASES, pick_latest, valid_model_id
-from ixel_mat.presets import CLI_PRESETS, OPENCODE_ONLY_FREE, opencode_only_free  # it offers CLI_PRESETS
+from ixel_mat.presets import (CLI_PRESETS, OFF_BY_DEFAULT, OPENCODE_ONLY_FREE,  # it offers CLI_PRESETS
+                              opencode_only_free, preset_for)
 from ixel_mat.sanitize import safe_markup
 
 console = Console()
@@ -992,6 +993,13 @@ def _build_toml(agents: list[dict], review: dict | None = None, saver: dict | No
     # New to the file, or added "to the panel" in this run: on the panel
     new_ids = {a["id"] for a in agents if a["id"] not in old_agents or a.get("_asked")}
     review = _section("review", review, existing, ids, new_ids)
+    # With no [review] agents list the panel is every model but the opt-in programs (Antigravity), so one you said
+    # yes to in this run would sit out: write the panel out in full, as Settings does when you switch one on.
+    # One kept from the file and not asked about again stays off.
+    off = {a["id"] for a in agents if (a.get("preset") or preset_for(str(a.get("command") or "")).get("id"))
+           in OFF_BY_DEFAULT}
+    if off & new_ids and not isinstance(review.get("agents"), list):
+        review["agents"] = [n for n in ids if n not in off or n in new_ids]
     saver = _section("saver", saver, existing, ids, new_ids)
     triage = _section("triage", triage, existing, ids, new_ids)
     if review:

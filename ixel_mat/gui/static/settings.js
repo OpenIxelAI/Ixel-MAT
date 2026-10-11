@@ -739,9 +739,11 @@ function privateHint() {
     (out.length ? ` ${data.review.private ? "Sitting out" : "Would sit out"}: ${out.join(", ")}.` : ""));
 }
 
-// Every model but the verifier drafts, unless the file names which ones do
+// Every model but the verifier drafts, unless the file names which ones do; an opt-in program (Antigravity) only
+// once it's switched on for the panel
 const drafters = () => data.agents.filter((a) => a.name !== data.saver.verifier);
-const drafting = (a) => !data.saver.drafters.length || data.saver.drafters.includes(a.name);
+const draftsUnlessNamed = (a) => !a.off_by_default || a.on_panel;
+const drafting = (a) => data.saver.drafters.length ? data.saver.drafters.includes(a.name) : draftsUnlessNamed(a);
 
 function saver() {
   const s = data.saver;
@@ -762,7 +764,10 @@ function saver() {
               const box = findKey(`saver:draft:${b.name}`);
               return box ? box.checked : drafting(b);
             }).map((b) => b.name);
-            save("saver", { section: "saver", values: { drafters: on.length === now.length ? null : on } });
+            // The ones that draft anyway: no list then, so a model added later drafts too
+            const usual = now.filter(draftsUnlessNamed).map((b) => b.name);
+            const same = on.length === usual.length && usual.every((n) => on.includes(n));
+            save("saver", { section: "saver", values: { drafters: same ? null : on } });
           }),
           el("span", {}, a.label)))))
       : null,
