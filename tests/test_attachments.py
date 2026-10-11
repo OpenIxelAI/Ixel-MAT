@@ -19,7 +19,7 @@ from ixel_mat.material import (DEFAULT_DOCUMENT_QUESTION, DEFAULT_FILES_QUESTION
                                code_for_review, read_files)
 from ixel_mat.modes.review import run_review
 from ixel_mat.pictures import read_picture
-from ixel_mat.presets import PRESETS_BY_ID
+from ixel_mat.presets import PRESET_ABOUT, PRESETS_BY_ID
 
 
 def _run(coro):
@@ -158,15 +158,15 @@ def test_a_review_sends_the_files_pictures_first(tmp_path):
 # ── The subscription programs ─────────────────────────────────────────────────
 
 def _preset_agent(preset_id, **override):
-    fields = {k: v for k, v in PRESETS_BY_ID[preset_id].items() if k not in ("id", "why", "install", "free",
-                                                                             "free_then", "model_hint")}
+    fields = {k: v for k, v in PRESETS_BY_ID[preset_id].items() if k not in PRESET_ABOUT}
     return OneShotAgent(AgentConfig(name=preset_id, type="oneshot", **{"workdir": "temp", **fields, **override}))
 
 
 # Grok Build has no way to be given a picture yet: an @name in the question is left as text, and image blocks in
 # --prompt-file or --prompt-json reach the model as text too (Grok Build 1.0.46). Like any model that doesn't
 # see pictures, it's told there are some it can't see.
-NO_PICTURES = {"grok_build"}
+# Antigravity: whether its --input-format stream-json takes image blocks is unverified, so it's given none.
+NO_PICTURES = {"grok_build", "antigravity"}
 
 
 def test_every_subscription_program_sees_pictures():

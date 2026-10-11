@@ -166,8 +166,14 @@ def _grok(home, tmp_path, url, monkeypatch, fields):
     return calls, [], marker
 
 
+def _antigravity(home, tmp_path, url, monkeypatch):
+    pytest.skip("Antigravity: no known way to point agy at a fake model server yet (unverified)")
+
+
 SETUPS = {"claude_code": _claude, "codex": _codex, "gemini_cli": _gemini, "copilot": _copilot,
-          "opencode": _opencode, "grok_build": _grok}
+          "opencode": _opencode, "grok_build": _grok, "antigravity": _antigravity}
+# Opt-in presets (a "warning") aren't installed in CI, where IXEL_REQUIRE_CLIS makes a missing CLI a failure
+OPT_IN = {"antigravity"}
 # Setups that also change the agent's settings (they're given them)
 WITH_FIELDS = {"grok_build"}
 # Harmless tools a CLI may still offer: Gemini's plan mode keeps read-only tools
@@ -201,7 +207,8 @@ LONG = "\n\n" + PADDING * (ARG_LIMIT // len(PADDING) + 1)
 def test_preset_is_answer_only(preset_id, long_prompt, tmp_path, monkeypatch):
     preset = PRESETS[preset_id]
     if not shutil.which(preset["command"]):
-        if os.environ.get("IXEL_REQUIRE_CLIS") == "1":  # set in CI, where they're all installed
+        # set in CI, where they're all installed (but not the opt-in ones)
+        if os.environ.get("IXEL_REQUIRE_CLIS") == "1" and preset_id not in OPT_IN:
             pytest.fail(f"{preset['command']} is not installed")
         pytest.skip(f"{preset['command']} is not installed")
 

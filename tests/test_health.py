@@ -124,6 +124,33 @@ def test_grok_build_without_a_login_says_to_sign_in(tmp_path, monkeypatch):
     assert checks_of(report)["agent-grok_build-login"]["state"] == "ok" and KEY not in json.dumps(report)
 
 
+def test_antigravity_shows_its_warning_and_asks_it_for_its_models_to_see_a_sign_in():
+    from ixel_mat.presets import ANTIGRAVITY_SIGN_IN, ANTIGRAVITY_WARNING
+    agy = AgentConfig(name="antigravity", label="Antigravity", type="oneshot", command="agy")
+    # Without a check: its warning, and no program run (the sign-in is unchecked until Check now)
+    calls = Calls()
+    checks = checks_of(run_report(settings_with(agy), False, calls, found=("git", "agy")))
+    terms = checks["agent-antigravity-terms"]
+    assert terms["state"] == "warn" and terms["detail"] == ANTIGRAVITY_WARNING
+    assert checks["agent-antigravity-login"]["state"] == "unchecked"
+    assert calls.ran == []
+    # With a check: `agy models` is the sign-in test (unverified, see health.antigravity_sign_in)
+    calls = Calls(programs={"agy models": (1, "Not logged in")})
+    checks = checks_of(run_report(settings_with(agy), True, calls, found=("git", "agy")))
+    assert ["agy", "models"] in calls.ran
+    login = checks["agent-antigravity-login"]
+    assert login["state"] == "warn" and login["detail"] == ANTIGRAVITY_SIGN_IN and login["fix"] == "agy"
+    assert checks["agent-antigravity-terms"]["state"] == "warn"
+    calls = Calls(programs={"agy models": (0, "gemini-3.1-pro-preview")})
+    checks = checks_of(run_report(settings_with(agy), True, calls, found=("git", "agy")))
+    assert checks["agent-antigravity-login"]["state"] == "ok"
+    assert checks["agent-antigravity-terms"]["state"] == "warn"
+    # Not installed: it says so (and has no install line to give), and still shows its warning
+    checks = checks_of(run_report(settings_with(agy), False, Calls(), found=("git",)))
+    assert checks["agent-antigravity"]["state"] == "fail" and checks["agent-antigravity"]["fix"] == ""
+    assert checks["agent-antigravity-terms"]["state"] == "warn"
+
+
 @pytest.mark.parametrize("status, state, fix", [
     (("ok", "reachable", 30, None), "ok", ""),
     (("rate_limited", "429", 30, None), "warn", ""),
