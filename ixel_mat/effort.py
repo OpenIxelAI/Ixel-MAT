@@ -100,6 +100,10 @@ NEWEST = {"latest": {"anthropic": "claude-opus-5-5", "openai": "gpt-6-astra", "g
           "latest-fast": {"anthropic": "claude-haiku-4-5", "openai": "gpt-6.1-sol", "gemini": "gemini-3.8-flash",
                           "xai": "grok-4.7-fast"}}
 
+# Programs that hand the level straight to a company's API, and the model they use when given none. Ixel itself
+# now reads program_levels; this stays for code that still asks it (the Board's /api/board/levels)
+PASSES_ON = {"codex": ("openai", "gpt-6"), "grok": ("xai", "grok-4.7")}
+
 # Programs that take minutes over a review at their own default level, and the level a review sends them when
 # the agent has none set: Grok Build answered an 11.6k-character diff in 189 s at low, 604 s at high, and never
 # within 300 s at its default (measured 2026-10-11, grok 1.0.50)
