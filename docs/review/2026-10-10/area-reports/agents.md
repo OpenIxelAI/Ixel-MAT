@@ -1,0 +1,14 @@
+# Agents/transports (agents/*, presets, local_models, effort, child_env)
+Sound (confirmed): timeout kills tree incl. helpers; stderr drained; BrokenPipe swallowed; child_env withholds keys; npm shim parsing; leftovers only deletes own-folder rows; _trusted_folder rejects world-writable/other-owned, follows symlinks.
+B1 med CONFIRMED oneshot.py:419-436: second cancel during cleanup (tree.kill communicate up to 2s) skips tree.close/remove_workdir/run.clean -> temp folder + Gemini chats/projects.json with the question left behind; contradicts SECURITY.md. Fix: shield cleanup / nested try.
+B2 med CONFIRMED subprocess.py:232-237: PTY mode (POSIX default) answer begins with echoed prompt (incl. fenced other answers in later rounds). Test uses use_pty=False. Fix: strip echo or termios ECHO off.
+B3 low-med CONFIRMED websocket.py:360-362: non-dict JSON frame ([]) kills reader loop -> agent dead for rest of review, no reconnect. Fix: isinstance checks.
+B4 low CONFIRMED-mechanism oneshot.py:30/47-49/326-329, subprocess.py:93-94: session id parsed from CLI output can start with '-' -> becomes a flag on --resume (custom CLIs only). Fix: regex-validate ids.
+B5 low CONFIRMED oneshot.py:31/50 STATS_LINE_RE drops a legit final answer line starting "Duration:"/"Messages:".
+B6 low CONFIRMED oneshot.py:216-223,381-385: claude-stream-json CLI printing no events, exit 0 -> "" and what it printed (update notice) lost.
+B7 low CONFIRMED http.py:331-337: finish_reason "length" not flagged (Anthropic max_tokens is, 402-403); SSE path ignores finish_reason.
+B8 low PLAUSIBLE process_tree.py:136-137 killpg after reap (pid reuse, microseconds).
+B9 low PLAUSIBLE presets.py:41-61: CLAUDECODE / CLAUDE_CODE_SESSION_ID / CLAUDE_CODE_ENTRYPOINT inherited by panel's `claude -p` when Ixel is the MCP plugin under Claude Code; add to drop_env.
+Note: add_install_folders rewrites PATH for every command and child; drops empty entries (safer). _trusted_folder doesn't check parents.
+UX: 1 missing CLI message (oneshot.py:352,379) should give install command like cli.py:197 does; 2 raw HTTP errors (http.py:339-355; aiohttp exceptions unwrapped) -> map connection refused/401/404/stream dropped to next steps; streamed partial text discarded on drop; 3 sign-in errors: PLAIN_ERRORS covers Gemini/OpenCode/old Copilot only; Claude Code "Please run /login" verbatim; plain_error unreachable for claude-stream-json (oneshot.py:409 vs raise at 222); 4 silent waits: 429/5xx retries only logger.info (http.py:351), OpenCode --version probe up to 8s, picture refusal only logged (http.py:283); 5 empty-answer message should include first stdout line; 6 truncation note for length; 7 cleanup failures only logged—tell the user.
+Scratch: scratchpad/area-agents/ test_lifecycle.py, probe_http.py, probe_ws.py, probe_pty.py
