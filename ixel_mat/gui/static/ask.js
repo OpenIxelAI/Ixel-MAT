@@ -635,7 +635,7 @@ class Turn {
       }
       case "agent_started": {
         const c = this.cell(this.agent(data.agent, data.agent_label), this.column(data.round));
-        Object.assign(c, { state: "working", started: performance.now(), text: "", ms: null });
+        Object.assign(c, { state: "working", started: performance.now(), text: "", ms: null, slow: Boolean(data.slow) });
         break;
       }
       case "answer": {
@@ -729,8 +729,9 @@ class Turn {
       case "working": {
         const t = el("span", { class: "t" }, secs(now - c.started));
         c.timer = t;
-        return el("span", { class: "cell working" }, el("i", { class: "spin", "aria-hidden": "true" }),
-          el("span", { class: "what" }, WORKING[round] || "working"), t);
+        return el("span", { class: "cell working", title: c.slow ? "can take several minutes" : null },
+          el("i", { class: "spin", "aria-hidden": "true" }), el("span", { class: "what" }, WORKING[round] || "working"), t,
+          c.slow ? el("span", { class: "what" }, "can take several minutes") : null);
       }
       case "done":
         return el("span", { class: "cell done", title: c.title || null }, icon("check"),

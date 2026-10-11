@@ -195,8 +195,12 @@ CLI_PRESETS = [
                  "--disallowed-tools", ",".join(GROK_TOOLS), *[a for kind in GROK_DENY for a in ("--deny", kind)],
                  "--rules", GROK_RULES],
         # Grok Build doesn't read stdin: the question goes in a private file of its own, out of `ps`. Its stream
-        # is Claude Code's, so the answer shows as it's written
-        "prompt_via": "file", "timeout": 300, "stdout_format": "claude-stream-json",
+        # is Claude Code's, so the answer shows as it's written.
+        # 900 s: measured 2026-10-11 with grok 1.0.50 and these args, a review of an 11.6k-character diff
+        # answered in 189 s at --effort low (about 12k reasoning tokens) and 604 s at high (about 32k), a 2k one
+        # in 49 s at Grok Build's own default (xhigh in a ~/.grok config); at 300 s a review at the default
+        # never finished
+        "prompt_via": "file", "timeout": 900, "stdout_format": "claude-stream-json",
         # An API key would be used instead of your login. GROK_CONFIG and GROK_CONFIG_PATH add settings: Ixel sets
         # the only one it carries over from yours, the default model (agents/leftovers.py)
         "drop_env": [*OTHER_KEYS, "GROK_CODE_XAI_API_KEY", "GROK_CONFIG", "GROK_CONFIG_PATH"],

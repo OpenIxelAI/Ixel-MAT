@@ -100,6 +100,11 @@ NEWEST = {"latest": {"anthropic": "claude-opus-5-5", "openai": "gpt-6-astra", "g
           "latest-fast": {"anthropic": "claude-haiku-4-5", "openai": "gpt-6.1-sol", "gemini": "gemini-3.8-flash",
                           "xai": "grok-4.7-fast"}}
 
+# Programs that take minutes over a review at their own default level, and the level a review sends them when
+# the agent has none set: Grok Build answered an 11.6k-character diff in 189 s at low, 604 s at high, and never
+# within 300 s at its default (measured 2026-10-11, grok 1.0.50)
+SLOW_REVIEWERS = {"grok": "low"}
+
 # OpenCode providers whose models Ixel knows, and the company whose rules apply to them
 OPENCODE_PROVIDERS = {"anthropic": "anthropic", "openai": "openai", "xai": "xai", "google": "gemini"}
 
@@ -166,6 +171,29 @@ def program_levels(program: str, model: str | None) -> tuple[str, ...]:
     if preset and (preset.get("effort_args") or preset.get("effort_in_model")):
         return tuple(preset.get("effort_levels") or ())
     return NONE
+
+
+def slow_on_reviews(cfg) -> bool:
+    """Whether an agent is a program that takes minutes over a review (Grok Build), so its wait says so."""
+    # getattr: test fakes carry configs with only some of AgentConfig's fields
+    return (cfg is not None and getattr(cfg, "type", None) == "oneshot"
+            and program_name(getattr(cfg, "command", "")) in SLOW_REVIEWERS)
+
+
+def review_effort(cfg, wanted: str | None = "") -> str:
+    """The level to ask for in a review, or in any question with a diff or files attached: wanted when given
+    (a verifier's level, say), else the agent's own setting (a person's always wins), else low for Grok Build
+    so a review finishes; "" for none."""
+    if wanted:
+        return wanted
+    if cfg is None:
+        return ""
+    own = getattr(cfg, "effort", "")
+    if own:
+        return own
+    if slow_on_reviews(cfg):
+        return SLOW_REVIEWERS[program_name(cfg.command)]
+    return ""
 
 
 def agent_levels(cfg, model: str | None = None) -> tuple[str, ...]:
