@@ -939,6 +939,7 @@ def cmd_ask(argv: list[str]) -> int:
 
     from ixel_mat.ask import AskError, agent_list, ask_in_order, find_agent
     from ixel_mat.config.loader import check_effort_level
+    from ixel_mat.effort import slow_on_reviews
     from ixel_mat.material import MaterialError, code_for_review
     from ixel_mat.models import ALIASES, provider_for_url, valid_model_id
     from ixel_mat.runtime import load_settings
@@ -1075,7 +1076,8 @@ def cmd_ask(argv: list[str]) -> int:
         for note in material.notes:
             out.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{safe_markup(note)}[/]")
     if not args.json:
-        out.print(f"  [{C['dim']}]Asking {safe_markup(cfgs[0].label)}…[/]")
+        slow = " (it can take several minutes)" if material is not None and slow_on_reviews(cfgs[0]) else ""
+        out.print(f"  [{C['dim']}]Asking {safe_markup(cfgs[0].label)}…{slow}[/]")
 
     def moving_on(skipped, following, why: AskError) -> None:
         out.print(f"  [{C['gold']}]⚠[/] [{C['dim']}]{safe_markup(str(why))}[/]")

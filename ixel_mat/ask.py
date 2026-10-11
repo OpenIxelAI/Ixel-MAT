@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 from ixel_mat.agents import create_agent
 from ixel_mat.agents.base import AgentConfig, needs_api_key
+from ixel_mat.effort import review_effort
 from ixel_mat.limits import USAGE_LIMIT, UsageLimit
 from ixel_mat.material import MAX_MATERIAL_CHARS, Material, mark_hidden_characters, mask_secrets
 from ixel_mat.modes.review import (_UNTRUSTED_NOTE, ANSWER_PROMPT, MATERIAL_ANSWER_PROMPT, _clip, _fenced,
@@ -145,6 +146,10 @@ async def ask(cfg: AgentConfig, question: str, material: Material | None = None,
                   "than guess.]\n\n") + prompt
         notes.append(f"{cfg.label} can't see pictures, so the {some.removeprefix('a ')} went without "
                      "(it was told they're there).")
+    if material is not None:  # with a diff or files attached, Grok Build gets low unless the person set a level
+        level = review_effort(cfg)
+        if level:
+            extra["effort"] = level
     timeout = timeout or cfg.call_timeout
     agent = create_agent(cfg)
     reported: list[Usage] = []

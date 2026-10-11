@@ -101,7 +101,7 @@ class ReviewProgress:
         self.echo = echo
         self.started = time.perf_counter()
         self.lines: list[Text] = []
-        self.pending: dict[str, tuple[str, float]] = {}
+        self.pending: dict[str, tuple[str, float, str]] = {}  # label, when it started, a note on the wait
         self.round_total = 0  # calls in this round, and how many are back
         self.round_done = 0
         self.draft = ""  # the verdict so far, while it's being written
@@ -127,7 +127,8 @@ class ReviewProgress:
                 title += f" — not needed, {self.verify_skipped}"
             self.lines.append(Text(title, style=f"bold {C['gold']}"))
         elif event.kind == "agent_started":
-            self.pending[d["agent"]] = (_s(d["agent_label"]), time.perf_counter())
+            note = "can take several minutes" if d.get("slow") else ""
+            self.pending[d["agent"]] = (_s(d["agent_label"]), time.perf_counter(), note)
         elif event.kind == "answer":
             self._done(d["agent"])
             self.lines.append(Text.assemble(("    ✓ ", C["green"]), (_s(d["agent_label"]), C["blue"]),
@@ -179,8 +180,9 @@ class ReviewProgress:
         frame = spinner(now)
         waiting = [
             Text.assemble((f"    {frame} ", C["violet"]), (label, C["blue"]),
-                          (f"  working… {now - started:.1f}s", C["gold"]))
-            for label, started in self.pending.values()
+                          (f"  working… {now - started:.1f}s", C["gold"]),
+                          *([(f"  · {note}", C["dim"])] if note else []))
+            for label, started, note in self.pending.values()
         ]
         parts: list[RenderableType] = [*([] if self.echo else [self.header]), *self.lines, *waiting]
         if self.draft.strip():
