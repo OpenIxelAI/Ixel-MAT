@@ -612,8 +612,8 @@ scripted panels. End-to-end runs check that only the question and the anonymous 
 
 ## Deliberately not supported (yet)
 
-- **Letting panel models change files or run commands.** Useful, but it needs per-action approval
-  and a real sandbox first. See [ROADMAP.md](ROADMAP.md).
+- **Letting panel models change files or run commands.** Only the Agent (beta) page does, one approved
+  action at a time (see "Agent (beta)" above); the panel, reviews and `ixel ask` stay answer-only.
 - **A network-reachable server** (for example, for ChatGPT's internet-only connectors). Ixel stays local.
 - **Cursor's and Cline's CLIs.** Cline auto-approves every tool by default, and we haven't yet been
   able to prove either can be locked down the way the presets above are. Once a live test like the others
