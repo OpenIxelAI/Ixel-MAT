@@ -54,7 +54,7 @@ def test_ask_lists_the_models_without_calling_them(ask_home):
     assert [(a["name"], a["label"], a["model"], a["ready"]) for a in agents] == [
         ("gpt", "GPT", "m-gpt", True), ("claude", "Claude", "m-claude", True), ("grok", "Grok", "m-grok", True)]
     # Handoff checks these before asking for them
-    assert listed["features"] == ["new-files", "head", "fallback", "error-kind"]
+    assert listed["features"] == ["new-files", "head", "fallback", "error-kind", "model", "effort"]
     assert fake.requests == []
 
 
