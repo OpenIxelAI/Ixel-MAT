@@ -60,9 +60,10 @@ BINARY_PROBE = 8 * 1024        # a NUL byte in this much of the start means the 
 # (a stray Latin-1 byte in an otherwise fine file); more than that, and it's treated as not text.
 MAX_REPLACED_SHARE = 0.01
 # Folders of installed or built files that list_dir and search leave out unless the path names one. Names are
-# compared exactly (case matters).
-HEAVY_FOLDERS = frozenset({"node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".tox", ".mypy_cache",
-                           ".pytest_cache", "target", ".next"})
+# compared exactly (case matters). HEAVY_FOLDERS are left out at any depth; TOP_HEAVY_FOLDERS only directly in the
+# workspace root (or a fetched copy's root), because deeper down they can be real source (src/build, pkg/target).
+HEAVY_FOLDERS = frozenset({"node_modules", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache"})
+TOP_HEAVY_FOLDERS = frozenset({"build", "dist", "target", ".next"})
 
 # What view_file looks at
 VIDEOS = frozenset({".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"})
@@ -519,9 +520,10 @@ class Workspace:
         'l name@' for a symlink (not followed, so one leading out tells nothing about where). .git is left out.
 
         A file line ends with the file's kind when it isn't plain text: 'f photo.jpg 1234 picture', or video,
-        document, other. Heavy folders in the listed folder (node_modules, .venv, dist, build and the like, see
-        HEAVY_FOLDERS) are left out and named on a last line; list one by naming it as path. path may name a
-        fetched repo as scratch:NAME or scratch:NAME/PATH."""
+        document, other. Heavy folders in the listed folder (node_modules, .venv, __pycache__ and the like, see
+        HEAVY_FOLDERS) are left out and named on a last line; list one by naming it as path. build, dist, target
+        and .next (TOP_HEAVY_FOLDERS) are left out only when the listed folder is the workspace's or a fetched
+        repo's top folder. path may name a fetched repo as scratch:NAME or scratch:NAME/PATH."""
         target, _ = self._place(path)
         if not target.is_dir():
             raise WorkspaceError(f"{path!r} isn't a folder")
@@ -532,8 +534,10 @@ class Workspace:
             raise WorkspaceError(f"can't list {path!r}: {exc.strerror or type(exc).__name__}") from exc
         skipped: set[str] = set()
         kept = []
+        at_top = target == self.root or (self.scratch is not None and target.parent == self.scratch.resolve())
+        heavy = HEAVY_FOLDERS | TOP_HEAVY_FOLDERS if at_top else HEAVY_FOLDERS
         for entry in entries:
-            if entry.name in HEAVY_FOLDERS and _is_folder(entry):
+            if entry.name in heavy and _is_folder(entry):
                 skipped.add(entry.name)
             else:
                 kept.append(entry)
@@ -581,6 +585,7 @@ class Workspace:
             raise WorkspaceError(f"{path!r} is a {kind_of(target)}, not text; look at it with view_file")
         if documents.is_document(target.name):
             return self._document_text(target, path, start, end)
+        note = ""
         try:
             size = target.stat().st_size
             if start is None and end is None:
@@ -588,16 +593,6 @@ class Workspace:
                     raise WorkspaceError(f"{path!r} is {size} bytes, over the {MAX_READ_BYTES // 1024} KB limit; "
                                          "read part of it with start and end line numbers")
                 data = target.read_bytes()
-                note = ""
-                # Only the first MAX_READ_LINES lines of a text file; a file that isn't text is left whole, so
-                # _decode still refuses it (a NUL byte after the cut would otherwise be lost)
-                total = data.count(b"\n") + (0 if not data or data.endswith(b"\n") else 1)
-                if total > MAX_READ_LINES and not _looks_binary(data):
-                    at = -1
-                    for _ in range(MAX_READ_LINES):
-                        at = data.index(b"\n", at + 1)
-                    data = data[:at + 1]
-                    note = f"\n[showing lines 1-{MAX_READ_LINES}; {total} lines in all; use start and end for more]"
             else:
                 data, note = self._read_lines(target, start or 1, end)
         except OSError as exc:
@@ -605,6 +600,16 @@ class Workspace:
         text = _decode(data)
         if text is None:
             raise WorkspaceError(f"{path!r} isn't a text file")
+        if start is None and end is None:
+            # Only the first MAX_READ_LINES lines, cut after the whole file has passed _decode, so a file that
+            # isn't text is refused whole (a NUL byte or bad bytes after the cut would otherwise be lost)
+            total = text.count("\n") + (0 if not text or text.endswith("\n") else 1)
+            if total > MAX_READ_LINES:
+                at = -1
+                for _ in range(MAX_READ_LINES):
+                    at = text.index("\n", at + 1)
+                text = text[:at + 1]
+                note = f"\n[showing lines 1-{MAX_READ_LINES}; {total} lines in all; use start and end for more]"
         if not text and not note:
             return "(empty file)" if start is None and end is None else "(no lines in that range)"
         return mask_secrets(text) + note
@@ -769,8 +774,9 @@ class Workspace:
 
         glob limits it to file names that match (like *.py). Git's files, secret-looking files, symlinks
         that lead out, files that aren't text and files over 1 MB are skipped. Heavy folders (HEAVY_FOLDERS:
-        node_modules, .venv, dist, build and the like) are skipped too, unless path names one; a last line
-        says which were skipped. At most 200 lines. path may name a fetched repo as scratch:NAME or
+        node_modules, .venv, __pycache__ and the like) are skipped at any depth, and build, dist, target and .next
+        (TOP_HEAVY_FOLDERS) only at the top of the workspace or the fetched repo, unless path names one; a last
+        line says which were skipped. At most 200 lines. path may name a fetched repo as scratch:NAME or
         scratch:NAME/PATH; its lines are shown as scratch:NAME/rel."""
         if not isinstance(pattern, str) or not pattern:
             raise WorkspaceError("give the text to search for")
@@ -784,12 +790,14 @@ class Workspace:
         else:
             copy, name, top = None, "", self.resolve(path)
         # A heavy folder is searched only when the path itself names one, as the model typed it
-        named = isinstance(path, str) and any(part in HEAVY_FOLDERS for part in path.replace("\\", "/").split("/"))
+        named = isinstance(path, str) and any(part in HEAVY_FOLDERS | TOP_HEAVY_FOLDERS
+                                              for part in path.replace("\\", "/").split("/"))
         skipped: set[str] = set()
         if top.is_file():
             files = iter([top])
         elif top.is_dir():
-            files = self._walk(top, fetched=fetched, skipped=None if named else skipped)
+            files = self._walk(top, copy if copy is not None else self.root, fetched=fetched,
+                               skipped=None if named else skipped)
         else:
             raise WorkspaceError(f"there's no file or folder {path!r}")
         found: list[str] = []
@@ -818,15 +826,18 @@ class Workspace:
             return f"no lines contain {pattern!r}" + note
         return mask_secrets("\n".join(found)) + note
 
-    def _walk(self, top: Path, fetched: bool = False, skipped: set[str] | None = None):
+    def _walk(self, top: Path, root: Path, fetched: bool = False, skipped: set[str] | None = None):
         """The files under top that the agent may read, in name order, without following symlinked folders.
+        root: the workspace's or a fetched copy's top folder, whose direct folders count as top level.
         fetched: top is in a fetched copy, which has no home-folder rules to apply to its folders.
-        skipped: when not None, heavy folders (HEAVY_FOLDERS) are not walked, and their names are added to it."""
+        skipped: when not None, heavy folders are not walked, and their names are added to it. HEAVY_FOLDERS are
+        skipped at every depth; TOP_HEAVY_FOLDERS only directly in root."""
         for dirpath, dirnames, filenames in os.walk(top):
             dirnames[:] = sorted(d for d in dirnames if d.lower() != ".git" and not is_secret_name(d))
             if skipped is not None:
-                skipped.update(d for d in dirnames if d in HEAVY_FOLDERS)
-                dirnames[:] = [d for d in dirnames if d not in HEAVY_FOLDERS]
+                heavy = HEAVY_FOLDERS | TOP_HEAVY_FOLDERS if Path(dirpath) == root else HEAVY_FOLDERS
+                skipped.update(d for d in dirnames if d in heavy)
+                dirnames[:] = [d for d in dirnames if d not in heavy]
             if self.computer and not fetched:
                 allowed = []
                 for name in dirnames:

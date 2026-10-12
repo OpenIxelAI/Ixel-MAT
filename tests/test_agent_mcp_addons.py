@@ -221,6 +221,7 @@ def test_card_permissions_reach_sandbox_profile(fake_addons, monkeypatch, networ
     fake_addons.card.dir = Path("/home/x/addon")
     fake_addons.card.permissions.network = network
     fake_addons.card.permissions.files = files
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)  # a real agent socket in /private/tmp enters the profile
     monkeypatch.setattr(sandbox, "can_sandbox", lambda: True)
     original = sandbox.sandbox_profile
     seen = []
@@ -230,7 +231,8 @@ def test_card_permissions_reach_sandbox_profile(fake_addons, monkeypatch, networ
     monkeypatch.setattr(sandbox, "sandbox_profile", profile)
     workspace = Path("/home/x/workspace")
     params = addons.server_parameters(fake_addons.card, workspace)
-    assert seen == [(workspace, {"network": network, "files": files, "temporary": False})]
+    assert seen == [(workspace, {"network": network, "files": files, "temporary": False,
+                                 "addon_files": Path("/home/x/addon") / "files"})]
     assert params.command == sandbox.SANDBOX_EXEC
     assert ("(deny network*)" in params.args[1]) is not network
     # The paths as the code builds them (on Windows: a drive and backslashes, escaped in the profile)
@@ -354,7 +356,7 @@ def test_stdio_defaults_cannot_restore_withheld_keys(fake_addons, monkeypatch):
     monkeypatch.setattr(addons, "child_env", environment)
     monkeypatch.setattr(addons, "get_default_environment", lambda: {"IXEL_FAKE_KEY": "fake-secret"})
     params = addons.server_parameters(fake_addons.card, Path("/home/x/workspace"))
-    assert seen == [{"nested": False}]
+    assert seen == [{"nested": False, "drop_env": ["SSH_AUTH_SOCK"]}]
     assert params.env == {"PATH": "/home/x/bin", "IXEL_FAKE_KEY": ""}
 
 

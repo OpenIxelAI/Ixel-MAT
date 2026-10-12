@@ -3,10 +3,11 @@ Running a command the person approved (or always allows), for the agent's run_co
 
 The model never gets a shell: a command is a list of words, run as it is, with the workspace as its folder,
 a time limit, its first and last 32 KB of output kept (a line says how much was left out between), and the
-environment without any keys saved in Ixel (child_env). On a Mac it runs under sandbox-exec, with the network
-denied, writes allowed only in the workspace and the temp folder, and the secret folders under the home folder
-and Ixel's config folder unreadable (other reads work, so programs run). Elsewhere nothing like that is there to
-use, so the result says it ran unsandboxed, and the approval card says so before it runs.
+environment without any keys saved in Ixel (child_env) or the ssh-agent socket. On a Mac it runs under
+sandbox-exec, with the network denied, writes allowed only in the workspace and the temp folder, the secret
+folders and files under the home folder and Ixel's config folder unreadable (other reads work, so programs
+run), and the keychain services and Apple Events out of reach. Elsewhere nothing like that is there to use, so
+the result says it ran unsandboxed, and the approval card says so before it runs.
 With Computer access on, it runs without sandbox-exec and with the network, keeping the same environment,
 time limit, output limit and way of stopping its children.
 
@@ -36,16 +37,31 @@ MAX_OUTPUT_BYTES = 64 * 1024
 # The output kept is its first and last parts, half of MAX_OUTPUT_BYTES each
 _HEAD_BYTES = MAX_OUTPUT_BYTES // 2
 _TAIL_BYTES = MAX_OUTPUT_BYTES - _HEAD_BYTES
+# Extra bytes kept past each cut, so a secret across it is masked whole before the cut
+_MASK_MARGIN = 4 * 1024
+# The outermost bytes of a margin, longer than any secret's first part that no pattern matches yet
+_MASK_EDGE = 128
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 _READ_CHUNK = 8 * 1024
 # After the command itself ended, how long the output is still read while programs it left running in the
 # background hold it open, before they're stopped too
 _DRAIN_WAIT = 2.0
-# Home folders that hold keys or browser sessions, on macOS, Linux and Windows. tools.py refuses paths under
-# them for Computer access, and the sandbox denies reads of them (secret_folders). Refuse the whole browser
-# folder, including cookies and login databases outside its Profiles subfolder.
+# The services that reach the keychain over IPC. A profile is (allow default), so without denying these
+# `security find-generic-password` still gets at the keychain whatever the file rules say. The trust services
+# (trustd) aren't here: HTTPS certificate checks need them.
+KEYCHAIN_MACH_SERVICES = (
+    "com.apple.SecurityServer", "com.apple.securityd", "com.apple.securityd.xpc", "com.apple.secd",
+    "com.apple.security.agent", "com.apple.security.agent.login", "com.apple.security.authhost",
+)
+# Home folders and files that hold keys, logins or browser sessions, on macOS, Linux and Windows. tools.py
+# refuses paths under them for Computer access, and the sandbox denies reads of them (secret_folders). Refuse
+# the whole browser folder, including cookies and login databases outside its Profiles subfolder. A file
+# works here as a folder does: the sandbox's subpath rule and the path check both match the file itself.
+# Files named .env* are found by name (secret_folders, is_secret_name).
 SECRET_HOME_FOLDERS = (
-    ".ssh", ".aws", ".gnupg", "Library/Keychains", "Library/Safari", "Library/Cookies",
+    ".ssh", ".aws", ".gnupg", ".netrc", ".npmrc", ".pypirc", ".git-credentials", ".config/gh", ".kube",
+    ".docker/config.json", ".config/gcloud", ".azure",
+    "Library/Keychains", "Library/Safari", "Library/Cookies",
     "Library/WebKit", "Library/Containers/com.apple.Safari",
     "Library/Group Containers/group.com.apple.Safari",
     "Library/Application Support/Google/Chrome", "Library/Application Support/Chromium",
@@ -154,10 +170,8 @@ def _quoted(path: str) -> str:
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def secret_folders() -> list[str]:
-    """The real paths a command must not read: the secret and browser folders (SECRET_HOME_FOLDERS) under the
-    home folder, and under the account's own home folder too when $HOME points somewhere else, then Ixel's
-    own config folder, where its keys live. Read each time, so tests can move the home."""
+def _homes() -> list[Path]:
+    """The home folder, and the account's own home folder too when $HOME points somewhere else."""
     homes = [Path.home()]
     if os.name == "posix":
         try:
@@ -167,17 +181,35 @@ def secret_folders() -> list[str]:
             account = None
         if account is not None and account != homes[0]:
             homes.append(account)
+    return homes
+
+
+def secret_folders() -> list[str]:
+    """The real paths a command must not read: the secret folders and files (SECRET_HOME_FOLDERS) under the
+    home folder, and under the account's own home folder too when $HOME points somewhere else, and the
+    .env* files directly in a home folder (not deeper), then Ixel's own config folder, where its keys live.
+    Read each time, so tests can move the home."""
+    homes = _homes()
     paths = [os.path.realpath(home / folder) for home in homes for folder in SECRET_HOME_FOLDERS]
+    for home in homes:
+        with suppress(OSError), os.scandir(home) as entries:
+            for name in sorted(entry.name for entry in entries if entry.name.lower().startswith(".env")):
+                paths.append(os.path.realpath(home / name))
     paths.append(os.path.realpath(_secrets._ENV_DIR))
     return list(dict.fromkeys(paths))
 
 
 def sandbox_profile(workspace: Path, *, network: bool = False, files: str = "chosen-folder",
-                    temporary: bool = True) -> str:
+                    temporary: bool = True, addon_files: Path | None = None) -> str:
     """The shared sandbox profile. Commands default to no network and workspace/temp writes; MCP cards
     pass their network/files permissions and temporary=False to allow only workspace writes, or none.
     Reads of the secret folders (secret_folders) are denied for every profile, MCP ones too. A workspace
     inside one of them (a fetched repo, in Ixel's config folder) is read again, when files allow it.
+    With files="none" the home folder can't be read either, except addon_files (the add-on's own installed
+    files folder); system folders stay readable so programs run, but an add-on whose program lives in the
+    home folder won't run with files="none". addon_files changes nothing for the other files modes.
+    Every profile also denies the keychain services (KEYCHAIN_MACH_SERVICES), Apple Events and the
+    ssh-agent socket named by $SSH_AUTH_SOCK, which file rules alone wouldn't stop.
     Paths are real paths, because the sandbox sees /var as /private/var."""
     if files not in ("none", "output-folder", "chosen-folder"):
         raise ValueError("unknown files permission")
@@ -188,6 +220,14 @@ def sandbox_profile(workspace: Path, *, network: bool = False, files: str = "cho
     subpaths = " ".join(f"(subpath {_quoted(path)})" for path in dict.fromkeys(allowed))
     devices = ' (literal "/dev/null") (regex #"^/dev/tty")' if temporary else ""
     writes = f" (allow file-write* {subpaths}{devices})" if subpaths or devices else ""
+    # With no file access the home folder is unreadable, bar the add-on's own files. The secret deny comes
+    # after, so a secret inside that folder stays denied.
+    homes = ""
+    if files == "none":
+        for path in dict.fromkeys(os.path.realpath(home) for home in _homes()):
+            homes += f" (deny file-read* (subpath {_quoted(path)}))"
+        if addon_files is not None:
+            homes += f" (allow file-read* (subpath {_quoted(os.path.realpath(addon_files))}))"
     secret = secret_folders()
     denied = " ".join(f"(subpath {_quoted(path)})" for path in secret)
     # A later rule wins, so a workspace inside a denied folder is allowed again after the deny. A workspace
@@ -195,8 +235,20 @@ def sandbox_profile(workspace: Path, *, network: bool = False, files: str = "cho
     reread = ""
     if files != "none" and any(Path(real).is_relative_to(folder) for folder in map(Path, secret)):
         reread = f" (allow file-read* (subpath {_quoted(real)}))"
+    # The ssh-agent socket, by the path it's given as and by its real path; it sits in a readable and often
+    # writable folder (/tmp), and talking to it signs with the person's keys. These come after the re-read.
+    agent = ""
+    agent_socket = os.environ.get("SSH_AUTH_SOCK", "")
+    if agent_socket and os.path.isabs(agent_socket):
+        for path in dict.fromkeys([os.path.realpath(agent_socket), agent_socket]):
+            agent += (f" (deny file-read* file-write* (literal {_quoted(path)}))"
+                      f" (deny network-outbound (remote unix-socket (path-literal {_quoted(path)})))")
+    # Last, so nothing above can allow them again
+    keychain = " (deny mach-lookup " + " ".join(f"(global-name {_quoted(name)})"
+                                                for name in KEYCHAIN_MACH_SERVICES) + ")"
     return ("(version 1) (allow default) " + ("" if network else "(deny network*) ")
-            + "(deny file-write*)" + writes + f" (deny file-read* {denied})" + reread)
+            + "(deny file-write*)" + writes + homes + f" (deny file-read* {denied})" + reread + agent
+            + keychain + " (deny appleevent-send)")
 
 
 def can_sandbox() -> bool:
@@ -223,8 +275,9 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 class _Output:
-    """Reads a command's output as it comes, keeping the first and last part of the output and counting the
-    rest (it's still all read, so the command never stops on a full pipe)."""
+    """Reads a command's output as it comes, keeping the first and last part of the output (each with
+    _MASK_MARGIN more bytes, for masking) and counting the rest (it's still all read, so the command never
+    stops on a full pipe)."""
 
     def __init__(self, stream):
         self.head = bytearray()
@@ -238,23 +291,36 @@ class _Output:
         with suppress(OSError, ValueError):
             while chunk := self._stream.read1(_READ_CHUNK):  # what's there now, up to a chunk
                 self.total += len(chunk)
-                room = _HEAD_BYTES - len(self.head)
+                room = _HEAD_BYTES + _MASK_MARGIN - len(self.head)
                 if room > 0:
                     self.head += chunk[:room]
                     chunk = chunk[room:]
                 if chunk:
                     self.tail += chunk
-                    if len(self.tail) > _TAIL_BYTES:
-                        del self.tail[:len(self.tail) - _TAIL_BYTES]
+                    if len(self.tail) > _TAIL_BYTES + _MASK_MARGIN:
+                        del self.tail[:len(self.tail) - _TAIL_BYTES - _MASK_MARGIN]
 
     def text(self) -> str:
+        """The output with secrets masked: whole when it's within MAX_OUTPUT_BYTES, else its first and last
+        parts with a line between. Each part is masked with the margin past its cut still in, so a secret
+        across the cut is blanked out whole, and only then cut."""
         head, tail, total = bytes(self.head), bytes(self.tail), self.total
-        if total <= len(head) + len(tail):
-            return (head + tail).decode("utf-8", errors="replace")
-        left_out = total - len(head) - len(tail)
+        if total <= MAX_OUTPUT_BYTES:
+            return mask_secrets((head + tail).decode("utf-8", errors="replace"))
+        if total == len(head) + len(tail):
+            # Every byte is here: the margin past each cut comes from the other part's bytes
+            data = head + tail
+            head, tail = data[:_HEAD_BYTES + _MASK_MARGIN], data[-(_TAIL_BYTES + _MASK_MARGIN):]
+        # A secret cut by the far edge of a margin is only part of itself there, too short to be matched. When
+        # masking shortened the margin enough that this edge falls inside what's kept, it's dropped as well.
+        masked = mask_secrets(head.decode("utf-8", errors="replace")).encode("utf-8")
+        kept_head = masked[:min(_HEAD_BYTES, max(len(masked) - _MASK_EDGE, 0))]
+        masked = mask_secrets(tail.decode("utf-8", errors="replace")).encode("utf-8")
+        kept_tail = masked[max(_MASK_EDGE, len(masked) - _TAIL_BYTES):]
+        left_out = total - _HEAD_BYTES - _TAIL_BYTES
         marker = (f"\n[output cut at {MAX_OUTPUT_BYTES // 1024} KB: {left_out} bytes left out here, "
                   f"of {total} in all]\n")
-        return head.decode("utf-8", errors="replace") + marker + tail.decode("utf-8", errors="replace")
+        return kept_head.decode("utf-8", errors="replace") + marker + kept_tail.decode("utf-8", errors="replace")
 
 
 def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEOUT,
@@ -284,8 +350,10 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
     if os.name == "nt":
         from ixel_mat.agents.launch import NO_WINDOW_FLAGS
         options["creationflags"] = NO_WINDOW_FLAGS
+    # No ssh-agent socket for the command: it would sign with the person's keys, secret folders or not
+    env = child_env(nested=False, drop_env=["SSH_AUTH_SOCK"])
     try:
-        proc = subprocess.Popen(command, cwd=folder, env=child_env(nested=False), stdin=subprocess.DEVNULL,
+        proc = subprocess.Popen(command, cwd=folder, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options)
     except FileNotFoundError:
         return CommandResult(argv, 127, f"there's no program {argv[0]!r} (check the name, or give its full path)",
@@ -332,5 +400,5 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
         with suppress(OSError):
             proc.stdout.close()
     return CommandResult(argv=argv, returncode=None if timed_out else proc.returncode,
-                         output=mask_secrets(output.text()) + note, timed_out=timed_out, sandboxed=sandboxed,
+                         output=output.text() + note, timed_out=timed_out, sandboxed=sandboxed,
                          cancelled=cancelled)
