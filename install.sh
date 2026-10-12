@@ -155,20 +155,43 @@ take_install_lock() {
       return 0
     fi
   else
-    # No flock command (macOS has none): the folder "$1.d" is the lock. One that's over half an hour old
-    # belongs to an install that died without cleaning up, so it's taken over.
-    if [ -d "$1.d" ] && [ -n "$(find "$1.d" -prune -mmin +30 2>/dev/null)" ]; then
-      echo "warning: taking over a stale install lock, left by an install that didn't finish" >&2
-      rm -rf "$1.d" || true
-    fi
+    # No flock command (macOS has none): the folder "$1.d" is the lock, with its owner's PID in a file inside
+    # (`ixel update` writes it too). It's stale when that process is gone, or, with no owner file, once it's
+    # over half an hour old; a live owner holds it however old it is.
+    got=0
     if mkdir "$1.d" 2>/dev/null; then
-      INSTALL_LOCK_DIR="$1.d"
-      trap 'rm -rf "$INSTALL_LOCK_DIR"' EXIT
-      trap 'exit 130' INT
-      trap 'exit 143' TERM
+      got=1
+    elif [ ! -d "$1.d" ]; then
       return 0
+    else
+      owner=""
+      { read -r owner < "$1.d/owner" || [ -n "$owner" ]; } 2>/dev/null || true
+      stale=0
+      case "$owner" in
+        "") if [ -n "$(find "$1.d" -prune -mmin +30 2>/dev/null)" ]; then stale=1; fi ;;
+        *[!0-9]*) ;;
+        *) kill -0 "$owner" 2>/dev/null || stale=1 ;;
+      esac
+      if [ "$stale" = "1" ]; then
+        echo "warning: taking over a stale install lock, left by an install that didn't finish" >&2
+        rm -rf "$1.d" || true
+        if mkdir "$1.d" 2>/dev/null; then
+          got=1
+        fi
+      fi
     fi
-    if [ ! -d "$1.d" ]; then
+    if [ "$got" = "1" ]; then
+      if { echo "$$" > "$1.d/owner"; } 2>/dev/null; then
+        # Removed on the way out, but only while its owner file still names this shell
+        INSTALL_LOCK_DIR="$1.d"
+        trap 'held_by=""
+              { read -r held_by < "$INSTALL_LOCK_DIR/owner" || [ -n "$held_by" ]; } 2>/dev/null || true
+              if [ "$held_by" = "$$" ]; then rm -rf "$INSTALL_LOCK_DIR"; fi' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+      else
+        rm -rf "$1.d"  # an owner can't be named here: go without a lock, as for a folder we can't write to
+      fi
       return 0
     fi
   fi

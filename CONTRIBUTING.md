@@ -18,8 +18,10 @@ If Python is missing or too old, it names the command to get it (`brew install p
 `sudo apt install python3-venv` on Debian and Ubuntu). It uses [uv](https://docs.astral.sh/uv/) when it's
 installed. Set `IXEL_PYTHON=/path/to/python` to choose the interpreter.
 
-Two installs at once can't interleave: the installer takes a lock in the install folder (`install.lock`), and
-the second one says so and stops. On Linux, when Ixel's own window can't open, it prints the GTK and WebKit
+Two installs at once can't interleave: the installer takes a lock in the install folder (`install.lock`, or,
+where there's no `flock` command, as on macOS, an `install.lock.d` folder that names its process), and
+the second one says so and stops. `ixel update` takes the same lock, so a hand-run install and an update
+see each other. On Linux, when Ixel's own window can't open, it prints the GTK and WebKit
 packages for your distribution and, at a terminal, offers to run that line (default No, and never during
 `ixel update`); without them `ixel app` opens in the browser instead.
 

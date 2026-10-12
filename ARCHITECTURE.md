@@ -50,7 +50,7 @@ MCP plugin. The engine doesn't know which one is calling.
 | `ixel_mat/sanitize.py` | Strips terminal control sequences; escapes Rich markup |
 | `ixel_mat/conversation.py` | The saved conversation `ixel review --continue` picks up (last three exchanges, 0600, each with the time it was saved, in UTC); each exchange is dropped once it's 24 hours old, and the file deleted when none is left (`expire` as each command starts: a stat, since the file's time is set to its oldest exchange's; `load_conversation` and `save_conversation`) |
 | `ixel_mat/forget.py` | What Ixel keeps of what you asked and ran: `tidy()` deletes what's past its time as each `ixel` command starts (a stat or two); `forget()` is `ixel forget` and Settings' Forget button (the conversation, the Machines log, and for `ixel forget` the app window's browser storage) |
-| `ixel_mat/update.py` | `ixel update` and the once-a-day update notice. Installer copies record where they came from in `install.json`, and, as the installer's last step, the commit installed (git pull, then the installer again whenever the checkout isn't that commit, unless install.ps1 is still running in its window: it holds `install.lock` open until it's done). install.sh takes the same lock (`flock` on `install.lock`, or an `install.lock.d` folder where there's no `flock` command, taken over after 30 minutes), and `ixel update` tells it through `IXEL_INSTALL_LOCK_HELD=1` that it already holds the lock. pipx and uv copies are recognized from pip's `direct_url.json` plus `pipx_metadata.json` / `uv-receipt.toml`, compared with `git ls-remote`, and updated by that tool |
+| `ixel_mat/update.py` | `ixel update` and the once-a-day update notice. Installer copies record where they came from in `install.json`, and, as the installer's last step, the commit installed (git pull, then the installer again whenever the checkout isn't that commit, unless install.ps1 is still running in its window: it holds `install.lock` open until it's done). install.sh takes the same lock (`flock` on `install.lock`, or an `install.lock.d` folder with its PID in an `owner` file where there's no `flock` command; `ixel update` makes that folder too, so each sees the other, and one is taken over when its owner's process is gone, or, with no owner file, after 30 minutes), and `ixel update` tells it through `IXEL_INSTALL_LOCK_HELD=1` that it already holds the lock. pipx and uv copies are recognized from pip's `direct_url.json` plus `pipx_metadata.json` / `uv-receipt.toml`, compared with `git ls-remote`, and updated by that tool |
 
 ## Agents
 
@@ -280,16 +280,19 @@ never waiting for the keychain or another save; what that leaves undone runs on 
 (`secrets._load_later`), and Health runs its Ixel checks off the loop. `where_keys_are()` says where they
 are for Health, `ixel status`, `ixel setup` and Settings.
 On Windows, where modes mean nothing, `_write_keys` calls `secrets.secure_owner_only` on the config folder
-before writing `keys.enc` and on the file after: `icacls <path> /inheritance:r /grant:r *<SID>:F`
-(`(OI)(CI)F` for the folder), with the SID from `whoami /user /fo csv /nh` (`user_sid`), both run by their
-path under `%SystemRoot%\System32` as argument lists, 10 s each. It never raises: a failure is logged and
-the keys are saved anyway. Health's keys check reads the lists back (`read_acl`, `parse_icacls`,
-`acl_problems`), warns with the one-line `owner_only_fix` when the file or folder inherits or lists another
-account, and on macOS and Linux checks that `keys.enc` isn't readable by group or others. `parse_whoami`,
-`parse_icacls`, `acl_problems` and `owner_only_argv` are pure, so tests cover them on every system. The loader
-validates each field and reports problems as warnings instead of failing. Config in the current folder
-is never read. `config.example.toml` documents every option, and `tests/test_docs.py` keeps it loading
-cleanly and matching the CLI presets.
+before writing `keys.enc` and on the file after. That's two `icacls` calls, since one that fails half-way
+isn't undone: first `icacls <path> /remove:g <SYSTEM, Administrators, OWNER RIGHTS> /grant:r *<SID>:F`
+(`(OI)(CI)F` for the folder, `owner_only_argv`), and only if that exits 0 `icacls <path> /inheritance:r`
+(`no_inheritance_argv`). A failure of the second leaves the account with its own entry, so it's never locked
+out. The SID comes from `whoami /user /fo csv /nh` (`user_sid`); both programs are run by their path
+under `%SystemRoot%\System32` as argument lists, 10 s each. It never raises: a failure is logged, saying
+which call failed, and the keys are saved anyway. Health's keys check reads the lists back (`read_acl`,
+`parse_icacls`, `acl_problems`), warns with the one-line `owner_only_fix` when the file or folder inherits or
+lists another account, and on macOS and Linux checks that `keys.enc` isn't readable by group or others.
+`parse_whoami`, `parse_icacls`, `acl_problems`, `owner_only_argv` and `no_inheritance_argv` are pure, so
+tests cover them on every system. The loader validates each field and reports problems as warnings instead
+of failing. Config in the current folder is never read. `config.example.toml` documents every option, and
+`tests/test_docs.py` keeps it loading cleanly and matching the CLI presets.
 
 ## Tests and CI
 

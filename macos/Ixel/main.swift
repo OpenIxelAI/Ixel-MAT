@@ -280,7 +280,12 @@ extension AppDelegate: WKNavigationDelegate {
             disposition = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         }
         if !navigationResponse.canShowMIMEType || disposition.hasPrefix("attachment") {
-            decisionHandler(.download)
+            // Only Ixel's own page saves a file: not a frame (an add-on's diagram) and not another site
+            if navigationResponse.isForMainFrame, isIxelPage(navigationResponse.response.url) {
+                decisionHandler(.download)
+            } else {
+                decisionHandler(.cancel)
+            }
         } else {
             decisionHandler(.allow)
         }
@@ -357,9 +362,12 @@ extension AppDelegate: WKDownloadDelegate {
         return path
     }
 
-    // WebKit fails a download whose file exists (a broken symlink counts), and two running at once would clash
+    // Anything there counts, and a symlink (even a broken one) is never followed, so a download can't be written
+    // through it; two downloads running at once would clash too
     private func isTaken(_ path: URL) -> Bool {
-        return (try? FileManager.default.attributesOfItem(atPath: path.path)) != nil
+        var info = stat()
+        return lstat(path.path, &info) == 0
+            || (try? FileManager.default.destinationOfSymbolicLink(atPath: path.path)) != nil
             || downloads.values.contains(path)
     }
 }

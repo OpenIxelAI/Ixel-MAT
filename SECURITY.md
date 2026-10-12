@@ -441,8 +441,10 @@ network.
   `http://127.0.0.1:80@evil.example/` doesn't count), gives the microphone only to them, opens other web
   links in your browser and ignores any other kind of link. The Mac app keeps the same pages inside by the
   same rule, and opens a web or email link you click in your browser (a script in the page can't open one by
-  itself). A download it saves goes in your Downloads folder under a name nothing there has (the file name
-  the page suggests is cut down to one plain name), so it never replaces a file.
+  itself). Only Ixel's own page, in its main frame, can start a download (not the frame an add-on's diagram
+  runs in, and not another site). It goes in your Downloads folder under a name nothing there has (the file
+  name the page suggests is cut down to one plain name), so it never replaces a file or is written through
+  a symlink, even a broken one.
 
 **How it's checked:** `tests/test_gui_browser.py` runs the app in real Chromium with a model that answers
 with `<img onerror>`, `<script>`, and `javascript:` links. It asserts that nothing executes, no elements are

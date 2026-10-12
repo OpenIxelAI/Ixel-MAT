@@ -213,28 +213,43 @@ _DEFAULT_GRANTEES = ("*S-1-5-18", "*S-1-5-32-544", "*S-1-3-4")
 
 
 def owner_only_argv(path: Path, sid: str, folder: bool = False) -> list[str]:
-    """The icacls call that takes away what path inherits and leaves access to the account with this SID
-    only (a folder: and to what's made in it)."""
+    """The icacls call that gives the account with this SID an entry of its own with full control (a folder:
+    and over what's made in it) and takes off the entries a new file or folder comes with. path still
+    inherits at this point, so the account has access whatever else happens; no_inheritance_argv comes
+    next."""
     removals = [word for default in _DEFAULT_GRANTEES for word in ("/remove:g", default)]
-    return [_system_tool("icacls.exe"), str(path), "/inheritance:r", *removals, "/grant:r", _grant(sid, folder)]
+    return [_system_tool("icacls.exe"), str(path), *removals, "/grant:r", _grant(sid, folder)]
+
+
+def no_inheritance_argv(path: Path) -> list[str]:
+    """The icacls call that takes away what path inherits, so the entries owner_only_argv left are all it
+    has. It runs after that one has worked: icacls can't undo a call that fails half-way, and without the
+    account's own entry this would leave it locked out."""
+    return [_system_tool("icacls.exe"), str(path), "/inheritance:r"]
 
 
 def secure_owner_only(path: Path, folder: bool = False) -> bool:
     """Limit path to the signed-in user's account, on Windows, where a file's mode means nothing (a folder:
     and, through inheritance, what's made in it afterwards). True when that's done, and off Windows.
+    That's two icacls calls, the account's own entry first and what path inherits only if that worked, so
+    when the second fails the user still has access.
     Never raises, so the keys it guards are saved either way: it logs why (never a key) and returns False,
     and Health reports it."""
     if sys.platform != "win32":
         return True
+    step = ""
     try:
         who = user_sid()
         if who is None:
             why = "Ixel couldn't tell which Windows account this is"
         else:
             code, _ = _run_tool(owner_only_argv(path, who[1], folder))
-            why = "" if code == 0 else f"icacls exited with {code}"
+            if code == 0:
+                step = ", removing what it inherits"
+                code, _ = _run_tool(no_inheritance_argv(path))
+            why = "" if code == 0 else f"icacls exited with {code}{step}"
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        why = _why(exc)
+        why = _why(exc) + step
     if why:
         logger.warning("Couldn't limit %s to your account (%s)", path, why)
     return not why
