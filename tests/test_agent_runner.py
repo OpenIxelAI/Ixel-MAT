@@ -85,7 +85,8 @@ def test_finished_run_has_the_page_shape_and_saves_every_step(tmp_path):
         assert saved["status"] == "done" and saved["steps"] == page["steps"]
         assert saved["approvals"] == []
         usage = page["usage"]
-        assert set(usage) == {"calls", "cost", "input_tokens", "output_tokens", "ms"}
+        assert set(usage) == {"calls", "cost", "input_tokens", "output_tokens", "ms", "retries"}
+        assert usage["retries"] == {"calls": 0, "input_tokens": 0, "output_tokens": 0, "ms": 0, "cost": 0.0}
         assert usage["calls"] == 2 and usage["cost"] == 0.0
         assert usage["input_tokens"] == 0 and usage["output_tokens"] == 0
         assert usage["ms"] == sum(step["ms"] for step in page["steps"])

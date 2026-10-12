@@ -4,7 +4,7 @@ clipping, heavy folders skipped, and the nearest lines on a missed edit.
 """
 import pytest
 
-from ixel_mat.agent.protocol import build_prompt, MAX_RECENT_RESULT_CHARS, MAX_OLDER_RESULT_CHARS, RECENT_STEPS
+from ixel_mat.agent.protocol import build_prompt, MAX_RECENT_RESULT_CHARS, MAX_OLDER_RESULT_CHARS
 from ixel_mat.agent.tools import Workspace, WorkspaceError
 
 FENCE = "IXEL-test"
@@ -73,10 +73,15 @@ def test_prompt_sends_only_the_newest_result_in_full():
     assert "NEWEST" + "n" * 20_000 in prompt
 
 
-def test_newest_result_longer_than_the_limit_ends_with_a_note():
-    prompt = build_prompt("goal", {}, [], [_step(1, "x" * (MAX_RECENT_RESULT_CHARS + 500))], fence=FENCE)
-    assert "x" * MAX_RECENT_RESULT_CHARS + "\n[… truncated]\n</IXEL-test>" in prompt
+def test_newest_result_longer_than_the_limit_keeps_its_head_and_tail_with_a_note():
+    half = MAX_RECENT_RESULT_CHARS // 2
+    result = "FIRST-" + "x" * (MAX_RECENT_RESULT_CHARS + 500) + "-LAST"
+    cut = len(result) - 2 * half
+    prompt = build_prompt("goal", {}, [], [_step(1, result)], fence=FENCE)
+    assert result[:half] in prompt and result[-half:] in prompt
+    assert f"{cut} characters cut from the middle of this result" in prompt
     assert "x" * (MAX_RECENT_RESULT_CHARS + 1) not in prompt
+    assert "[… truncated]" not in prompt
 
 
 def test_older_result_of_3000_characters_is_kept_whole():
@@ -88,7 +93,10 @@ def test_older_result_of_3000_characters_is_kept_whole():
 
 
 def test_only_the_newest_step_is_sent_in_full():
-    assert RECENT_STEPS == 1
+    # With no reads batch, the newest step is the only recent one (a batch is covered in test_agent_speed_review)
+    prompt = build_prompt("goal", {}, [], [_step(1, "a" * 5_000), _step(2, "b" * 5_000)], fence=FENCE)
+    assert "b" * 5_000 in prompt
+    assert "a" * 5_000 not in prompt
 
 
 # ── heavy folders ────────────────────────────────────────────────────────────
