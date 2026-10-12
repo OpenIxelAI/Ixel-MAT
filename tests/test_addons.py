@@ -1,12 +1,14 @@
-"""The Diagram Design add-on: unpacking its release safely, making a diagram in Ask, and the Settings route that
-switches it on and off. Nothing here uses the network, and everything it writes is in the test's own folder."""
+"""Add-on cards: reading and checking a card, approving one, installing its pinned release safely, the Settings
+routes that list and switch cards, and Diagram Design in Ask. Nothing here uses the network, and everything it
+writes is in the test's own folder."""
 import asyncio
-import dataclasses
+import copy
 import hashlib
 import io
 import json
 import os
 import re
+import shutil
 import stat
 import tarfile
 from datetime import datetime
@@ -15,18 +17,25 @@ from pathlib import Path
 import pytest
 
 from ixel_mat import addons
+from ixel_mat.addons import installer, paths
 from ixel_mat.agents.base import AgentConfig
-from ixel_mat.ask import AskResult
-from ixel_mat.config import loader
+from ixel_mat.ask import AskError, AskResult
+from ixel_mat.config import edit, loader
 from ixel_mat.gui import server as gui_server
 from ixel_mat.gui.server import GuiServer
 from ixel_mat.material import MAX_MATERIAL_CHARS
-from ixel_mat.runtime import load_settings
+from ixel_mat.runtime import Settings, load_settings
+from ixel_mat.usage import Price
 from test_gui_server import AUTH, JSON_AUTH, TOKEN, read_events, run_with_client
 
-NAME = addons.DIAGRAM_DESIGN.name
+DIAGRAM = addons.DIAGRAM_ID
 TOP = "diagram-design-7a2e22170ee8"
 SUB = "skills/diagram-design"
+REAL_CARD = Path(addons.__file__).parent / "diagram-design.toml"
+PIN_COMMIT = "c" * 40
+# The release Ixel pinned before cards, which the built-in card must still pin
+OLD_COMMIT = "7a2e22170ee838e859d8142ba825d83f8b6375e6"
+OLD_TREE = "e4adecc695f6367ce202995133e6e1fe5d18b6e4e142a06bd30926d72bfbb4a1"
 
 SELF_CHECK = '''\
 import sys
@@ -47,7 +56,7 @@ SKILL_FILES = {
     "assets/example-flowchart.html": "<!doctype html>\n<html><body><p>a flowchart example</p></body></html>\n",
     "scripts/self_check.py": SELF_CHECK,
 }
-# Everything else in the repository's archive: none of it is ever unpacked
+# Everything else in the repository's archive: none of it is unpacked when a card's subdir is the skill's folder
 OUTSIDE = {
     "README.md": "# The repository\n",
     "LICENSE": "MIT\n",
@@ -61,6 +70,10 @@ BAD = "<html><body>no doctype here</body></html>\n"
 
 CFG = AgentConfig(name="gpt", label="GPT", type="http", url="https://api.example.com", token="sk-never-shown",
                   model="m-test")
+LOCAL = AgentConfig(name="llama", label="Llama", type="http", url="http://127.0.0.1:11434/v1/chat/completions",
+                    model="llama3")
+CLAUDE_CODE = AgentConfig(name="claude", label="Claude Code", type="oneshot", command="claude",
+                          model_args=["--model", "{model}"])
 
 
 def _add(tar, name, data=b"", kind=tarfile.REGTYPE, link=""):
@@ -100,15 +113,137 @@ def expected_tree(files) -> tuple[int, str]:
 
 
 TARBALL = tarball()
-PINNED = dataclasses.replace(addons.DIAGRAM_DESIGN, commit="c" * 40, tree_sha256=expected_tree(SKILL_FILES)[1],
-                             files=len(SKILL_FILES))
+TREE_SHA = expected_tree(SKILL_FILES)[1]
+URL = "https://codeload.github.com/cathrynlavery/diagram-design/tar.gz/" + PIN_COMMIT
 
+
+# ── Cards written for the tests ──────────────────────────────────────────────
+
+DROP = object()  # as a change to card_text: take the key out
+
+# A valid agent card whose pin is the test tarball's skill, so it can be installed from TARBALL
+CARD = {
+    "id": "pdf-notes",
+    "name": "PDF Notes",
+    "summary": "Turns a PDF into short notes.",
+    "by": "A. Writer",
+    "license": "MIT",
+    "homepage": "https://github.com/someone/pdf-notes",
+    "kind": "skill",
+    "terms": "MIT: keep the copyright notice with copies of its files.",
+    "source": {"repo": "https://github.com/someone/pdf-notes", "commit": "d" * 40, "subdir": SUB,
+               "tree_sha256": TREE_SHA, "files": len(SKILL_FILES)},
+    "permissions": {"files": "none", "network": False, "commands": []},
+    "use": {"where": "agent", "trigger": "/notes", "output": "text"},
+}
+
+
+def _toml_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)  # JSON's string escapes are TOML's
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise TypeError(value)
+
+
+def card_text(**changes) -> str:
+    """Valid card text, with changes made to it: a top-level key as is (id="x"), one in a table with a double
+    underscore (source__commit="x", permissions__commands=[[...]]), DROP to take a key out."""
+    data = copy.deepcopy(CARD)
+    for key, value in changes.items():
+        *parents, name = key.split("__")
+        target = data
+        for part in parents:
+            target = target[part]
+        if value is DROP:
+            del target[name]
+        else:
+            target[name] = value
+    lines = [f"{key} = {_toml_value(value)}" for key, value in data.items() if not isinstance(value, dict)]
+    for table, values in data.items():
+        if isinstance(values, dict):
+            lines += ["", f"[{table}]"] + [f"{key} = {_toml_value(value)}" for key, value in values.items()]
+    return "\n".join(lines) + "\n"
+
+
+def put_card(folder_name: str, text: str) -> Path:
+    """A card as the agent would leave it: ADDONS_DIR/<folder_name>/addon.toml, with exactly these bytes."""
+    path = paths.ADDONS_DIR / folder_name / "addon.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text.encode("utf-8"))
+    return path
+
+
+def pinned_text() -> str:
+    """The real built-in card, with only its pin changed to the test tarball's."""
+    text = REAL_CARD.read_text(encoding="utf-8")
+    text = re.sub(r'(?m)^commit = "[^"]*"', f'commit = "{PIN_COMMIT}"', text)
+    text = re.sub(r'(?m)^tree_sha256 = "[^"]*"', f'tree_sha256 = "{TREE_SHA}"', text)
+    return re.sub(r"(?m)^files = \d+", f"files = {len(SKILL_FILES)}", text)
+
+
+def saved_state() -> dict:
+    return json.loads(paths.state_path().read_text(encoding="utf-8"))
+
+
+def write_old_layout(card) -> None:
+    """The skill's files straight in ~/.ixel/addons/<id>/ (SKILL.md at its root), as installed before cards."""
+    for rel, text in SKILL_FILES.items():
+        path = card.dir.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+# ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
 def _folders(tmp_path, monkeypatch):
-    """Add-ons and diagrams go in the test's own folder, never in ~/.ixel."""
-    monkeypatch.setattr(addons, "ADDONS_DIR", tmp_path / "ixel-home" / "addons")
-    monkeypatch.setattr(addons, "DIAGRAMS_DIR", tmp_path / "ixel-home" / "diagrams")
+    """Add-ons, diagrams and built-in cards are in the test's own folders, never in ~/.ixel or the package: no
+    built-in cards at all, until a test asks for `builtin`."""
+    monkeypatch.setattr(paths, "ADDONS_DIR", tmp_path / "ixel-home" / "addons")
+    monkeypatch.setattr(paths, "DIAGRAMS_DIR", tmp_path / "ixel-home" / "diagrams")
+    none = tmp_path / "no-builtin-cards"
+    none.mkdir()
+    monkeypatch.setattr(paths, "BUILTIN_DIR", none)
+
+
+@pytest.fixture
+def builtin(tmp_path, monkeypatch):
+    """Diagram Design as the only built-in card: the real card, pinned to the test tarball."""
+    folder = tmp_path / "builtin-cards"
+    folder.mkdir()
+    (folder / "diagram-design.toml").write_bytes(pinned_text().encode("utf-8"))
+    monkeypatch.setattr(paths, "BUILTIN_DIR", folder)
+    card = addons.card_by_id(DIAGRAM)
+    assert card is not None and card.builtin
+    return card
+
+
+@pytest.fixture
+def diagram_on(builtin):
+    """Diagram Design installed from the test tarball, approved and switched on."""
+    addons.install(builtin, fetch=lambda url: TARBALL)
+    addons.approve_and_switch_on(builtin)
+    card = addons.card_by_id(DIAGRAM)
+    assert card.enabled
+    return card
+
+
+@pytest.fixture
+def release(monkeypatch):
+    """Downloading gives the test tarball. Returns the urls asked for."""
+    fetched = []
+
+    def download(url, **kwargs):
+        fetched.append(url)
+        return TARBALL
+
+    monkeypatch.setattr(installer, "download", download)
+    return fetched
 
 
 @pytest.fixture
@@ -122,19 +257,301 @@ def skill(tmp_path):
     return root
 
 
-@pytest.fixture
-def release(monkeypatch):
-    """This Ixel's pin is the test tarball's; downloading gives that tarball. Returns the urls asked for."""
-    fetched = []
+# ── Reading a card ───────────────────────────────────────────────────────────
 
-    def download(url, **kwargs):
-        fetched.append(url)
-        return TARBALL
+def test_the_real_builtin_card_validates_and_pins_the_release_that_was_pinned_before_cards():
+    card = addons.load_card(REAL_CARD, builtin=True)
+    assert (card.id, card.name, card.kind, card.builtin) == (DIAGRAM, "Diagram Design", "skill", True)
+    assert card.card_path == REAL_CARD
+    assert card.source.commit == OLD_COMMIT and card.source.tree_sha256 == OLD_TREE
+    assert card.source.files == 279 and card.source.subdir == "skills/diagram-design"
+    assert card.source.repo == "https://github.com/cathrynlavery/diagram-design"
+    assert card.source["repo"] == card.source.repo
+    assert card.permissions.commands == [["python3", "{addon}/scripts/self_check.py", "{output}"]]
+    assert card.use.trigger == "/diagram" and card.terms
+    assert card.dir == paths.ADDONS_DIR / "diagram-design"
+    assert card.files_dir == paths.ADDONS_DIR / "diagram-design" / "files"
+    assert card.card_sha256 == hashlib.sha256(REAL_CARD.read_bytes()).hexdigest()
+    assert (card.on, card.approved, card.changed_since_approval, card.installed, card.enabled) == (False,) * 5
+    with pytest.raises(KeyError):
+        card.source["nope"]
+    data = card.to_dict()
+    assert json.loads(json.dumps(data)) == data
+    assert data["files_dir"] == str(card.files_dir) and data["source"]["files"] == 279
 
-    monkeypatch.setattr(addons, "download", download)
-    monkeypatch.setattr(addons, "DIAGRAM_DESIGN", PINNED)
-    monkeypatch.setitem(addons.ADDONS, NAME, PINNED)
-    return fetched
+
+def test_a_valid_card_is_placed_as_an_agent_card_with_all_its_state_off():
+    text = card_text()
+    card = addons.validate_card_text(text)
+    assert card.id == "pdf-notes" and card.builtin is False
+    assert card.card_path == paths.ADDONS_DIR / "pdf-notes" / "addon.toml"
+    assert card.dir == paths.ADDONS_DIR / "pdf-notes" and card.files_dir == card.dir / "files"
+    assert card.card_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert (card.on, card.approved, card.changed_since_approval, card.installed, card.enabled) == (False,) * 5
+    assert not paths.ADDONS_DIR.exists()  # it reads and writes nothing
+
+
+def test_text_that_isnt_a_card_is_refused():
+    with pytest.raises(addons.CardError) as caught:
+        addons.validate_card_text("id = ")
+    assert "TOML" in str(caught.value)
+    with pytest.raises(addons.CardError) as caught:
+        addons.validate_card_text("# " + "x" * addons.MAX_CARD_BYTES)
+    assert "64 KB" in str(caught.value)
+    with pytest.raises(addons.CardError):
+        addons.validate_card_text(None)
+
+
+@pytest.mark.parametrize("path", ["comit", "source.comit", "permissions.network_access", "use.triger"])
+def test_a_key_the_format_doesnt_have_is_refused_naming_its_dotted_path(path):
+    with pytest.raises(addons.CardError) as caught:
+        addons.validate_card_text(card_text(**{path.replace(".", "__"): "x"}))
+    assert f"`{path}`" in str(caught.value)
+
+
+@pytest.mark.parametrize("change, path", [
+    ("id", "id"),
+    ("summary", "summary"),
+    ("source__commit", "source.commit"),
+    ("source__tree_sha256", "source.tree_sha256"),
+    ("source__files", "source.files"),
+    ("permissions__network", "permissions.network"),
+    ("permissions__commands", "permissions.commands"),
+    ("use__where", "use.where"),
+    ("use", "use"),
+])
+def test_a_missing_key_is_refused_naming_it(change, path):
+    with pytest.raises(addons.CardError) as caught:
+        addons.validate_card_text(card_text(**{change: DROP}))
+    assert f"`{path}`" in str(caught.value)
+
+
+@pytest.mark.parametrize("commit", ["a" * 7, "a" * 39, "A" * 40, "g" * 40, 1234567],
+                         ids=["seven-characters", "thirty-nine", "upper-case", "not-hex", "a-number"])
+def test_a_commit_that_isnt_the_full_lower_case_sha_is_refused(commit):
+    with pytest.raises(addons.CardError) as caught:
+        addons.validate_card_text(card_text(source__commit=commit))
+    assert "`source.commit`" in str(caught.value)
+
+
+BAD_VALUES = [
+    ("id", "A", "id"),
+    ("id", "x", "id"),
+    ("id", "has space", "id"),
+    ("id", "a" * 41, "id"),
+    ("name", "", "name"),
+    ("name", "two\nlines", "name"),
+    ("summary", " padded", "summary"),
+    ("license", "not a license!", "license"),
+    ("kind", "plugin", "kind"),
+    ("homepage", "http://example.com/notes", "homepage"),
+    ("terms", "t" * 501, "terms"),
+    ("source__repo", "http://github.com/someone/pdf-notes", "source.repo"),
+    ("source__repo", "https://gitlab.com/someone/pdf-notes", "source.repo"),
+    ("source__repo", "https://github.com/someone/pdf-notes/tree/main", "source.repo"),
+    ("source__repo", "https://github.com/someone/pdf-notes.git", "source.repo"),
+    ("source__subdir", "/abs", "source.subdir"),
+    ("source__subdir", "../x", "source.subdir"),
+    ("source__subdir", "skills\\notes", "source.subdir"),
+    ("source__subdir", "a//b", "source.subdir"),
+    ("source__tree_sha256", "b" * 63, "source.tree_sha256"),
+    ("source__files", 0, "source.files"),
+    ("source__files", -1, "source.files"),
+    ("source__files", True, "source.files"),
+    ("source__files", "3", "source.files"),
+    ("permissions__files", "everything", "permissions.files"),
+    ("permissions__network", "yes", "permissions.network"),
+    ("permissions__network", 1, "permissions.network"),
+    ("use__where", "everywhere", "use.where"),
+    ("use__output", "pdf", "use.output"),
+    ("use__trigger", "diagram", "use.trigger"),
+    ("use__trigger", "/two words", "use.trigger"),
+]
+
+
+@pytest.mark.parametrize("change, value, path", BAD_VALUES,
+                         ids=[f"{change}={value!r:.24}" for change, value, _ in BAD_VALUES])
+def test_a_value_the_format_doesnt_allow_is_refused_naming_its_key(change, value, path):
+    with pytest.raises(addons.CardError) as caught:
+        addons.validate_card_text(card_text(**{change: value}))
+    assert f"`{path}`" in str(caught.value)
+
+
+def test_values_at_the_limits_and_the_optional_keys_are_fine():
+    card = addons.validate_card_text(card_text(id="a" * 40, terms="t" * 500, source__subdir="",
+                                               use__trigger=DROP))
+    assert card.id == "a" * 40 and len(card.terms) == 500 and card.source.subdir == "" and card.use.trigger == ""
+    assert addons.validate_card_text(card_text(terms=DROP)).terms == ""
+
+
+def test_shell_characters_in_a_command_are_plain_characters():
+    argv = ["tool", "a;b", "|", "$(rm -rf ~)", "`x`", "&&", "> out", "{input}"]
+    card = addons.validate_card_text(card_text(permissions__commands=[argv]))
+    assert card.permissions.commands == [argv]
+    filled = addons.fill_command(card, card.permissions.commands[0], input="x; y")
+    assert filled == ["tool", "a;b", "|", "$(rm -rf ~)", "`x`", "&&", "> out", "x; y"]
+    assert card.permissions.commands[0][-1] == "{input}"  # the card's own command wasn't changed
+
+
+@pytest.mark.parametrize("item", ["{home}", "{ADDON}", "{}", "{input", "x}", "{{addon}}"])
+def test_a_placeholder_ixel_doesnt_fill_is_refused_naming_the_item(item):
+    with pytest.raises(addons.CardError) as caught:
+        addons.validate_card_text(card_text(permissions__commands=[["tool", "ok", item]]))
+    assert "`permissions.commands[0][2]`" in str(caught.value)
+
+
+@pytest.mark.parametrize("first", ["/bin/sh", "./tool", "../tool", "sub/tool", "{addon}", "{addon}/../x",
+                                   "{addon}//x", "{input}", "tool{output}", "", "to\\ol"])
+def test_a_program_that_isnt_a_bare_name_or_a_file_in_the_add_on_is_refused(first):
+    with pytest.raises(addons.CardError) as caught:
+        addons.validate_card_text(card_text(permissions__commands=[[first, "arg"]]))
+    assert "`permissions.commands[0][0]`" in str(caught.value)
+
+
+@pytest.mark.parametrize("first", ["python3", "{addon}/scripts/run.py"])
+def test_a_bare_program_name_and_a_file_in_the_add_on_are_fine_first_items(first):
+    card = addons.validate_card_text(card_text(permissions__commands=[[first, "arg"]]))
+    assert card.permissions.commands == [[first, "arg"]]
+
+
+def test_a_command_is_filled_in_with_the_cards_files_and_the_values_given():
+    card = addons.validate_card_text(card_text(
+        permissions__commands=[["python3", "{addon}/scripts/x.py", "{input}", "--out={output}"]]))
+    argv = card.permissions.commands[0]
+    assert addons.fill_command(card, argv, input="in.md", output="out.html") == \
+        ["python3", str(card.files_dir / "scripts" / "x.py"), "in.md", "--out=out.html"]
+    # {addon} is the card's files, and only the card's files can come after it
+    assert addons.fill_command(card, ["{addon}/scripts/x.py"]) == [str(card.files_dir / "scripts" / "x.py")]
+
+
+def test_filling_a_command_without_a_value_it_uses_is_refused():
+    card = addons.validate_card_text(card_text())
+    with pytest.raises(addons.CardError):
+        addons.fill_command(card, ["tool", "{input}"])
+    with pytest.raises(addons.CardError):
+        addons.fill_command(card, ["tool", "{output}"], input="x")
+    with pytest.raises(addons.CardError):
+        addons.fill_command(card, ["tool", "{input}"], input="a\x00b")
+
+
+def test_a_value_that_looks_like_a_placeholder_is_never_filled_again():
+    card = addons.validate_card_text(card_text())
+    assert addons.fill_command(card, ["tool", "{output}"], output="{addon}") == ["tool", "{addon}"]
+    assert addons.fill_command(card, ["tool", "{input}", "{output}"], input="{output}", output="o") == \
+        ["tool", "{output}", "o"]
+
+
+def test_fill_command_checks_the_command_it_is_given():
+    card = addons.validate_card_text(card_text())
+    with pytest.raises(addons.CardError) as caught:
+        addons.fill_command(card, ["/bin/sh", "-c", "x"])
+    assert "`argv[0]`" in str(caught.value)
+
+
+# ── Which cards there are ────────────────────────────────────────────────────
+
+def test_a_broken_card_is_a_problem_and_the_other_cards_still_load(builtin):
+    put_card("good-one", card_text(id="good-one"))
+    broken = put_card("broken-one", card_text(id="broken-one", source__commit="abc"))
+    renamed = put_card("some-folder", card_text(id="other-name"))
+    (paths.ADDONS_DIR / "just-files" / "files").mkdir(parents=True)  # a folder with no card isn't a problem
+    assert [card.id for card in addons.all_cards()] == [DIAGRAM, "good-one"]
+    problems = {problem["path"]: problem["error"] for problem in addons.card_problems()}
+    assert set(problems) == {str(broken), str(renamed)}
+    assert "`source.commit`" in problems[str(broken)]
+    assert "other-name" in problems[str(renamed)] and "some-folder" in problems[str(renamed)]
+
+
+def test_an_agent_folder_named_for_a_builtin_card_is_ignored_with_a_problem(builtin):
+    impostor = put_card(DIAGRAM, card_text(id=DIAGRAM, name="Impostor"))
+    [card] = addons.all_cards()
+    assert card.builtin and card.name == "Diagram Design"
+    [problem] = addons.card_problems()
+    assert problem["path"] == str(impostor) and "built-in" in problem["error"]
+
+
+def test_builtin_cards_come_first_then_the_agents_each_by_id(builtin):
+    put_card("zed-notes", card_text(id="zed-notes"))
+    put_card("abc-notes", card_text(id="abc-notes"))
+    assert [card.id for card in addons.all_cards()] == [DIAGRAM, "abc-notes", "zed-notes"]
+    assert [card.builtin for card in addons.all_cards()] == [True, False, False]
+    assert addons.builtin_ids() == {DIAGRAM}
+    assert addons.card_by_id("abc-notes").id == "abc-notes" and addons.card_by_id("nope") is None
+
+
+def test_writing_a_card_for_a_builtin_id_is_refused_and_writes_nothing(builtin):
+    with pytest.raises(addons.CardError) as caught:
+        addons.write_agent_card(card_text(id=DIAGRAM))
+    assert "built-in" in str(caught.value)
+    assert not (paths.ADDONS_DIR / DIAGRAM / "addon.toml").exists() and not paths.state_path().exists()
+
+
+def test_the_agents_card_is_written_exactly_and_never_switched_on():
+    text = card_text()
+    card = addons.write_agent_card(text)
+    path = paths.ADDONS_DIR / "pdf-notes" / "addon.toml"
+    assert path.read_bytes() == text.encode("utf-8")
+    assert card.card_path == path and card.builtin is False
+    assert card.card_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert (card.on, card.approved, card.enabled) == (False, False, False)
+    assert not paths.state_path().exists()
+    again = addons.write_agent_card(card_text(summary="Notes from a PDF."))  # one more edit: another sha
+    assert again.card_sha256 != card.card_sha256 and not paths.state_path().exists()
+
+
+def test_a_card_that_doesnt_validate_isnt_written():
+    with pytest.raises(addons.CardError):
+        addons.write_agent_card(card_text(kind="plugin"))
+    assert not (paths.ADDONS_DIR / "pdf-notes").exists()
+
+
+# ── Approval and state ───────────────────────────────────────────────────────
+
+def test_a_card_is_enabled_once_it_is_approved_and_installed_and_not_when_it_changes():
+    card = addons.write_agent_card(card_text())
+    assert not card.enabled and addons.enabled_cards() == []
+    addons.install(card, fetch=lambda url: TARBALL)
+    assert not addons.card_by_id("pdf-notes").enabled  # installed, but nobody approved it
+    addons.approve_and_switch_on(card)
+    card = addons.card_by_id("pdf-notes")
+    assert card.on and card.approved and card.installed and card.enabled
+    assert not card.changed_since_approval
+    assert [c.id for c in addons.enabled_cards()] == ["pdf-notes"]
+    assert [c.id for c in addons.enabled_cards("skill")] == ["pdf-notes"]
+    assert addons.enabled_cards("mcp") == []
+    with pytest.raises(ValueError):
+        addons.enabled_cards("bogus")
+
+    card.card_path.write_bytes(card.card_path.read_bytes() + b"\n")  # one byte more
+    changed = addons.card_by_id("pdf-notes")
+    assert changed.changed_since_approval and changed.on and not changed.approved and not changed.enabled
+    assert addons.enabled_cards() == []
+
+
+def test_the_state_of_a_card_comes_from_its_entry_and_its_exact_bytes():
+    card = addons.validate_card_text(card_text())
+    sha, tree = card.card_sha256, card.source.tree_sha256
+    assert addons.card_state(card, None) == {"on": False, "approved": False, "changed_since_approval": False,
+                                             "installed": False, "enabled": False}
+    approved = {"on": True, "approved_card_sha256": sha, "approved_tree_sha256": tree}
+    assert addons.card_state(card, approved) == {"on": True, "approved": True, "changed_since_approval": False,
+                                                 "installed": False, "enabled": False}  # not installed
+    assert addons.card_state(card, {**approved, "on": "yes"})["on"] is False
+    other_tree = addons.card_state(card, {**approved, "approved_tree_sha256": "e" * 64})
+    assert other_tree["approved"] is False and other_tree["changed_since_approval"] is True
+    other_card = addons.card_state(card, {**approved, "approved_card_sha256": "f" * 64})
+    assert other_card["approved"] is False and other_card["changed_since_approval"] is True
+    assert addons.card_state(card, {"on": True, "approved_card_sha256": ""})["changed_since_approval"] is False
+
+
+def test_switching_off_keeps_what_was_approved_and_a_card_with_no_entry_writes_nothing(builtin):
+    addons.switch_off(DIAGRAM)
+    assert not paths.state_path().exists()
+    entry = addons.approve_and_switch_on(builtin, now=datetime(2026, 10, 12, 3, 40, 0))
+    assert entry == {"on": True, "approved_card_sha256": builtin.card_sha256, "approved_tree_sha256": TREE_SHA,
+                     "approved_at": "2026-10-12T03:40:00Z"}
+    addons.switch_off(DIAGRAM)
+    assert saved_state()[DIAGRAM] == {**entry, "on": False}
 
 
 # ── Unpacking ────────────────────────────────────────────────────────────────
@@ -146,6 +563,15 @@ def test_only_the_skills_folder_is_unpacked_and_its_files_counted(tmp_path):
     assert found == sorted(SKILL_FILES)  # no README, LICENSE, docs, other skill or look-alike folder
     assert (dest / "SKILL.md").read_text(encoding="utf-8") == SKILL_FILES["SKILL.md"]
     assert sorted(p.name for p in dest.parent.iterdir()) == ["diagram-design"]  # no .part or .old beside it
+
+
+def test_an_empty_subdir_unpacks_the_whole_top_folder(tmp_path):
+    dest = tmp_path / "addons" / "whole"
+    expected = {f"{SUB}/{rel}" for rel in SKILL_FILES} | set(OUTSIDE)
+    assert addons.extract(TARBALL, "", dest) == len(expected)
+    found = {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()}
+    assert found == expected
+    assert (dest / "README.md").is_file() and (dest / SUB / "SKILL.md").is_file()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX's")
@@ -198,7 +624,7 @@ def test_a_file_over_the_size_limit_refuses_the_archive(tmp_path):
     assert caught.value.code == "unsafe" and not (tmp_path / "out").exists()
 
 
-@pytest.mark.parametrize("subdir", ["", "..", "skills/../.."])
+@pytest.mark.parametrize("subdir", ["..", "skills/../..", ".", "/"])
 def test_a_folder_that_isnt_inside_the_archive_is_refused(tmp_path, subdir):
     with pytest.raises(addons.AddonError) as caught:
         addons.extract(TARBALL, subdir, tmp_path / "out" / "diagram-design")
@@ -259,9 +685,6 @@ def test_files_that_dont_match_the_pin_leave_what_was_there_alone(tmp_path, chan
 
 
 # ── Downloading ──────────────────────────────────────────────────────────────
-
-URL = "https://codeload.github.com/cathrynlavery/diagram-design/tar.gz/" + "c" * 40
-
 
 class Reply:
     """What an opener gives back: read(n) in pieces, geturl(), close()."""
@@ -334,83 +757,127 @@ def test_a_download_that_fails_says_so():
 
 # ── Installing ───────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("commit, tree", [("", ""), ("c" * 40, ""), ("", "a" * 64)])
-def test_without_a_pin_nothing_is_downloaded_or_installed(commit, tree):
-    unpinned = dataclasses.replace(PINNED, commit=commit, tree_sha256=tree)
+def test_the_release_is_downloaded_from_the_cards_commit_and_unpacked_into_its_files_folder(builtin, release):
+    where = addons.install(builtin)  # no fetch: it asks installer.download, which the fixture stands in for
+    assert release == [URL] and addons.tarball_url(builtin) == URL
+    assert where == builtin.files_dir == paths.ADDONS_DIR / "diagram-design" / "files"
+    found = sorted(p.relative_to(where).as_posix() for p in where.rglob("*") if p.is_file())
+    assert found == sorted(SKILL_FILES)
+    assert addons.installed(builtin) and addons.tree_hash(where) == expected_tree(SKILL_FILES)
 
-    def fetch(url):
-        raise AssertionError("an unpinned add-on must not be downloaded")
 
+def test_a_release_that_isnt_the_pinned_one_gives_409_and_leaves_nothing_behind(builtin):
+    tampered = tarball({**SKILL_FILES, "scripts/self_check.py": "import os\nos.system('echo hi')\n"})
     with pytest.raises(addons.AddonError) as caught:
-        addons.install(unpinned, fetch=fetch)
-    assert caught.value.code == "unpinned" and caught.value.status == 409
-    assert not addons.ADDONS_DIR.exists()
+        addons.install(builtin, fetch=lambda url: tampered)
+    assert caught.value.status == 409 and caught.value.code == "tree_mismatch"
+    assert not addons.installed(builtin) and not builtin.dir.exists()
+    assert list(paths.ADDONS_DIR.iterdir()) == []
 
 
-def test_a_pinned_release_is_downloaded_from_its_commit_and_unpacked():
+def test_a_release_that_isnt_the_pinned_one_leaves_the_files_that_were_there(builtin):
+    addons.install(builtin, fetch=lambda url: TARBALL)
+    tampered = tarball({**SKILL_FILES, "SKILL.md": "# Something else\n"})
+    with pytest.raises(addons.AddonError) as caught:
+        addons.install(builtin, fetch=lambda url: tampered)
+    assert caught.value.code == "tree_mismatch"
+    assert addons.tree_hash(builtin.files_dir) == expected_tree(SKILL_FILES)
+    assert sorted(p.name for p in builtin.dir.iterdir()) == ["files"]
+
+
+def test_ensure_installed_reuses_matching_files_and_installs_again_when_one_changed(builtin):
     asked = []
 
     def fetch(url):
         asked.append(url)
         return TARBALL
 
-    where = addons.install(PINNED, fetch=fetch)
-    assert asked == ["https://codeload.github.com/cathrynlavery/diagram-design/tar.gz/" + "c" * 40]
-    assert where == addons.ADDONS_DIR / "diagram-design" == addons.folder(PINNED)
-    assert addons.installed(PINNED) and (where / "scripts" / "self_check.py").is_file()
+    def never(url):
+        raise AssertionError("matching files must not be downloaded again")
+
+    assert addons.ensure_installed(builtin, fetch=fetch) is True and len(asked) == 1
+    assert addons.ensure_installed(builtin, fetch=never) is False
+    (builtin.files_dir / "SKILL.md").write_text("# edited by hand\n", encoding="utf-8")
+    assert addons.ensure_installed(builtin, fetch=fetch) is True and len(asked) == 2
+    assert (builtin.files_dir / "SKILL.md").read_text(encoding="utf-8") == SKILL_FILES["SKILL.md"]
 
 
-def test_a_release_that_isnt_the_pinned_one_is_not_installed():
-    tampered = tarball({**SKILL_FILES, "scripts/self_check.py": "import os\nos.system('echo hi')\n"})
-    with pytest.raises(addons.AddonError) as caught:
-        addons.install(PINNED, fetch=lambda url: tampered)
-    assert caught.value.code == "tree_mismatch"
-    assert not addons.installed(PINNED) and not addons.folder(PINNED).exists()
+def test_removing_an_agent_card_takes_its_files_and_keeps_its_card():
+    card = addons.write_agent_card(card_text())
+    assert addons.remove(card) is False  # nothing there yet
+    addons.install(card, fetch=lambda url: TARBALL)
+    assert addons.remove(card) is True
+    assert not card.files_dir.exists() and not addons.installed(card)
+    assert card.card_path.is_file() and card.card_path.read_bytes() == card_text().encode("utf-8")
+    assert addons.remove(card) is False
 
 
-def test_removing_an_add_on_takes_its_folder_and_says_whether_there_was_one():
-    assert addons.remove(PINNED) is False
-    addons.install(PINNED, fetch=lambda url: TARBALL)
-    assert addons.remove(PINNED) is True
-    assert not addons.folder(PINNED).exists() and not addons.installed(PINNED)
-    assert addons.remove(PINNED) is False
+def test_removing_a_builtin_card_takes_its_files_and_then_its_empty_folder(builtin):
+    assert addons.remove(builtin) is False
+    addons.install(builtin, fetch=lambda url: TARBALL)
+    assert addons.remove(builtin) is True
+    assert not builtin.dir.exists() and not addons.installed(builtin)
+    assert addons.remove(builtin) is False
 
 
-def test_removing_a_link_removes_the_link_not_what_it_points_at(tmp_path):
+def test_an_install_from_before_cards_isnt_installed_and_install_and_remove_both_clear_it(builtin):
+    write_old_layout(builtin)
+    assert not addons.installed(builtin)
+    addons.install(builtin, fetch=lambda url: TARBALL)
+    assert addons.installed(builtin) and not (builtin.dir / "SKILL.md").exists()
+    assert sorted(p.name for p in builtin.dir.iterdir()) == ["files"]
+
+    addons.remove(builtin)
+    write_old_layout(builtin)
+    half = paths.ADDONS_DIR / "diagram-design.part"  # what the old installer left when it was stopped
+    half.mkdir()
+    (half / "half.txt").write_text("x", encoding="utf-8")
+    assert addons.remove(builtin) is True
+    assert not builtin.dir.exists() and not half.exists()
+
+
+def test_an_approved_card_installed_the_old_way_is_not_enabled(builtin):
+    write_old_layout(builtin)
+    addons.approve_and_switch_on(builtin)
+    card = addons.card_by_id(DIAGRAM)
+    assert card.on and card.approved and not card.installed and not card.enabled
+    assert addons.enabled_cards() == []
+
+
+def test_a_linked_builtin_folder_is_unlinked_not_followed(tmp_path, builtin):
     elsewhere = tmp_path / "my-own-copy"
     elsewhere.mkdir()
     (elsewhere / "SKILL.md").write_text("# mine\n", encoding="utf-8")
-    addons.ADDONS_DIR.mkdir(parents=True)
+    paths.ADDONS_DIR.mkdir(parents=True)
     try:
-        addons.folder(PINNED).symlink_to(elsewhere, target_is_directory=True)
+        builtin.dir.symlink_to(elsewhere, target_is_directory=True)
     except OSError:  # Windows lets only administrators, or Developer Mode, make links
         pytest.skip("this account can't make symbolic links")
-    assert addons.remove(PINNED) is True
-    assert not addons.folder(PINNED).exists() and (elsewhere / "SKILL.md").is_file()
+    assert addons.remove(builtin) is True
+    assert not builtin.dir.exists() and (elsewhere / "SKILL.md").is_file()
 
 
-def test_an_add_on_is_on_only_when_chosen_and_installed():
-    chosen = {"addons": {"diagram_design": True}}
-    assert not addons.is_on(chosen, PINNED)  # chosen, but its files aren't there
-    addons.install(PINNED, fetch=lambda url: TARBALL)
-    assert addons.is_on(chosen, PINNED)
-    assert not addons.is_on({}, PINNED) and not addons.is_on({"addons": {}}, PINNED)
-    assert not addons.is_on({"addons": {"diagram_design": "yes"}}, PINNED)
-    assert not addons.is_on({"addons": "on"}, PINNED)
+def test_nothing_is_installed_into_or_removed_through_a_linked_card_folder(tmp_path):
+    card = addons.validate_card_text(card_text())  # placed at ADDONS_DIR/pdf-notes
+    elsewhere = tmp_path / "my-own-copy"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("mine", encoding="utf-8")
+    paths.ADDONS_DIR.mkdir(parents=True)
+    try:
+        card.dir.symlink_to(elsewhere, target_is_directory=True)
+    except OSError:  # Windows lets only administrators, or Developer Mode, make links
+        pytest.skip("this account can't make symbolic links")
 
+    def never(url):
+        raise AssertionError("nothing may be downloaded into a link")
 
-def test_the_status_says_what_is_pinned_and_where_it_is(monkeypatch):
-    monkeypatch.setitem(addons.ADDONS, NAME, PINNED)
-    [row] = addons.status({})
-    assert (row["name"], row["label"], row["on"], row["installed"], row["pinned"], row["path"]) == \
-        (NAME, "Diagram Design", False, False, True, "")
-    assert row["version"] == "c" * 12 and row["license"] == "MIT" and row["author"] == "Cathryn Lavery"
-    addons.install(PINNED, fetch=lambda url: TARBALL)
-    [row] = addons.status({"addons": {"diagram_design": True}})
-    assert row["on"] and row["installed"] and row["path"] == str(addons.folder(PINNED))
-    monkeypatch.setitem(addons.ADDONS, NAME, dataclasses.replace(PINNED, commit="", tree_sha256=""))
-    [row] = addons.status({})
-    assert row["pinned"] is False and row["version"] == ""
+    with pytest.raises(addons.AddonError) as caught:
+        addons.install(card, fetch=never)
+    assert (caught.value.status, caught.value.code) == (409, "unsafe")
+    with pytest.raises(addons.AddonError) as caught:
+        addons.remove(card)
+    assert (caught.value.status, caught.value.code) == (409, "unsafe")
+    assert sorted(p.name for p in elsewhere.iterdir()) == ["keep.txt"] and not addons.installed(card)
 
 
 # ── Choosing a diagram type ──────────────────────────────────────────────────
@@ -530,7 +997,7 @@ def test_a_diagram_is_saved_under_its_date_and_name_and_never_over_another():
     now = datetime(2026, 10, 11, 9, 30)
     html = "<!doctype html><p>café → crème</p>"
     first = addons.save_diagram(html, "Our CI pipeline", now=now)
-    assert first == addons.DIAGRAMS_DIR / "2026-10-11-our-ci-pipeline.html"
+    assert first == paths.DIAGRAMS_DIR / "2026-10-11-our-ci-pipeline.html"
     assert first.read_bytes() == html.encode("utf-8")
     second = addons.save_diagram("<p>second</p>", "Our CI pipeline", now=now)
     third = addons.save_diagram("<p>third</p>", "Our CI pipeline", now=now)
@@ -542,7 +1009,7 @@ def test_a_diagram_is_saved_under_its_date_and_name_and_never_over_another():
 def test_a_diagram_can_be_saved_in_a_folder_of_the_callers(tmp_path):
     path = addons.save_diagram(GOOD, "x", folder=tmp_path / "mine", now=datetime(2026, 1, 2))
     assert path == tmp_path / "mine" / "2026-01-02-x.html" and path.read_text(encoding="utf-8") == GOOD
-    assert not addons.DIAGRAMS_DIR.exists()
+    assert not paths.DIAGRAMS_DIR.exists()
 
 
 def test_the_store_gives_unguessable_ids_for_the_diagrams_it_was_given(tmp_path):
@@ -609,21 +1076,34 @@ def fenced(html: str) -> str:
 
 
 class FakeAsk:
-    """Stands in for ixel_mat.ask.ask: gives each answer in turn, and keeps what it was asked."""
+    """Stands in for ixel_mat.ask.ask: gives each answer in turn, and keeps what it was asked and with what timeout."""
 
     def __init__(self, *answers):
         self.answers = list(answers)
         self.calls = []
+        self.timeouts = []
 
     async def __call__(self, cfg, question, material, timeout=None):
         self.calls.append((question, material))
+        self.timeouts.append(timeout)
         return AskResult(agent=cfg.name, label=cfg.label, model="m-test", answer=self.answers.pop(0), ms=12,
                          usage={"input_tokens": 5})
 
 
-def make(skill, question, *answers, on_event=None, out=None):
-    ask = FakeAsk(*answers)
-    result = asyncio.run(addons.make_diagram(CFG, question, skill, ask=ask, on_event=on_event, diagrams_dir=out))
+class FailingAsk:
+    """An ask() that can't get an answer."""
+
+    def __init__(self, message: str):
+        self.message = message
+
+    async def __call__(self, cfg, question, material, timeout=None):
+        raise AskError(self.message)
+
+
+def make(skill, question, *answers, on_event=None, out=None, cfg=CFG, ask=None, timeout=None):
+    ask = ask or FakeAsk(*answers)
+    result = asyncio.run(addons.make_diagram(cfg, question, skill, ask=ask, on_event=on_event, diagrams_dir=out,
+                                             timeout=timeout))
     return result, ask
 
 
@@ -693,6 +1173,7 @@ def test_a_reply_with_no_html_is_an_error_and_saves_nothing(skill, tmp_path):
         make(skill, "Draw the steps", "I'd rather talk about it.",
              on_event=lambda kind, data: events.append(kind), out=out)
     assert caught.value.code == "no_html" and "GPT" in str(caught.value)
+    assert "16k" not in str(caught.value)  # a model in the cloud has no context window to blame
     assert not out.exists() and events == ["start", "model"]
 
 
@@ -702,7 +1183,143 @@ def test_a_skill_with_no_check_is_never_retried(skill):
     assert len(ask.calls) == 1 and result.retried is False and not result.check.ran
 
 
-# ── The Settings route ───────────────────────────────────────────────────────
+# ── Local models: the time they get and why they fail ────────────────────────
+
+def test_a_model_on_your_own_computer_gets_at_least_ten_minutes_and_a_cloud_one_its_own_time():
+    assert addons.LOCAL_DIAGRAM_TIMEOUT == 600.0 and addons.CONTEXT_TOKENS == 16384
+    assert addons.is_local(LOCAL) and not addons.is_local(CFG)
+    assert addons.diagram_timeout(LOCAL) == 600.0
+    longer = AgentConfig(name="llama", label="Llama", type="http", url=LOCAL.url, model="llama3", timeout=900)
+    assert addons.diagram_timeout(longer) == 900
+    assert addons.diagram_timeout(CFG) is None
+
+
+def test_make_diagram_asks_a_local_model_with_the_longer_timeout(skill):
+    _, ask = make(skill, "Draw the steps", fenced(GOOD), cfg=LOCAL)
+    assert ask.timeouts == [600.0]
+    _, ask = make(skill, "Draw the steps", fenced(GOOD), cfg=CFG)
+    assert ask.timeouts == [None]
+    _, ask = make(skill, "Draw the steps", fenced(GOOD), cfg=LOCAL, timeout=30)
+    assert ask.timeouts == [30]  # a caller's own timeout wins
+
+
+def test_a_local_model_that_fails_is_blamed_on_its_context_window(skill):
+    with pytest.raises(addons.AddonError) as caught:
+        make(skill, "Draw the steps", cfg=LOCAL, ask=FailingAsk("Llama stopped answering."))
+    assert caught.value.code == "local_model" and caught.value.status == 502
+    message = str(caught.value)
+    assert "Llama stopped answering." in message and "context" in message and "16k" in message
+
+
+def test_a_cloud_model_that_fails_is_not_blamed_on_a_context_window(skill):
+    with pytest.raises(AskError) as caught:
+        make(skill, "Draw the steps", cfg=CFG, ask=FailingAsk("GPT has no API key yet."))
+    assert not isinstance(caught.value, addons.AddonError) and "GPT has no API key yet." in str(caught.value)
+
+
+def test_a_local_model_that_answers_without_html_gets_the_context_note(skill):
+    question = "Draw the steps"
+    with pytest.raises(addons.AddonError) as caught:
+        make(skill, question, "I'd rather talk about it.", cfg=LOCAL)
+    assert caught.value.code == "no_html"
+    kind = addons.pick_type(question, addons.available_types(skill))
+    chars = len(addons.diagram_material(skill, kind).text)
+    assert addons.context_note(LOCAL, chars) in str(caught.value)
+
+
+def test_the_context_note_says_how_big_the_material_is_and_what_to_raise():
+    note = addons.context_note(LOCAL, 40_000)
+    assert "Llama" in note and "about 10k tokens" in note and "16k" in note and "16384" in note
+    assert "about 1k tokens" in addons.context_note(LOCAL, 10)  # never less than 1k
+
+
+# ── Which model draws ────────────────────────────────────────────────────────
+
+def anthropic(name="opus", model="claude-opus-5-5"):
+    return AgentConfig(name=name, label=name.title(), type="http", url="https://api.anthropic.com/v1/messages",
+                       model=model, token="sk-never-shown")
+
+
+def gateway(name, model):
+    """An API that isn't Anthropic's, so there's no Haiku to switch to."""
+    return AgentConfig(name=name, label=name.title(), type="http", url="https://api.example.com/v1", model=model,
+                       token="sk-never-shown")
+
+
+PRICES = {"claude-opus-5-5": Price(4.0, 20.0), "claude-sonnet-4-6": Price(3.0, 15.0),
+          "claude-haiku-4-5": Price(1.0, 5.0)}
+
+
+def test_an_anthropic_api_model_is_offered_as_itself_and_then_as_haiku():
+    own, haiku = addons.diagram_choices([anthropic()], PRICES)
+    assert (own.id, own.agent, own.model, own.label, own.haiku, own.local) == \
+        ("opus", "opus", "", "Opus", False, False)
+    assert own.detail == "claude-opus-5-5" and own.price == (4.0, 20.0)
+    assert (haiku.id, haiku.agent, haiku.model, haiku.haiku) == ("opus+haiku", "opus", "latest-fast", True)
+    assert haiku.label == "Haiku, via Opus" and haiku.detail == addons.HAIKU_MODEL
+    assert haiku.price == (1.0, 5.0)
+    assert addons.haiku_model_for(anthropic()) == "latest-fast"
+
+
+def test_claude_code_is_offered_as_itself_and_then_as_haiku():
+    own, haiku = addons.diagram_choices([CLAUDE_CODE])
+    assert (own.id, own.model, own.haiku, own.local) == ("claude", "", False, False)
+    assert (haiku.id, haiku.agent, haiku.model, haiku.haiku) == ("claude+haiku", "claude", "haiku", True)
+    assert addons.haiku_model_for(CLAUDE_CODE) == "haiku"
+
+
+def test_a_model_that_cant_run_haiku_is_offered_only_as_itself():
+    codex = AgentConfig(name="codex", label="Codex", type="oneshot", command="codex",
+                        model_args=["--model", "{model}"])
+    choices = addons.diagram_choices([LOCAL, codex])
+    assert [(c.id, c.model, c.haiku) for c in choices] == [("llama", "", False), ("codex", "", False)]
+    assert [c.local for c in choices] == [True, False]
+    assert addons.haiku_model_for(LOCAL) is None and addons.haiku_model_for(codex) is None
+
+
+def test_a_model_that_already_is_haiku_is_one_choice_marked_haiku():
+    [only] = addons.diagram_choices([anthropic("fast", "claude-haiku-4-5")])
+    assert (only.id, only.agent, only.model, only.haiku) == ("fast", "fast", "", True)
+    assert addons.haiku_model_for(anthropic("fast", "claude-haiku-4-5")) == ""
+
+
+def test_the_default_is_the_first_haiku():
+    choices = addons.diagram_choices([LOCAL, anthropic(), CLAUDE_CODE], PRICES)
+    assert [c.id for c in choices] == ["llama", "opus", "opus+haiku", "claude", "claude+haiku"]
+    assert addons.default_choice(choices).id == "opus+haiku"
+
+
+def test_without_a_haiku_the_cheapest_priced_model_is_the_default():
+    choices = addons.diagram_choices([gateway("opus", "claude-opus-5-5"), gateway("sonnet", "claude-sonnet-4-6")],
+                                     PRICES)
+    assert addons.default_choice(choices).id == "sonnet"
+    choices = addons.diagram_choices([gateway("opus", "claude-opus-5-5"), gateway("sonnet", "claude-sonnet-4-6")])
+    assert addons.default_choice(choices).id == "sonnet"  # and by Ixel's own price list, with none of yours
+    # a model with no price loses to one that has a price, wherever it is on the panel
+    choices = addons.diagram_choices([LOCAL, gateway("opus", "claude-opus-5-5")], PRICES)
+    assert addons.default_choice(choices).id == "opus"
+
+
+def test_with_no_price_known_the_first_model_is_the_default():
+    choices = addons.diagram_choices([LOCAL, gateway("other", "mystery-model")], PRICES)
+    assert addons.default_choice(choices).id == "llama"
+    assert addons.default_choice([]) is None
+
+
+def test_a_choice_is_found_by_its_agent_and_model_and_goes_to_the_page_as_a_dict():
+    choices = addons.diagram_choices([CLAUDE_CODE, LOCAL], PRICES)
+    assert addons.find_choice(choices, "claude", "haiku").id == "claude+haiku"
+    assert addons.find_choice(choices, "claude", None).id == "claude"
+    assert addons.find_choice(choices, "claude", "").id == "claude"
+    assert addons.find_choice(choices, "claude", "sonnet") is None
+    assert addons.find_choice(choices, "llama", "haiku") is None and addons.find_choice(choices, "nobody", "") is None
+    assert addons.find_choice(choices, "claude", "haiku").to_dict() == {
+        "id": "claude+haiku", "agent": "claude", "model": "haiku", "label": "Haiku, via Claude Code",
+        "detail": addons.HAIKU_MODEL, "price": [1.0, 5.0], "haiku": True, "local": False}
+    assert addons.find_choice(choices, "llama", "").to_dict()["price"] is None
+
+
+# ── The Settings routes ──────────────────────────────────────────────────────
 
 CONFIG = """\
 # My Ixel settings
@@ -715,7 +1332,7 @@ model = "llama3"
 [review]
 mode = "review"   # what runs
 """
-SWITCHED_ON = "\n[addons]\ndiagram_design = true\n"
+LEGACY = "\n[addons]\ndiagram_design = true\n"  # the switch the old code wrote in config.toml
 
 
 @pytest.fixture
@@ -728,6 +1345,12 @@ def config():
 
 def gui():
     return GuiServer(token=TOKEN, settings_loader=load_settings)
+
+
+def panel_gui(*configs):
+    """A server whose panel is exactly these models (no settings file)."""
+    settings = Settings({}, {cfg.name: cfg for cfg in configs})
+    return GuiServer(token=TOKEN, settings_loader=lambda: settings)
 
 
 def call(*steps):
@@ -750,150 +1373,307 @@ def snapshot():
     return data
 
 
-def switch(on, version=None, **body):
-    body = {"name": NAME, "on": on, "version": snapshot()["version"] if version is None else version, **body}
+def switch(card_id, on, **body):
+    """POST /api/addons the way the page does, with the version of the settings file it last read."""
+    body = {"id": card_id, "on": on, "version": snapshot()["version"], **body}
     [(status, data)] = call(("POST", "/api/addons", body))
     return status, data
+
+
+def rows() -> dict:
+    """GET /api/addons: each row by the card's id."""
+    [(status, data)] = call(("GET", "/api/addons"))
+    assert status == 200
+    return {row["id"]: row for row in data["addons"]}
 
 
 def written(config) -> dict:
     return loader.tomllib.loads(config.read_text(encoding="utf-8"))
 
 
-def test_switching_on_installs_the_add_on_and_writes_the_setting(config, release):
-    version = snapshot()["version"]
-    status, data = switch(True, version)
-    assert status == 200 and "Diagram Design is on" in data["message"]
-    assert release == [addons.tarball_url(PINNED)]
-    assert written(config)["addons"] == {"diagram_design": True}
-    text = config.read_text(encoding="utf-8")
-    assert "# My Ixel settings" in text and 'mode = "review"   # what runs' in text  # the rest of the file as it was
-    assert config.with_suffix(".toml.bak").read_text(encoding="utf-8") == CONFIG
-    folder = addons.ADDONS_DIR / "diagram-design"
-    assert (folder / "SKILL.md").is_file() and (folder / "references" / "style-guide.md").is_file()
-    [row] = data["addons"]
-    assert (row["name"], row["on"], row["installed"], row["pinned"]) == (NAME, True, True, True)
-    assert row["path"] == str(folder) and row["version"] == "c" * 12
-    assert data["settings"]["version"] and data["settings"]["version"] != version  # the page takes the new one
-
-
-def test_switching_off_takes_the_setting_and_the_files_away(config, release):
-    status, data = switch(True)
-    assert status == 200 and addons.installed(PINNED)
-    status, data = switch(False, data["settings"]["version"])
-    assert status == 200 and "off" in data["message"] and "removed" in data["message"]
-    assert "diagram_design" not in written(config).get("addons", {})
-    assert not addons.folder(PINNED).exists()
-    [row] = data["addons"]
-    assert (row["on"], row["installed"], row["path"]) == (False, False, "")
-    assert "# My Ixel settings" in config.read_text(encoding="utf-8")
-
-
-def test_a_page_that_read_an_older_file_is_told_before_anything_is_downloaded(config, release):
-    old = snapshot()["version"]
-    config.write_text(CONFIG.replace('mode = "review"', 'mode = "quick"'), encoding="utf-8")  # ixel setup ran
-    status, data = switch(True, old)
-    assert status == 409 and "changed" in data["error"]
-    assert data["settings"]["review"]["mode"] == "quick"
-    assert release == [] and not addons.folder(PINNED).exists()
-    assert "addons" not in written(config)
-
-
-def test_a_stale_page_cant_switch_it_off_either(config, release):
-    status, data = switch(True)
+def test_the_list_has_every_card_builtin_first_and_the_ones_that_couldnt_be_read(config, builtin):
+    agent = addons.write_agent_card(card_text())
+    broken = put_card("broken-one", card_text(id="broken-one", kind="plugin"))
+    [(status, data)] = call(("GET", "/api/addons"))
     assert status == 200
-    old = data["settings"]["version"]
-    config.write_text(config.read_text(encoding="utf-8") + "\n# edited by hand\n", encoding="utf-8")
-    status, data = switch(False, old)
-    assert status == 409 and addons.installed(PINNED)
-    assert written(config)["addons"] == {"diagram_design": True}
+    assert [row["id"] for row in data["addons"]] == [DIAGRAM, "pdf-notes"]
+    first, second = data["addons"]
+    assert (first["written_by_agent"], second["written_by_agent"]) == (False, True)
+    assert first["card_sha256"] == builtin.card_sha256 and second["card_sha256"] == agent.card_sha256
+    assert first["version"] == "c" * 12 and second["version"] == "d" * 12
+    assert second["permissions"] == {"files": "none", "network": False, "commands": []}
+    assert first["permissions"]["commands"] == [["python3", "{addon}/scripts/self_check.py", "{output}"]]
+    assert any("Written by the agent, not reviewed" in line["text"] for line in second["plain"])
+    assert not any("Written by the agent" in line["text"] for line in first["plain"])
+    assert all(set(line) == {"text", "warn"} for line in second["plain"])
+    [problem] = data["problems"]
+    assert problem["path"] == str(broken) and "`kind`" in problem["error"]
 
 
-@pytest.mark.parametrize("version", [None, "", 123, ["x"]])
-def test_a_page_that_didnt_say_which_file_it_read_is_told_to_look_again(config, release, version):
-    body = {"name": NAME, "on": True, **({} if version is None else {"version": version})}
-    [(status, data)] = call(("POST", "/api/addons", body))
-    assert status == 409 and data["settings"]["version"]
-    assert release == [] and not addons.folder(PINNED).exists()
-    assert config.read_text(encoding="utf-8") == CONFIG
+def test_a_row_follows_the_cards_state(config, builtin):
+    row = rows()[DIAGRAM]
+    assert (row["on"], row["approved"], row["installed"], row["enabled"], row["path"]) == \
+        (False, False, False, False, "")
+    addons.install(builtin, fetch=lambda url: TARBALL)  # its files are there, but nobody approved it
+    row = rows()[DIAGRAM]
+    assert (row["installed"], row["enabled"], row["path"]) == (True, False, str(builtin.files_dir))
+    addons.approve_and_switch_on(builtin)
+    assert rows()[DIAGRAM]["enabled"] is True
+    shutil.rmtree(builtin.files_dir)  # chosen and approved, but its files went
+    row = rows()[DIAGRAM]
+    assert (row["on"], row["approved"], row["installed"], row["enabled"]) == (True, True, False, False)
+
+
+def test_an_old_switch_in_the_settings_file_shows_as_on_before_and_switches_nothing(config, builtin):
+    config.write_text(CONFIG + LEGACY, encoding="utf-8")
+    row = rows()[DIAGRAM]
+    assert row["was_on_before"] is True and row["on"] is False and row["enabled"] is False
+    assert addons.enabled_cards() == []
 
 
 @pytest.mark.parametrize("body", [
-    {"name": "nope", "on": True},
-    {"name": ["diagram-design"], "on": True},
-    {"name": NAME, "on": "yes"},
-    {"name": NAME, "on": 1},
-    {"name": NAME},
+    {"id": "nope", "on": True},
+    {"id": [DIAGRAM], "on": True},
+    {"id": DIAGRAM, "on": "yes"},
+    {"id": DIAGRAM, "on": 1},
+    {"id": DIAGRAM},
 ])
-def test_only_a_known_add_on_can_be_switched_on_or_off(config, release, body):
+def test_only_a_known_card_can_be_switched_on_or_off(config, builtin, release, body):
     [(status, data)] = call(("POST", "/api/addons", {**body, "version": snapshot()["version"]}))
     assert status == 400 and data["error"]
-    assert release == [] and config.read_text(encoding="utf-8") == CONFIG
+    assert release == [] and config.read_text(encoding="utf-8") == CONFIG and not paths.state_path().exists()
 
 
-def test_an_add_on_this_ixel_has_no_pin_for_isnt_switched_on(config, release, monkeypatch):
-    monkeypatch.setitem(addons.ADDONS, NAME, dataclasses.replace(PINNED, commit="", tree_sha256=""))
-    status, data = switch(True)
-    assert status == 409 and "no pinned release" in data["error"]
-    assert release == [] and not addons.ADDONS_DIR.exists()
+# ── Turning a card on needs its approval ─────────────────────────────────────
+
+@pytest.mark.parametrize("shown", [None, "", 5], ids=["missing", "empty", "not-text"])
+def test_without_the_cards_sha_nothing_is_downloaded_approved_or_installed(config, builtin, release, shown):
+    body = {"id": DIAGRAM, "on": True, **({} if shown is None else {"card_sha256": shown})}
+    [(status, data)] = call(("POST", "/api/addons", body))
+    assert status == 409 and "approval" in data["error"]
+    assert release == [] and not paths.state_path().exists()
+    assert not addons.installed(builtin) and not builtin.files_dir.exists()
+
+
+def test_with_another_cards_sha_nothing_is_downloaded_approved_or_installed(config, builtin, release):
+    [(status, data)] = call(("POST", "/api/addons", {"id": DIAGRAM, "on": True, "card_sha256": "0" * 64}))
+    assert status == 409 and "changed" in data["error"]
+    assert release == [] and not paths.state_path().exists()
+    assert not addons.installed(builtin) and not builtin.files_dir.exists()
+
+
+def test_with_the_right_sha_the_card_is_installed_approved_and_switched_on(config, builtin, release):
+    status, data = switch(DIAGRAM, True, card_sha256=builtin.card_sha256)
+    assert status == 200 and "Diagram Design is on" in data["message"]
+    assert release == [URL]
+    assert addons.tree_hash(builtin.files_dir) == expected_tree(SKILL_FILES)
+    entry = saved_state()[DIAGRAM]
+    assert entry["on"] is True and entry["approved_card_sha256"] == builtin.card_sha256
+    assert entry["approved_tree_sha256"] == TREE_SHA
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", entry["approved_at"])
+    [row] = data["addons"]
+    assert (row["on"], row["approved"], row["installed"], row["enabled"]) == (True, True, True, True)
+    assert row["path"] == str(builtin.files_dir) and row["changed_since_approval"] is False
+    assert data["settings"]["version"] and data["problems"] == []
+    assert config.read_text(encoding="utf-8") == CONFIG  # nothing in config.toml to tidy: it isn't touched
+
+
+def test_a_release_that_doesnt_match_the_pin_isnt_installed_or_approved(config, builtin, monkeypatch):
+    tampered = tarball({**SKILL_FILES, "SKILL.md": "# Something else\n"})
+    monkeypatch.setattr(installer, "download", lambda url, **kwargs: tampered)
+    status, data = switch(DIAGRAM, True, card_sha256=builtin.card_sha256)
+    assert status == 409 and data["error"]
+    assert not builtin.files_dir.exists() and not paths.state_path().exists()
     assert config.read_text(encoding="utf-8") == CONFIG
 
 
-def test_a_release_that_doesnt_match_the_pin_isnt_installed_or_switched_on(config, release, monkeypatch):
-    tampered = tarball({**SKILL_FILES, "SKILL.md": "# Something else\n"})
-    monkeypatch.setattr(addons, "download", lambda url, **kwargs: tampered)
-    status, data = switch(True)
-    assert status == 409 and data["error"]
-    assert not addons.folder(PINNED).exists() and config.read_text(encoding="utf-8") == CONFIG
-
-
-def test_with_no_settings_file_switching_on_makes_one_and_off_makes_none(release):
+def test_with_no_settings_file_a_card_can_still_be_switched_on_and_no_file_is_made(builtin, release):
     assert not loader._GLOBAL_CONFIG.exists()
-    [(status, data)] = call(("POST", "/api/addons", {"name": NAME, "on": True, "version": ""}))
-    assert status == 200 and addons.installed(PINNED)
-    assert written(loader._GLOBAL_CONFIG) == {"addons": {"diagram_design": True}}
-    loader._GLOBAL_CONFIG.unlink()
-    [(status, data)] = call(("POST", "/api/addons", {"name": NAME, "on": False, "version": ""}))
-    assert status == 200 and not addons.folder(PINNED).exists()
+    status, data = switch(DIAGRAM, True, card_sha256=builtin.card_sha256)
+    assert status == 200 and addons.card_by_id(DIAGRAM).enabled
     assert not loader._GLOBAL_CONFIG.exists()
 
 
-def test_the_list_says_what_is_on_and_installed_and_where(config, release):
-    [(status, data)] = call(("GET", "/api/addons"))
-    assert status == 200 and len(data["addons"]) == 1
-    row = data["addons"][0]
-    assert (row["name"], row["label"], row["on"], row["installed"], row["path"]) == \
-        (NAME, "Diagram Design", False, False, "")
-    addons.install(PINNED, fetch=lambda url: TARBALL)  # its files are there, but it hasn't been chosen
-    [(_, data)] = call(("GET", "/api/addons"))
-    assert (data["addons"][0]["on"], data["addons"][0]["installed"]) == (False, True)
-    config.write_text(CONFIG + SWITCHED_ON, encoding="utf-8")
-    [(_, data)] = call(("GET", "/api/addons"))
-    row = data["addons"][0]
-    assert (row["on"], row["installed"], row["path"]) == (True, True, str(addons.folder(PINNED)))
-    (addons.folder(PINNED) / "SKILL.md").unlink()  # chosen, but its files went
-    [(_, data)] = call(("GET", "/api/addons"))
-    assert (data["addons"][0]["on"], data["addons"][0]["installed"]) == (False, False)
+def test_an_agent_written_card_cant_be_switched_on_without_approval(config, release):
+    addons.write_agent_card(card_text())
+    [(status, data)] = call(("POST", "/api/addons", {"id": "pdf-notes", "on": True}))
+    assert status == 409 and "approval" in data["error"]
+    assert release == [] and not paths.state_path().exists()
+    assert addons.enabled_cards() == []
 
 
-def test_the_panel_says_whether_diagram_is_on(config, release):
-    [(status, data)] = call(("GET", "/api/panel"))
-    assert status == 200 and data["addons"] == {"diagram": False}
-    addons.install(PINNED, fetch=lambda url: TARBALL)
-    [(_, data)] = call(("GET", "/api/panel"))
-    assert data["addons"] == {"diagram": False}  # installed, not chosen
-    config.write_text(CONFIG + SWITCHED_ON, encoding="utf-8")
-    [(_, data)] = call(("GET", "/api/panel"))
-    assert data["addons"] == {"diagram": True}
+def test_a_card_the_agent_changed_after_approval_needs_approving_again(config, release):
+    card = addons.write_agent_card(card_text())
+    status, data = switch("pdf-notes", True, card_sha256=card.card_sha256)
+    assert status == 200
+    [row] = data["addons"]
+    assert row["enabled"] is True and row["written_by_agent"] is True
+
+    changed = addons.write_agent_card(card_text(permissions__commands=[["python3", "{addon}/scripts/run.py"]]))
+    assert changed.card_sha256 != card.card_sha256
+    [row] = rows().values()
+    assert row["changed_since_approval"] is True and row["enabled"] is False
+    assert row["card_sha256"] == changed.card_sha256
+    assert addons.enabled_cards() == []
+
+    status, data = switch("pdf-notes", True, card_sha256=card.card_sha256)  # the dialog showed the old card
+    assert status == 409 and "changed" in data["error"]
+    assert saved_state()["pdf-notes"]["approved_card_sha256"] == card.card_sha256
+    status, data = switch("pdf-notes", True, card_sha256=changed.card_sha256)
+    assert status == 200
+    [row] = data["addons"]
+    assert row["enabled"] is True and row["changed_since_approval"] is False
+    assert saved_state()["pdf-notes"]["approved_card_sha256"] == changed.card_sha256
+
+
+def test_switching_off_clears_on_and_removes_the_files_but_an_agent_card_stays(config, release):
+    card = addons.write_agent_card(card_text())
+    status, _ = switch("pdf-notes", True, card_sha256=card.card_sha256)
+    assert status == 200 and card.files_dir.is_dir()
+    status, data = switch("pdf-notes", False)
+    assert status == 200 and "off" in data["message"] and "removed" in data["message"]
+    assert saved_state()["pdf-notes"]["on"] is False
+    assert not card.files_dir.exists() and card.card_path.is_file()
+    [row] = data["addons"]
+    assert (row["on"], row["installed"], row["enabled"], row["path"]) == (False, False, False, "")
+
+
+def test_switching_a_builtin_card_off_removes_its_files_and_its_folder(config, builtin, release):
+    status, _ = switch(DIAGRAM, True, card_sha256=builtin.card_sha256)
+    assert status == 200 and builtin.files_dir.is_dir()
+    status, data = switch(DIAGRAM, False)
+    assert status == 200
+    assert saved_state()[DIAGRAM]["on"] is False and not builtin.dir.exists()
+    assert addons.enabled_cards() == []
+
+
+def test_switching_off_a_card_that_was_never_on_writes_no_state(config, builtin):
+    status, data = switch(DIAGRAM, False)
+    assert status == 200 and not paths.state_path().exists()
+
+
+# ── The old [addons] line in config.toml ─────────────────────────────────────
+
+def assert_old_line_gone(config) -> None:
+    """The line and its empty table are out; the rest of the file is as it was, and the old file is kept."""
+    text = config.read_text(encoding="utf-8")
+    assert "addons" not in written(config)
+    assert "[addons]" not in text and "diagram_design" not in text
+    assert text.startswith(CONFIG)  # its comment and its spacing as they were
+    assert config.with_name("config.toml.bak").read_text(encoding="utf-8") == CONFIG + LEGACY
+
+
+def test_switching_off_takes_the_old_line_and_its_empty_table_out(config, builtin):
+    config.write_text(CONFIG + LEGACY, encoding="utf-8")
+    status, data = switch(DIAGRAM, False)
+    assert status == 200 and "off" in data["message"]
+    assert_old_line_gone(config)
+    assert data["addons"][0]["was_on_before"] is False
+
+
+def test_switching_on_takes_the_old_line_and_its_empty_table_out_too(config, builtin, release):
+    config.write_text(CONFIG + LEGACY, encoding="utf-8")
+    status, data = switch(DIAGRAM, True, card_sha256=builtin.card_sha256)
+    assert status == 200 and addons.card_by_id(DIAGRAM).enabled
+    assert_old_line_gone(config)
+    assert data["addons"][0]["was_on_before"] is False
+
+
+def test_another_key_in_the_addons_table_keeps_the_table_and_that_key(config, builtin):
+    config.write_text(CONFIG + LEGACY + "other = 1\n", encoding="utf-8")
+    status, data = switch(DIAGRAM, False)
+    assert status == 200
+    assert written(config)["addons"] == {"other": 1}
+    assert "diagram_design" not in config.read_text(encoding="utf-8")
+    assert config.read_text(encoding="utf-8").startswith(CONFIG)
+
+
+def test_a_page_that_read_an_older_file_is_told_before_anything_is_downloaded(config, builtin, release):
+    config.write_text(CONFIG + LEGACY, encoding="utf-8")
+    old = snapshot()["version"]
+    config.write_text(config.read_text(encoding="utf-8") + "\n# edited by hand\n", encoding="utf-8")
+    [(status, data)] = call(("POST", "/api/addons", {"id": DIAGRAM, "on": True, "card_sha256": builtin.card_sha256,
+                                                     "version": old}))
+    assert status == 409 and "changed" in data["error"]
+    assert release == [] and not builtin.files_dir.exists() and not paths.state_path().exists()
+    assert "diagram_design = true" in config.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("version", [None, "", 123, ["x"]])
+def test_a_page_that_didnt_say_which_file_it_read_is_told_to_look_again(config, builtin, release, version):
+    config.write_text(CONFIG + LEGACY, encoding="utf-8")
+    body = {"id": DIAGRAM, "on": True, "card_sha256": builtin.card_sha256}
+    if version is not None:
+        body["version"] = version
+    [(status, data)] = call(("POST", "/api/addons", body))
+    assert status == 409 and data["settings"]["version"]
+    assert release == [] and not builtin.files_dir.exists() and not paths.state_path().exists()
+    assert config.read_text(encoding="utf-8") == CONFIG + LEGACY
+
+
+def test_with_no_old_line_a_missing_version_is_fine(config, builtin, release):
+    [(status, data)] = call(("POST", "/api/addons", {"id": DIAGRAM, "on": True, "card_sha256": builtin.card_sha256}))
+    assert status == 200 and addons.card_by_id(DIAGRAM).enabled
+    assert config.read_text(encoding="utf-8") == CONFIG
+    assert not config.with_name("config.toml.bak").exists()
+
+
+def test_set_values_drops_an_emptied_table_only_when_asked_to():
+    text = CONFIG + LEGACY
+    kept = edit.set_values(text, ("addons",), {"diagram_design": edit.REMOVE})
+    assert loader.tomllib.loads(kept)["addons"] == {}  # the default: the empty table stays
+    dropped = edit.set_values(text, ("addons",), {"diagram_design": edit.REMOVE}, drop_empty=True)
+    assert "addons" not in loader.tomllib.loads(dropped) and "[addons]" not in dropped
+    assert dropped.rstrip("\n") == CONFIG.rstrip("\n")
+    with_other = edit.set_values(text + "other = 1\n", ("addons",), {"diagram_design": edit.REMOVE},
+                                 drop_empty=True)
+    assert loader.tomllib.loads(with_other)["addons"] == {"other": 1}
+    # a table that isn't there is left alone
+    assert edit.set_values(CONFIG, ("addons",), {"diagram_design": edit.REMOVE}, drop_empty=True) == CONFIG
 
 
 # ── Making a diagram from the page ───────────────────────────────────────────
 
-def test_asking_for_a_diagram_with_the_add_on_off_is_refused(config, release):
-    [(status, data)] = call(("POST", "/api/diagram", {"question": "Draw the release steps"}))
+def post_diagram(server, body):
+    """POST /api/diagram: (200, the events of the stream) when a diagram was begun, else (status, the error)."""
+    async def scenario(client):
+        resp = await client.post("/api/diagram", headers=JSON_AUTH, data=json.dumps(body))
+        if resp.status == 200:
+            return resp.status, await read_events(resp)
+        return resp.status, await resp.json()
+    return run_with_client(server, scenario)
+
+
+def get_panel(server):
+    async def scenario(client):
+        resp = await client.get("/api/panel", headers=AUTH)
+        return resp.status, await resp.json()
+    return run_with_client(server, scenario)
+
+
+def fake_diagram(monkeypatch):
+    """Stands in for make_diagram: saves a page, and returns (agent, its model, question, folder) for each call."""
+    asked = []
+
+    async def fake_make(cfg, question, folder, *, on_event=None, **kwargs):
+        asked.append((cfg.name, cfg.model, question, folder))
+        path = addons.save_diagram(GOOD, question)
+        return addons.DiagramResult(path, "flowchart", addons.CheckResult(True, [], True), False, [])
+
+    monkeypatch.setattr(addons, "make_diagram", fake_make)
+    return asked
+
+
+def test_asking_for_a_diagram_with_the_card_off_is_refused(config, builtin):
+    body = {"question": "Draw the release steps"}
+    status, data = post_diagram(gui(), body)
     assert status == 409 and data["code"] == "addon_off" and "Settings" in data["error"]
-    addons.install(PINNED, fetch=lambda url: TARBALL)  # installed isn't the same as switched on
-    [(status, data)] = call(("POST", "/api/diagram", {"question": "Draw the release steps"}))
+    addons.install(builtin, fetch=lambda url: TARBALL)  # installed isn't the same as approved and on
+    status, data = post_diagram(gui(), body)
+    assert status == 409 and data["code"] == "addon_off"
+    addons.approve_and_switch_on(builtin)
+    addons.switch_off(DIAGRAM)
+    status, data = post_diagram(gui(), body)
     assert status == 409 and data["code"] == "addon_off"
 
 
@@ -902,18 +1682,16 @@ def test_asking_for_a_diagram_with_the_add_on_off_is_refused(config, release):
     ({"question": 5}, 400),
     ({"question": "x" * 50_001}, 400),
     ({"question": "Draw it", "agent": ["gpt"]}, 400),
+    ({"question": "Draw it", "model": 5}, 400),
     ({"question": "Draw it", "agent": "nobody"}, 409),
+    ({"question": "Draw it", "agent": "local", "model": "haiku"}, 409),  # that model can't run Haiku
 ])
-def test_a_diagram_needs_a_question_and_a_model_on_the_panel(config, release, body, status):
-    addons.install(PINNED, fetch=lambda url: TARBALL)
-    config.write_text(CONFIG + SWITCHED_ON, encoding="utf-8")
-    [(got, data)] = call(("POST", "/api/diagram", body))
+def test_a_diagram_needs_a_question_and_a_model_on_the_panel(config, diagram_on, body, status):
+    got, data = post_diagram(gui(), body)
     assert got == status and data["error"]
 
 
-def test_a_diagram_is_streamed_then_served_to_the_frame(config, release, monkeypatch):
-    addons.install(PINNED, fetch=lambda url: TARBALL)
-    config.write_text(CONFIG + SWITCHED_ON, encoding="utf-8")
+def test_a_diagram_is_streamed_then_served_to_the_frame(config, diagram_on, monkeypatch):
     asked = []
 
     async def fake_make(cfg, question, folder, *, on_event=None, **kwargs):
@@ -935,30 +1713,100 @@ def test_a_diagram_is_streamed_then_served_to_the_frame(config, release, monkeyp
     status, events, final, frame_status, frame_text, frame_headers = run_with_client(gui(), scenario)
     assert status == 200 and [e["kind"] for e in events] == ["start", "final"]
     assert events[0]["data"] == {"kind": "flowchart", "agent": "local", "label": "Llama", "model": "llama3"}
-    assert asked == [("local", "Draw the release steps", addons.folder(PINNED))]
+    assert asked == [("local", "Draw the release steps", diagram_on.files_dir)]
     assert re.fullmatch(r"[0-9a-f]{32}", final["id"]) and final["kind"] == "flowchart"
     assert final["name"].endswith("-draw-the-release-steps.html")
-    assert Path(final["file"]).parent == addons.DIAGRAMS_DIR and final["check"]["ok"] is True
+    assert Path(final["file"]).parent == paths.DIAGRAMS_DIR and final["check"]["ok"] is True
     assert frame_status == 200 and frame_text == GOOD
     assert frame_headers["Content-Security-Policy"] == gui_server.DIAGRAM_CSP
 
 
-def test_a_model_that_cant_draw_ends_the_stream_with_an_error(config, release, monkeypatch):
-    addons.install(PINNED, fetch=lambda url: TARBALL)
-    config.write_text(CONFIG + SWITCHED_ON, encoding="utf-8")
-
+def test_a_model_that_cant_draw_ends_the_stream_with_an_error(config, diagram_on, monkeypatch):
     async def fake_make(cfg, question, folder, *, on_event=None, **kwargs):
         raise addons.AddonError("Llama didn't answer with an HTML document.", 502, "no_html")
 
     monkeypatch.setattr(addons, "make_diagram", fake_make)
-
-    async def scenario(client):
-        resp = await client.post("/api/diagram", headers=JSON_AUTH, data=json.dumps({"question": "Draw it"}))
-        return await read_events(resp)
-
-    events = run_with_client(gui(), scenario)
-    assert [e["kind"] for e in events] == ["error"]
+    status, events = post_diagram(gui(), {"question": "Draw it"})
+    assert status == 200 and [e["kind"] for e in events] == ["error"]
     assert events[0]["data"] == {"message": "Llama didn't answer with an HTML document.", "code": "no_html"}
+
+
+def test_a_local_model_failure_reaches_the_page_as_local_model(config, diagram_on, monkeypatch):
+    real = addons.make_diagram
+
+    def with_a_model_that_fails(cfg, question, folder, **kwargs):  # the real make_diagram, asking nothing real
+        return real(cfg, question, folder, ask=FailingAsk("Llama stopped answering."), **kwargs)
+
+    monkeypatch.setattr(addons, "make_diagram", with_a_model_that_fails)
+    status, events = post_diagram(gui(), {"question": "Draw it"})
+    assert status == 200 and [e["kind"] for e in events] == ["start", "error"]
+    assert events[1]["data"]["code"] == "local_model"
+    assert "Llama stopped answering." in events[1]["data"]["message"] and "16k" in events[1]["data"]["message"]
+
+
+def test_a_diagram_is_made_with_the_model_and_agent_the_page_picked(diagram_on, monkeypatch):
+    asked = fake_diagram(monkeypatch)
+    status, events = post_diagram(panel_gui(LOCAL, CLAUDE_CODE),
+                                  {"question": "Draw the release steps", "agent": "claude", "model": "haiku"})
+    assert status == 200 and [e["kind"] for e in events] == ["final"]
+    assert asked == [("claude", "haiku", "Draw the release steps", diagram_on.files_dir)]
+
+    asked.clear()  # the agent's own model: none is sent in its place
+    status, _ = post_diagram(panel_gui(LOCAL, CLAUDE_CODE), {"question": "Draw it", "agent": "claude", "model": ""})
+    assert status == 200 and asked == [("claude", "", "Draw it", diagram_on.files_dir)]
+    asked.clear()
+    status, _ = post_diagram(panel_gui(LOCAL, CLAUDE_CODE), {"question": "Draw it", "agent": "llama"})
+    assert status == 200 and asked == [("llama", "llama3", "Draw it", diagram_on.files_dir)]
+
+
+@pytest.mark.parametrize("body", [
+    {"question": "Draw it", "agent": "claude", "model": "sonnet"},
+    {"question": "Draw it", "agent": "llama", "model": "haiku"},
+    {"question": "Draw it", "agent": "nobody", "model": "haiku"},
+], ids=["a-model-it-doesnt-offer", "a-model-that-cant-run-haiku", "an-agent-not-on-the-panel"])
+def test_a_model_and_agent_that_arent_offered_together_are_refused(diagram_on, monkeypatch, body):
+    asked = fake_diagram(monkeypatch)
+    status, data = post_diagram(panel_gui(LOCAL, CLAUDE_CODE), body)
+    assert status == 409 and data["error"]
+    assert asked == []
+
+
+def test_with_no_agent_named_the_default_choice_draws(diagram_on, monkeypatch):
+    asked = fake_diagram(monkeypatch)
+    status, _ = post_diagram(panel_gui(LOCAL, CLAUDE_CODE), {"question": "Draw it"})
+    assert status == 200 and asked == [("claude", "haiku", "Draw it", diagram_on.files_dir)]  # the first Haiku
+    asked.clear()
+    status, _ = post_diagram(panel_gui(LOCAL), {"question": "Draw it"})  # no Haiku to be had: the first model
+    assert status == 200 and asked == [("llama", "llama3", "Draw it", diagram_on.files_dir)]
+
+
+def test_the_panel_lists_no_diagram_models_while_the_card_is_off(builtin):
+    status, data = get_panel(panel_gui(LOCAL, CLAUDE_CODE))
+    assert status == 200 and data["addons"] == {"diagram": False} and data["diagram_models"] == []
+    addons.install(builtin, fetch=lambda url: TARBALL)  # installed, not approved
+    status, data = get_panel(panel_gui(LOCAL, CLAUDE_CODE))
+    assert data["addons"] == {"diagram": False} and data["diagram_models"] == []
+    addons.approve_and_switch_on(builtin)
+    addons.switch_off(DIAGRAM)  # approved, but off
+    status, data = get_panel(panel_gui(LOCAL, CLAUDE_CODE))
+    assert data["addons"] == {"diagram": False} and data["diagram_models"] == []
+
+
+def test_the_panel_lists_the_models_diagram_can_use_with_exactly_one_default(diagram_on):
+    status, data = get_panel(panel_gui(LOCAL, CLAUDE_CODE))
+    assert status == 200 and data["addons"] == {"diagram": True}
+    models = data["diagram_models"]
+    assert [m["id"] for m in models] == ["llama", "claude", "claude+haiku"]
+    assert [m["id"] for m in models if m["default"]] == ["claude+haiku"]
+    assert [m["haiku"] for m in models] == [False, False, True]
+    assert models[0]["local"] is True and models[0]["price"] is None
+    assert (models[2]["agent"], models[2]["model"]) == ("claude", "haiku")
+
+
+def test_the_panel_from_the_settings_file_offers_its_one_model_as_the_default(config, diagram_on):
+    status, data = get_panel(gui())
+    assert status == 200 and data["addons"] == {"diagram": True}
+    assert [(m["id"], m["default"]) for m in data["diagram_models"]] == [("local", True)]
 
 
 # ── Serving a diagram ────────────────────────────────────────────────────────
