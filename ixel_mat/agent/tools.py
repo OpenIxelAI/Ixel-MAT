@@ -15,6 +15,12 @@ read_file also reads documents (PDF, Word, Excel, PowerPoint …) as their text,
 picture, a few frames of a video (with ffmpeg) or a document's first pictures: those go to the model with
 its next call. Files the person attached to a run are named upload:NAME, and only read_file and view_file
 reach them; they live in Ixel's own folder, outside the workspace, so nothing can write or search them.
+
+A GitHub repo the agent fetched for an add-on card is a copy in the agent's scratch/ folder, named
+scratch:NAME (or scratch:NAME/PATH inside it). list_dir, read_file, search and view_file reach those, read-only,
+with the same protections as a workspace path: no absolute paths or `..`, a symlink must stay inside that
+copy, and Git's files and secret-looking names are refused. NAME has to be a copy that's there. Nothing can
+write or edit a scratch: path, and run_command's cwd can be one (Workspace.scratch_cwd).
 """
 from __future__ import annotations
 
@@ -58,9 +64,13 @@ MAX_PICTURE_BYTES_PER_CALL = pictures.MAX_PER_QUESTION_BYTES  # 20 MB of them in
 MAX_VIEW_BYTES = documents.MAX_FILE_BYTES                  # 50 MB: a document read whole
 FFMPEG_TIMEOUT = 60.0                                      # seconds, for each time ffmpeg runs
 UPLOAD_PREFIX = "upload:"
+SCRATCH_PREFIX = "scratch:"
 # What list_dir says a file is: what the model can use on it
 KINDS = ("picture", "video", "document", "text", "other")
 _DURATION = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+# A fetched copy's folder name, <owner>-<repo>: one plain name that doesn't start with '.' (the temp folders
+# fetch_repo works in do)
+_SCRATCH_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}")
 
 # Names that look like secrets, compared in lower case (a Mac's disk doesn't care about case, so .ENV is .env)
 _SECRET_PREFIXES = (".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
@@ -194,6 +204,19 @@ def _decode(data: bytes) -> str | None:
         return text if text.count("�") <= max(1, len(text) * MAX_REPLACED_SHARE) else None
 
 
+def _hit_lines(text: str | None, rel: str, pattern: str) -> list[str]:
+    """'rel:line: text' for each line of a file's text that contains pattern (a long one cut)."""
+    if text is None or pattern not in text:
+        return []
+    out = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if pattern in line:
+            if len(line) > MAX_SEARCH_LINE_CHARS:
+                line = line[:MAX_SEARCH_LINE_CHARS] + " […]"
+            out.append(f"{rel}:{number}: {line}")
+    return out
+
+
 def _unified_diff(rel: str, old: str, new: str, is_new: bool) -> str:
     lines = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
                                  fromfile="/dev/null" if is_new else f"a/{rel}", tofile=f"b/{rel}")
@@ -206,14 +229,20 @@ class Workspace:
     except secrets, Git's files and browser profiles. It is off unless the person opts in for this run.
 
     uploads is the folder holding the files the person attached to this run (uploads/<run id>/ in the
-    agent's folder; the runner sets it), or None. read_file and view_file name those as upload:NAME."""
+    agent's folder; the runner sets it), or None. read_file and view_file name those as upload:NAME.
 
-    def __init__(self, root: Path, uploads: Path | None = None, computer: bool = False):
+    scratch is the folder holding the repos fetch_repo downloaded (scratch/ in the agent's folder; the runner
+    sets it, and it may not exist yet), or None. list_dir, read_file, search and view_file name a copy in it
+    as scratch:NAME, read-only."""
+
+    def __init__(self, root: Path, uploads: Path | None = None, computer: bool = False,
+                 scratch: Path | None = None):
         if not isinstance(computer, bool):
             raise ValueError("computer must be true or false")
         self.root = Path(root).resolve()
         self.uploads = Path(uploads) if uploads is not None else None
         self.computer = computer
+        self.scratch = Path(scratch) if scratch is not None else None
 
     # ── Paths ────────────────────────────────────────────────────────────────
 
@@ -222,6 +251,9 @@ class Workspace:
         if isinstance(path, str) and path.startswith(UPLOAD_PREFIX):
             raise WorkspaceError("'upload:' files are the person's attachments; read_file and view_file can read "
                                  "them, nothing can write or search them")
+        if isinstance(path, str) and path.startswith(SCRATCH_PREFIX):
+            raise WorkspaceError("'scratch:' files are copies of fetched repos; list_dir, read_file, search and "
+                                 "view_file can read them, nothing can write or edit them")
         if not isinstance(path, str) or not path.strip():
             raise WorkspaceError("give a path relative to the workspace, like src/app.py")
         if "\x00" in path:
@@ -353,12 +385,78 @@ class Workspace:
             raise WorkspaceError(f"{shown!r} isn't an attached file the agent can read")
         return real, shown
 
+    def _scratch_parts(self, path: str) -> tuple[Path, str, Path]:
+        """(the copy's real folder, its NAME, the real path inside it) for scratch:NAME or scratch:NAME/PATH.
+        WorkspaceError when no repo was fetched, NAME isn't a copy that's there (a plain folder, not a
+        symlink), or PATH is absolute, has '..', is Git's or a secret's, or leads out of the copy by a
+        symlink. The agent's folder is Ixel's own config folder, which resolve refuses on purpose, so this
+        is the only way to it, and only into a copy."""
+        if self.scratch is None:
+            raise WorkspaceError("no repo has been fetched in this run; use fetch_repo first")
+        rest = path[len(SCRATCH_PREFIX):]
+        if "\x00" in rest or "\\" in rest:
+            raise WorkspaceError(f"{path!r} can't contain a NUL character or a backslash; write "
+                                 "scratch:NAME/PATH with /")
+        name, _, inner = rest.partition("/")
+        if not _SCRATCH_NAME.fullmatch(name):
+            raise WorkspaceError(f"{path!r} doesn't name a fetched repo; name one as scratch:NAME, the name "
+                                 "fetch_repo gave (like scratch:example-owner-example-tool)")
+        parts = inner.split("/") if inner else []
+        win = PureWindowsPath(inner)
+        if inner.startswith("/") or win.drive or win.root:
+            raise WorkspaceError(f"{path!r} isn't relative to the fetched repo; name it like "
+                                 f"scratch:{name}/src/app.py")
+        if ".." in parts:
+            raise WorkspaceError(f"{path!r} goes outside the fetched repo ('..' isn't allowed)")
+        self._check_parts(path, parts)
+        try:
+            folder = self.scratch.resolve() / name
+            info = folder.lstat()
+        except FileNotFoundError:
+            raise WorkspaceError(f"there's no fetched repo {name!r}; use fetch_repo first") from None
+        except (OSError, RuntimeError) as exc:
+            raise WorkspaceError(f"can't read scratch:{name}") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise WorkspaceError(f"scratch:{name} isn't a fetched repo")
+        try:
+            real = (folder / inner).resolve(strict=False) if inner else folder
+        except (OSError, RuntimeError) as exc:  # a symlink loop
+            raise WorkspaceError(f"{path!r} can't be followed (a symlink loop?)") from exc
+        if real != folder and not real.is_relative_to(folder):
+            raise WorkspaceError(f"{path!r} leads outside scratch:{name}")
+        # A symlink inside the copy (a command may have made one) can still lead to Git's files or a secret
+        self._check_parts(path, real.relative_to(folder).parts)
+        return folder, name, real
+
+    def _scratch(self, path: str) -> tuple[Path, str]:
+        """The real path of scratch:NAME or scratch:NAME/PATH and the name to show, scratch:NAME/rel."""
+        folder, name, real = self._scratch_parts(path)
+        rel = real.relative_to(folder).as_posix()
+        return real, f"scratch:{name}" + ("" if rel == "." else f"/{rel}")
+
+    def scratch_cwd(self, cwd: str) -> tuple[Path, str]:
+        """For run_command's cwd: the folder of a fetched repo named exactly scratch:NAME (not a folder in
+        it), and NAME. WorkspaceError for anything else."""
+        if not isinstance(cwd, str) or not cwd.startswith(SCRATCH_PREFIX):
+            raise WorkspaceError("cwd is '.' (the workspace) or scratch:NAME, a repo you fetched with fetch_repo")
+        folder, name, real = self._scratch_parts(cwd)
+        if real != folder:
+            raise WorkspaceError(f"cwd names a whole fetched repo, scratch:{name}, not a folder in it")
+        return folder, name
+
+    def _place(self, path: str) -> tuple[Path, str]:
+        """For the reading actions: the real path and the name to show, a fetched copy's (scratch:NAME…) or a
+        workspace path's. upload: paths aren't here; resolve refuses them."""
+        if isinstance(path, str) and path.startswith(SCRATCH_PREFIX):
+            return self._scratch(path)
+        return self.resolve(path), path
+
     def _source(self, path: str) -> tuple[Path, str]:
         """For read_file and view_file: the real path to read and the name to show, an attached file's
-        (upload:NAME) or a workspace path's."""
+        (upload:NAME), a fetched copy's (scratch:NAME…) or a workspace path's."""
         if isinstance(path, str) and path.startswith(UPLOAD_PREFIX):
             return self._upload(path)
-        return self.resolve(path), path
+        return self._place(path)
 
     def _document(self, real: Path, shown: str) -> documents.Document:
         """A document file read whole (at most MAX_VIEW_BYTES), or WorkspaceError saying why it can't be."""
@@ -383,8 +481,8 @@ class Workspace:
         'l name@' for a symlink (not followed, so one leading out tells nothing about where). .git is left out.
 
         A file line ends with the file's kind when it isn't plain text: 'f photo.jpg 1234 picture', or video,
-        document, other."""
-        target = self.resolve(path)
+        document, other. path may name a fetched repo as scratch:NAME or scratch:NAME/PATH."""
+        target, _ = self._place(path)
         if not target.is_dir():
             raise WorkspaceError(f"{path!r} isn't a folder")
         try:
@@ -419,7 +517,7 @@ class Workspace:
         A document (PDF, Word, Excel, PowerPoint, RTF, OpenDocument, a web page; at most 50 MB) is read as
         its text, with a last line saying what kind it is and how many pictures it holds; start and end are
         line numbers of that text. Pictures and videos are for view_file. path may name an attached file as
-        upload:NAME."""
+        upload:NAME, or a file of a fetched repo as scratch:NAME/PATH."""
         for name, value in (("start", start), ("end", end)):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
                 raise WorkspaceError(f"{name} must be a line number, 1 or more")
@@ -497,7 +595,7 @@ class Workspace:
     def view_file(self, path: str) -> Viewed:
         """Pictures for the model's next call: a picture's own, up to MAX_VIDEO_FRAMES frames of a video (with
         ffmpeg), or a document's first pictures; at most MAX_PICTURES_PER_CALL. path may name an attached
-        file as upload:NAME.
+        file as upload:NAME, or a file of a fetched repo as scratch:NAME/PATH.
 
         Pictures are cleaned the way Ask cleans them (ixel_mat.pictures), which takes PNG and JPEG only: a
         GIF, WebP, HEIC, BMP or TIFF is refused in the beta, saying the person can convert it to one of those."""
@@ -605,18 +703,23 @@ class Workspace:
         """Lines containing pattern (plain text, case matters) as 'path:line: text', in files under path.
 
         glob limits it to file names that match (like *.py). Git's files, secret-looking files, symlinks
-        that lead out, files that aren't text and files over 1 MB are skipped. At most 200 lines."""
+        that lead out, files that aren't text and files over 1 MB are skipped. At most 200 lines. path may
+        name a fetched repo as scratch:NAME or scratch:NAME/PATH; its lines are shown as scratch:NAME/rel."""
         if not isinstance(pattern, str) or not pattern:
             raise WorkspaceError("give the text to search for")
         if "\n" in pattern or "\x00" in pattern:
             raise WorkspaceError("search looks for text within one line")
         if glob is not None and (not isinstance(glob, str) or not glob):
             raise WorkspaceError("glob must be a file-name pattern like *.py")
-        top = self.resolve(path)
+        fetched = isinstance(path, str) and path.startswith(SCRATCH_PREFIX)
+        if fetched:
+            copy, name, top = self._scratch_parts(path)
+        else:
+            copy, name, top = None, "", self.resolve(path)
         if top.is_file():
             files = iter([top])
         elif top.is_dir():
-            files = self._walk(top)
+            files = self._walk(top, fetched=fetched)
         else:
             raise WorkspaceError(f"there's no file or folder {path!r}")
         found: list[str] = []
@@ -627,7 +730,11 @@ class Workspace:
                 break
             if glob is not None and not fnmatch.fnmatch(file.name, glob):
                 continue
-            for line in self._matches(file, pattern):
+            if copy is not None:
+                hits = self._scratch_matches(file, pattern, copy, name)
+            else:
+                hits = self._matches(file, pattern)
+            for line in hits:
                 if len(found) >= MAX_SEARCH_LINES:
                     stopped = f"[stopped at {MAX_SEARCH_LINES} matching lines; narrow it with path or glob]"
                     break
@@ -638,11 +745,12 @@ class Workspace:
             return f"no lines contain {pattern!r}" + (f"\n{stopped}" if stopped else "")
         return mask_secrets("\n".join(found)) + (f"\n{stopped}" if stopped else "")
 
-    def _walk(self, top: Path):
-        """The files under top that the agent may read, in name order, without following symlinked folders."""
+    def _walk(self, top: Path, fetched: bool = False):
+        """The files under top that the agent may read, in name order, without following symlinked folders.
+        fetched: top is in a fetched copy, which has no home-folder rules to apply to its folders."""
         for dirpath, dirnames, filenames in os.walk(top):
             dirnames[:] = sorted(d for d in dirnames if d.lower() != ".git" and not is_secret_name(d))
-            if self.computer:
+            if self.computer and not fetched:
                 allowed = []
                 for name in dirnames:
                     try:
@@ -726,16 +834,23 @@ class Workspace:
             text = _decode(real.read_bytes())
         except (WorkspaceError, OSError):
             return []
-        if text is None or pattern not in text:
+        return _hit_lines(text, self._rel(file), pattern)
+
+    def _scratch_matches(self, file: Path, pattern: str, copy: Path, name: str) -> list[str]:
+        """The matching lines of one file in a fetched copy, as 'scratch:NAME/rel:line: text'. A symlink, a
+        file that resolves outside the copy, Git's files and secret-looking names are skipped."""
+        try:
+            if file.is_symlink():
+                return []
+            real = file.resolve()
+            inside = real.relative_to(copy)
+            self._check_parts(str(inside), inside.parts)
+            if not real.is_file() or real.stat().st_size > MAX_SEARCH_FILE_BYTES:
+                return []
+            text = _decode(real.read_bytes())
+        except (WorkspaceError, OSError, RuntimeError, ValueError):
             return []
-        rel = self._rel(file)
-        out = []
-        for number, line in enumerate(text.splitlines(), start=1):
-            if pattern in line:
-                if len(line) > MAX_SEARCH_LINE_CHARS:
-                    line = line[:MAX_SEARCH_LINE_CHARS] + " […]"
-                out.append(f"{rel}:{number}: {line}")
-        return out
+        return _hit_lines(text, f"scratch:{name}/{inside.as_posix()}", pattern)
 
     # ── Writing ──────────────────────────────────────────────────────────────
 

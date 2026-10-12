@@ -44,9 +44,22 @@ ACTIONS: dict[str, dict[str, Any]] = {
                    "about": "write a whole text file (new or replaced); waits for the person's approval"},
     "edit_file": {"required": {"path": str, "old": str, "new": str}, "optional": {},
                   "about": "replace old with new in a file, where old appears exactly once; waits for approval"},
-    "run_command": {"required": {"argv": list}, "optional": {},
-                    "about": "run a command, as a list like [\"pytest\", \"-q\"] (no shell), in the workspace; "
-                             "waits for approval unless the person always allows it"},
+    "run_command": {"required": {"argv": list}, "optional": {"cwd": str},
+                    "about": "run a command, as a list like [\"pytest\", \"-q\"] (no shell), in the workspace, or "
+                             "in a repo you fetched with cwd \"scratch:NAME\" (always waits for approval); "
+                             "otherwise waits for approval unless the person always allows it"},
+    "fetch_repo": {"required": {"url": str}, "optional": {"commit": str},
+                   "about": "download a public GitHub repo (https://github.com/OWNER/REPO) at a commit (default: "
+                            "its latest) into scratch:OWNER-REPO and give you its full commit; waits for the "
+                            "person's approval"},
+    "tree_hash": {"required": {"repo": str}, "optional": {"subdir": str},
+                  "about": "the tree_sha256 and files count of a fetched repo (repo: OWNER-REPO), or of a "
+                           "folder in it (subdir), for a card's [source]; runs at once; do it before you try "
+                           "the tool with run_command, which can change the copy"},
+    "write_addon_card": {"required": {"id": str, "card": str}, "optional": {},
+                         "about": "write an add-on card (its TOML text) as add-on id; Ixel checks it, and that "
+                                  "its [source] is what you fetched and hashed, then waits for the person's "
+                                  "approval"},
     "screenshot": {"required": {}, "optional": {},
                    "about": "take a picture of the screen on macOS, after approval; it reaches you with your "
                             "next turn; Computer access only"},
@@ -57,7 +70,8 @@ ACTIONS: dict[str, dict[str, Any]] = {
                "about": "end the run, saying what you did or found"},
 }
 # Changes, commands and looking at the screen or opening something wait for the person
-NEEDS_APPROVAL = ("write_file", "edit_file", "run_command", "screenshot", "open")
+NEEDS_APPROVAL = ("write_file", "edit_file", "run_command", "fetch_repo", "write_addon_card", "screenshot",
+                  "open")
 COMPUTER_ACTIONS = ("screenshot", "open")
 
 MAX_GOAL_CHARS = 20_000
@@ -183,6 +197,10 @@ Rules:
 - {paths}
 - Files the person attached to this run are listed under "your files in this run". Name one as upload:NAME in \
 read_file or view_file; they can't be written, searched or listed.
+- A repo you fetched with fetch_repo is in scratch:NAME, where NAME is the OWNER-REPO name it gave. Name its \
+files as scratch:NAME/PATH in list_dir, read_file, search and view_file; they can only be read.
+- write_addon_card only writes a card. You can't turn one on: after it, your answer must tell the person to open \
+Settings › Add-ons to review and approve it.
 - view_file shows you pictures with your next turn, not in the step result; look, then say what you see.
 - {approval}
 - {computer}
@@ -205,8 +223,9 @@ def _action_table(computer: bool = False) -> str:
         args += [f"{key} ({_TYPE_NAMES[kind]}, optional)" for key, kind in spec["optional"].items()]
         about = spec["about"]
         if computer and name == "run_command":
-            about = ('run a command as a list like ["pytest", "-q"] (no shell), in the workspace; always '
-                     'waits for approval; no sandbox, with the network')
+            about = ('run a command as a list like ["pytest", "-q"] (no shell), in the workspace, or in a repo '
+                     'you fetched with cwd "scratch:NAME"; always waits for approval; no sandbox, with the '
+                     'network')
         lines.append(f"- {name}: {', '.join(args) or 'no args'}. {about}")
     return "\n".join(lines)
 
@@ -294,9 +313,11 @@ def build_prompt(goal: str, files: dict, skills: list, steps: list[dict], fence:
              "profiles and Ixel's config folder are refused." if computer else
              "Paths are relative to the workspace, like src/app.py. Paths outside it, Git's .git folder "
              "and files that look like secrets (.env, keys) are refused.")
-    approval = ("Every write_file, edit_file, run_command, screenshot and open waits for the person's "
-                "approval, and they may say no. The command allowlist does not apply." if computer else
-                "write_file, edit_file and run_command wait for the person's approval, and they may say no.")
+    approval = ("Every write_file, edit_file, run_command, fetch_repo, write_addon_card, screenshot and open "
+                "waits for the person's approval, and they may say no. The command allowlist does not apply."
+                if computer else
+                "write_file, edit_file, run_command, fetch_repo and write_addon_card wait for the person's "
+                "approval, and they may say no.")
     access = ("Computer access is on for this run. Commands run without a sandbox and with the network. "
               "screenshot shows pictures with your next turn, like view_file." if computer else
               "Computer access is off: screenshot and open are unknown actions.")
