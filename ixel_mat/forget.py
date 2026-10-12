@@ -11,8 +11,9 @@ tidy() runs as every ixel command starts and deletes what's past its time. forge
 once (`ixel forget`, and the Forget button on the app's Settings page, which leaves the window's storage
 alone since it's in use). Your keys, settings, machines and usage stats (stats.json) are never touched.
 
-Not the storage of Ixel's own window on Linux (linux_window.py, GTK with WebKit): WebKitGTK keeps it in
-folders named after the program (gtk_window_folders), and `ixel forget` only says where.
+The storage of Ixel's own window on Linux (linux_window.py, GTK with WebKit) is in `gtk` in Ixel's own
+folder (data_dir()/gtk), and goes like the others. An earlier Ixel's window left its storage where
+WebKitGTK puts it, in folders named after the program (gtk_window_folders): `ixel forget` only says where.
 """
 from __future__ import annotations
 
@@ -58,20 +59,25 @@ def tidy() -> None:
 
 def window_folders(system: str = sys.platform, env: Mapping[str, str] = os.environ,
                    home: Path | None = None) -> list[Path]:
-    """Where the app's window keeps its browser storage: the Edge or Chrome profile `ixel app` opens, and
-    on a Mac, Ixel.app's own (WebKit keeps it under the app's name)."""
+    """Where the app's window keeps its browser storage: the Edge or Chrome profile `ixel app` opens, on a
+    Mac Ixel.app's own (WebKit keeps it under the app's name), and on Linux the GTK window's (`gtk` in
+    Ixel's own folder, where linux_window.py puts it)."""
     from ixel_mat.gui.window import MAC_APP_ID, data_dir
 
     home = home or Path.home()
-    folders = [data_dir(system, env, home) / "window"]
+    own = data_dir(system, env, home)
+    folders = [own / "window"]
     if system == "darwin":
         folders.append(home / "Library" / "WebKit" / MAC_APP_ID)
+    elif system.startswith("linux"):
+        folders.append(own / "gtk")
     return folders
 
 
 def gtk_window_folders(env: Mapping[str, str] = os.environ, home: Path | None = None) -> list[Path]:
-    """Where WebKitGTK keeps the storage of Ixel's Linux window, a program it knows as "ixel": its data and
-    its cache. Said by `ixel forget`, not deleted."""
+    """Where an earlier Ixel's Linux window left its storage: the data and cache folders WebKitGTK keeps
+    for a program it knows as "ixel". Said by `ixel forget`, not deleted: they're named only after the
+    program."""
     home = home or Path.home()
     return [Path(env.get("XDG_DATA_HOME") or home / ".local" / "share", "ixel"),
             Path(env.get("XDG_CACHE_HOME") or home / ".cache", "ixel")]

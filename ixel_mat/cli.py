@@ -1419,9 +1419,8 @@ def cmd_forget(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="ixel forget",
         description="Delete what Ixel keeps of what you asked and ran: your last ixel review conversation, "
-                    "the Machines log, and the app window's storage. Your keys, settings, machines and "
-                    "usage stats stay. On Linux, Ixel's own GTK window keeps its storage where WebKitGTK "
-                    "puts it, which this leaves alone.")
+                    "the Machines log, and the app window's storage (on Linux, Ixel's own GTK window's "
+                    "too). Your keys, settings, machines and usage stats stay.")
     parser.parse_args(argv)
     found = forget()
     console.print()
@@ -1445,8 +1444,8 @@ def cmd_forget(argv: list[str]) -> int:
     from ixel_mat.forget import gtk_window_folders
     gtk = [str(folder) for folder in gtk_window_folders() if folder.is_dir()]
     if gtk:
-        console.print(f"  [{C['dim']}]Ixel's Linux window keeps its own storage in {safe_markup(' and '.join(gtk))}, "
-                      "which this leaves alone: delete it with Ixel closed.[/]")
+        console.print(f"  [{C['dim']}]An earlier Ixel's Linux window left its storage in "
+                      f"{safe_markup(' and '.join(gtk))}, which this leaves alone: delete it with Ixel closed.[/]")
     console.print(f"  [{C['dim']}]Your keys, settings, machines and usage stats are kept.[/]\n")
     return 1 if any(item.error for item in found) else 0
 
