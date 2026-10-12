@@ -9,6 +9,11 @@ reading and writing alike.
 Reads happen at once. A write or an edit happens in two halves: prepare_write / prepare_edit checks
 everything and returns the diff the person approves, and apply writes it later, only if the file is still
 what it was when the diff was made (another program, or the person, may have changed it meanwhile).
+
+read_file also reads documents (PDF, Word, Excel, PowerPoint …) as their text, and view_file looks at a
+picture, a few frames of a video (with ffmpeg) or a document's first pictures: those go to the model with
+its next call. Files the person attached to a run are named upload:NAME, and only read_file and view_file
+reach them; they live in Ixel's own folder, outside the workspace, so nothing can write or search them.
 """
 from __future__ import annotations
 
@@ -16,13 +21,17 @@ import difflib
 import fnmatch
 import hashlib
 import os
+import re
 import stat
+import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from ixel_mat import documents, pictures
 from ixel_mat.config import secrets as _secrets
 from ixel_mat.material import mask_secrets
+from ixel_mat.pictures import Picture
 
 MAX_LIST_ENTRIES = 500
 MAX_READ_BYTES = 200 * 1024
@@ -35,6 +44,18 @@ BINARY_PROBE = 8 * 1024        # a NUL byte in this much of the start means the 
 # A file that isn't valid UTF-8 is still read when at most this share of its characters had to be replaced
 # (a stray Latin-1 byte in an otherwise fine file); more than that, and it's treated as not text.
 MAX_REPLACED_SHARE = 0.01
+
+# What view_file looks at
+VIDEOS = frozenset({".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"})
+MAX_VIDEO_FRAMES = 6
+MAX_PICTURES_PER_CALL = pictures.MAX_PER_QUESTION          # 8: the pictures that go with one model call
+MAX_PICTURE_BYTES_PER_CALL = pictures.MAX_PER_QUESTION_BYTES  # 20 MB of them in all
+MAX_VIEW_BYTES = documents.MAX_FILE_BYTES                  # 50 MB: a document read whole
+FFMPEG_TIMEOUT = 60.0                                      # seconds, for each time ffmpeg runs
+UPLOAD_PREFIX = "upload:"
+# What list_dir says a file is: what the model can use on it
+KINDS = ("picture", "video", "document", "text", "other")
+_DURATION = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
 
 # Names that look like secrets, compared in lower case (a Mac's disk doesn't care about case, so .ENV is .env)
 _SECRET_PREFIXES = (".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
@@ -56,6 +77,52 @@ class PendingWrite:
     new_text: str
     diff: str
     fingerprint: tuple[int, int, str] | None
+
+
+@dataclass(frozen=True)
+class Viewed:
+    """What view_file found: text is what the model reads in the step's result, and pictures go to it with
+    its next call (none when there was nothing to show)."""
+    text: str
+    pictures: list[Picture] = field(default_factory=list)
+
+
+def kind_of(path: Path) -> str:
+    """What a file is, one of KINDS: a picture, video or document by its name; else text, unless its start
+    holds a NUL byte or it can't be read ('other')."""
+    name = Path(path).name
+    if documents.is_picture(name):
+        return "picture"
+    if documents.suffix(name) in VIDEOS:
+        return "video"
+    if documents.is_document(name):
+        return "document"
+    try:
+        if not Path(path).is_file():
+            return "other"
+        with open(path, "rb") as handle:
+            start = handle.read(BINARY_PROBE)
+    except OSError:
+        return "other"
+    return "other" if _looks_binary(start) else "text"
+
+
+def _a(kind: str) -> str:
+    """A document's kind with 'a' or 'an' before it: 'a PDF', 'an Excel workbook'."""
+    return f"an {kind}" if kind[:1].lower() in "aeiou" or kind.startswith("RTF") else f"a {kind}"
+
+
+def _run_ffmpeg(argv: list[str], folder: Path) -> str:
+    """Run ffmpeg as a list of words (never through a shell) in a private temp folder, with the key-free
+    environment and a time limit; its output and errors as text. ffmpeg may exit with an error on purpose
+    (asked only to describe a file, it says it was given no output), so the exit code isn't checked here."""
+    options: dict = {}
+    if os.name == "nt":
+        from ixel_mat.agents.launch import NO_WINDOW_FLAGS
+        options["creationflags"] = NO_WINDOW_FLAGS
+    done = subprocess.run(argv, cwd=folder, env=_secrets.child_env(nested=False), stdin=subprocess.DEVNULL,
+                          capture_output=True, timeout=FFMPEG_TIMEOUT, **options)
+    return (done.stdout + done.stderr).decode("utf-8", errors="replace")
 
 
 def is_secret_name(name: str) -> bool:
@@ -112,15 +179,22 @@ def _unified_diff(rel: str, old: str, new: str, is_new: bool) -> str:
 
 
 class Workspace:
-    """The folder the agent works in. Every action takes a path relative to it."""
+    """The folder the agent works in. Every action takes a path relative to it.
 
-    def __init__(self, root: Path):
+    uploads is the folder holding the files the person attached to this run (uploads/<run id>/ in the
+    agent's folder; the runner sets it), or None. read_file and view_file name those as upload:NAME."""
+
+    def __init__(self, root: Path, uploads: Path | None = None):
         self.root = Path(root).resolve()
+        self.uploads = Path(uploads) if uploads is not None else None
 
     # ── Paths ────────────────────────────────────────────────────────────────
 
     def resolve(self, path: str) -> Path:
         """The real path for a path the model named, or WorkspaceError when it's not one the agent may use."""
+        if isinstance(path, str) and path.startswith(UPLOAD_PREFIX):
+            raise WorkspaceError("'upload:' files are the person's attachments; read_file and view_file can read "
+                                 "them, nothing can write or search them")
         if not isinstance(path, str) or not path.strip():
             raise WorkspaceError("give a path relative to the workspace, like src/app.py")
         if "\x00" in path:
@@ -167,11 +241,64 @@ class Workspace:
         rel = real.relative_to(self.root).as_posix()
         return rel if rel else "."
 
+    def _upload(self, path: str) -> tuple[Path, str]:
+        """The real path of an attached file named upload:NAME, and that name to show; WorkspaceError when
+        there's no such file or NAME isn't one plain file name. Uploads are in Ixel's own folder, which
+        resolve refuses on purpose, so this is the only way to them (and only read_file and view_file use it)."""
+        if self.uploads is None:
+            raise WorkspaceError("no files were attached to this run")
+        name = path[len(UPLOAD_PREFIX):]
+        shown = UPLOAD_PREFIX + name
+        if (not name or name != name.strip() or name.startswith(".")
+                or any(c in name for c in ("/", "\\", "\x00", ":"))):
+            raise WorkspaceError(f"{path!r} isn't an attached file; name one as upload:NAME, as the prompt lists "
+                                 "them")
+        if is_secret_name(name):
+            raise WorkspaceError(f"{path!r} looks like a secret, so the agent can't read it")
+        try:
+            folder = self.uploads.resolve()
+            info = (folder / name).lstat()
+            real = (folder / name).resolve()
+        except FileNotFoundError:
+            raise WorkspaceError(f"there's no attached file {shown!r}") from None
+        except (OSError, RuntimeError) as exc:
+            raise WorkspaceError(f"can't read {shown!r}") from exc
+        # A symlink, or anything that isn't a plain file, could lead anywhere: only the file itself is read
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or real.parent != folder:
+            raise WorkspaceError(f"{shown!r} isn't an attached file the agent can read")
+        return real, shown
+
+    def _source(self, path: str) -> tuple[Path, str]:
+        """For read_file and view_file: the real path to read and the name to show, an attached file's
+        (upload:NAME) or a workspace path's."""
+        if isinstance(path, str) and path.startswith(UPLOAD_PREFIX):
+            return self._upload(path)
+        return self.resolve(path), path
+
+    def _document(self, real: Path, shown: str) -> documents.Document:
+        """A document file read whole (at most MAX_VIEW_BYTES), or WorkspaceError saying why it can't be."""
+        try:
+            size = real.stat().st_size
+            if size > MAX_VIEW_BYTES:
+                raise WorkspaceError(f"{shown!r} is {size} bytes, over the {MAX_VIEW_BYTES // (1024 * 1024)} MB "
+                                     "a document can be")
+            with real.open("rb") as handle:
+                data = handle.read(MAX_VIEW_BYTES + 1)
+        except OSError as exc:
+            raise WorkspaceError(f"can't read {shown!r}: {exc.strerror or type(exc).__name__}") from exc
+        try:
+            return documents.read_document(data, real.name)
+        except documents.DocumentError as exc:
+            raise WorkspaceError(str(exc)) from None
+
     # ── Reading ──────────────────────────────────────────────────────────────
 
     def list_dir(self, path: str = ".") -> str:
         """One line per entry, sorted by name: 'd name/' for a folder, 'f name size' for a file, and
-        'l name@' for a symlink (not followed, so one leading out tells nothing about where). .git is left out."""
+        'l name@' for a symlink (not followed, so one leading out tells nothing about where). .git is left out.
+
+        A file line ends with the file's kind when it isn't plain text: 'f photo.jpg 1234 picture', or video,
+        document, other."""
         target = self.resolve(path)
         if not target.is_dir():
             raise WorkspaceError(f"{path!r} isn't a folder")
@@ -188,7 +315,10 @@ class Workspace:
                 elif entry.is_dir(follow_symlinks=False):
                     lines.append(f"d {entry.name}/")
                 else:
-                    lines.append(f"f {entry.name} {entry.stat(follow_symlinks=False).st_size}")
+                    # A secret-looking file isn't opened, not even to see whether it's text
+                    kind = "text" if is_secret_name(entry.name) else kind_of(Path(entry.path))
+                    lines.append(f"f {entry.name} {entry.stat(follow_symlinks=False).st_size}"
+                                 + ("" if kind == "text" else f" {kind}"))
             except OSError:
                 lines.append(f"? {entry.name}")
         if len(entries) > MAX_LIST_ENTRIES:
@@ -199,15 +329,24 @@ class Workspace:
         """A text file's contents, or lines start to end (1-based, both included), with secrets masked.
 
         At most 200 KB: a bigger file is only read a line range at a time. Files that aren't text (a NUL
-        byte near the start, or more than a few bytes that aren't UTF-8) are refused."""
+        byte near the start, or more than a few bytes that aren't UTF-8) are refused.
+
+        A document (PDF, Word, Excel, PowerPoint, RTF, OpenDocument, a web page; at most 50 MB) is read as
+        its text, with a last line saying what kind it is and how many pictures it holds; start and end are
+        line numbers of that text. Pictures and videos are for view_file. path may name an attached file as
+        upload:NAME."""
         for name, value in (("start", start), ("end", end)):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
                 raise WorkspaceError(f"{name} must be a line number, 1 or more")
         if start is not None and end is not None and end < start:
             raise WorkspaceError("end must not be before start")
-        target = self.resolve(path)
+        target, path = self._source(path)
         if not target.is_file():
             raise WorkspaceError(f"{path!r} isn't a file" if target.exists() else f"there's no file {path!r}")
+        if documents.is_picture(target.name) or documents.suffix(target.name) in VIDEOS:
+            raise WorkspaceError(f"{path!r} is a {kind_of(target)}, not text; look at it with view_file")
+        if documents.is_document(target.name):
+            return self._document_text(target, path, start, end)
         try:
             size = target.stat().st_size
             if start is None and end is None:
@@ -226,6 +365,27 @@ class Workspace:
         if not text and not note:
             return "(empty file)" if start is None and end is None else "(no lines in that range)"
         return mask_secrets(text) + note
+
+    def _document_text(self, target: Path, path: str, start: int | None, end: int | None) -> str:
+        """A document's text for read_file (lines start to end of it when given), secrets masked, and a last
+        line saying what kind it is and whether view_file has pictures to show."""
+        doc = self._document(target, path)
+        text = mask_secrets(doc.text)
+        if start is not None or end is not None:
+            lines = text.splitlines()
+            text = "\n".join(lines[(start or 1) - 1:end])
+            if not text:
+                text = "(no lines in that range)"
+        elif not text.strip():
+            text = "(no text in it)"
+        count = len(doc.images)
+        if count:
+            note = (f"[{_a(doc.kind)} with {count} picture{'' if count == 1 else 's'} inside; view_file shows "
+                    "the first ones]")
+        else:
+            note = f"[{_a(doc.kind)}, no pictures]"
+        # What the reader left out (text cut at its limit, parts it skipped), for the model to know
+        return "\n".join([text, note, *(f"[{mask_secrets(line)}]" for line in doc.notes)])
 
     def _read_lines(self, target: Path, start: int, end: int | None) -> tuple[bytes, str]:
         """Lines start..end of a file (end None: to the end) as bytes, at most MAX_READ_BYTES of them."""
@@ -246,6 +406,115 @@ class Workspace:
                 kept.append(line)
                 total += len(line)
         return b"".join(kept), ""
+
+    # ── Looking ──────────────────────────────────────────────────────────────
+
+    def view_file(self, path: str) -> Viewed:
+        """Pictures for the model's next call: a picture's own, up to MAX_VIDEO_FRAMES frames of a video (with
+        ffmpeg), or a document's first pictures; at most MAX_PICTURES_PER_CALL. path may name an attached
+        file as upload:NAME.
+
+        Pictures are cleaned the way Ask cleans them (ixel_mat.pictures), which takes PNG and JPEG only: a
+        GIF, WebP, HEIC, BMP or TIFF is refused in the beta, saying the person can convert it to one of those."""
+        real, shown = self._source(path)
+        if not real.is_file():
+            raise WorkspaceError(f"{shown!r} isn't a file" if real.exists() else f"there's no file {shown!r}")
+        kind = kind_of(real)
+        if kind == "picture":
+            return self._picture(real, shown)
+        if kind == "video":
+            return self._video_frames(real, shown)
+        if kind == "document":
+            return self._document_pictures(real, shown)
+        raise WorkspaceError(f"{shown!r} isn't a picture, video or document"
+                             + ("; read it with read_file" if kind == "text" else ""))
+
+    def _picture(self, real: Path, shown: str) -> Viewed:
+        try:
+            size = real.stat().st_size
+            if size > pictures.MAX_BYTES:
+                raise WorkspaceError(f"{shown!r} is {pictures.megabytes(size)}, over the "
+                                     f"{pictures.megabytes(pictures.MAX_BYTES)} a picture can be")
+            with real.open("rb") as handle:
+                data = handle.read(pictures.MAX_BYTES + 1)
+        except OSError as exc:
+            raise WorkspaceError(f"can't read {shown!r}: {exc.strerror or type(exc).__name__}") from exc
+        if not (data.startswith(pictures.PNG_SIGNATURE) or data.startswith(b"\xff\xd8\xff")):
+            raise WorkspaceError(f"{shown!r} isn't a PNG or JPEG, the only pictures the agent sends in the beta; "
+                                 "the person can save it as one of those")
+        try:
+            picture = pictures.read_picture(data)
+        except pictures.PictureError as exc:
+            raise WorkspaceError(f"{shown!r}: {exc}") from None
+        return Viewed(f"picture {shown}, {picture.width}x{picture.height}, {len(data)} bytes; it goes to you with "
+                      "your next turn", [picture])
+
+    def _video_frames(self, real: Path, shown: str) -> Viewed:
+        """Up to MAX_VIDEO_FRAMES frames spread over a video, taken by ffmpeg into a private temp folder (each
+        at most 1280 pixels wide) and cleaned like any picture. Without ffmpeg, only the video's size."""
+        from ixel_mat.agents.launch import find_on_path
+        try:
+            size = real.stat().st_size
+        except OSError as exc:
+            raise WorkspaceError(f"can't read {shown!r}: {exc.strerror or type(exc).__name__}") from exc
+        ffmpeg = find_on_path("ffmpeg")
+        # A batch file would run through cmd.exe, which reads the filter's commas and brackets as its own syntax
+        if ffmpeg is not None and Path(ffmpeg).suffix.lower() in (".cmd", ".bat"):
+            ffmpeg = None
+        if ffmpeg is None:
+            return Viewed(f"[video {shown}, {size} bytes; ffmpeg isn't installed, so its frames can't be shown. "
+                          f"With ffmpeg on PATH, view_file would show up to {MAX_VIDEO_FRAMES} frames spread "
+                          "over it]")
+        found: list[Picture] = []
+        times: list[float] = []
+        with tempfile.TemporaryDirectory(prefix="ixel-agent-") as tmp:
+            folder = Path(tmp)
+            try:
+                # Asked only to describe the file, ffmpeg says its length and exits 1 (no output was named)
+                about = _run_ffmpeg([ffmpeg, "-hide_banner", "-nostdin", "-i", str(real)], folder)
+            except subprocess.TimeoutExpired:
+                raise WorkspaceError(f"ffmpeg took over {FFMPEG_TIMEOUT:g} seconds to read {shown!r}") from None
+            except OSError as exc:
+                raise WorkspaceError(f"ffmpeg couldn't start: {exc.strerror or type(exc).__name__}") from None
+            match = _DURATION.search(about)
+            length = (int(match[1]) * 3600 + int(match[2]) * 60 + float(match[3])) if match else 0.0
+            wanted = ([(i + 0.5) * length / MAX_VIDEO_FRAMES for i in range(MAX_VIDEO_FRAMES)] if length > 0
+                      else [0.0])
+            for number, at in enumerate(wanted, start=1):
+                out = folder / f"frame-{number}.png"
+                try:
+                    _run_ffmpeg([ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-ss", f"{at:.3f}",
+                                 "-i", str(real), "-frames:v", "1", "-vf", "scale=min(1280\\,iw):-2", "-y",
+                                 str(out)], folder)
+                except (subprocess.TimeoutExpired, OSError):
+                    break  # one frame that hangs or can't start: the rest would too
+                try:
+                    if not out.is_file() or out.stat().st_size > pictures.MAX_BYTES:
+                        continue
+                    found.append(pictures.read_picture(out.read_bytes()))
+                    times.append(at)
+                except (OSError, pictures.PictureError):
+                    continue
+        how_long = f"{length:.1f} s long" if length > 0 else "length unknown"
+        if not found:
+            raise WorkspaceError(f"ffmpeg couldn't take any frames from {shown!r} ({size} bytes, {how_long}); "
+                                 "it may not be a video ffmpeg reads")
+        at_times = ", ".join(f"{at:.1f} s" for at in times)
+        return Viewed(f"video {shown}, {size} bytes, {how_long}; {len(found)} frame{'' if len(found) == 1 else 's'} "
+                      f"(at {at_times}) go to you with your next turn", found)
+
+    def _document_pictures(self, real: Path, shown: str) -> Viewed:
+        """A document's first PNG and JPEG pictures, cleaned, at most MAX_PICTURES_PER_CALL of them."""
+        doc = self._document(real, shown)
+        if not doc.images:
+            return Viewed(f"{shown} is {_a(doc.kind)} with no pictures; read_file reads its text")
+        found, notes, _ = documents.pictures_of(doc, room=MAX_PICTURES_PER_CALL,
+                                                max_bytes=MAX_PICTURE_BYTES_PER_CALL)
+        lines = [f"{shown} is {_a(doc.kind)} with {len(doc.images)} picture{'' if len(doc.images) == 1 else 's'}; "
+                 + (f"the first {len(found)} go to you with your next turn" if found
+                    else "none of them is one the agent can send")]
+        lines += [f"[{mask_secrets(note)}]" for note in notes]
+        return Viewed("\n".join(lines), found)
 
     def search(self, pattern: str, path: str = ".", glob: str | None = None) -> str:
         """Lines containing pattern (plain text, case matters) as 'path:line: text', in files under path.

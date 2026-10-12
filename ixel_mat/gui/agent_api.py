@@ -79,7 +79,12 @@ def page_run(data: dict) -> dict:
         )}
         entry["result"] = str(entry["result"]).encode("utf-8")[:MAX_RESULT_BYTES].decode("utf-8", "ignore")
         entry["usage"] = entry["usage"] or {}
+        pictures = step.get("pictures")
+        if isinstance(pictures, int) and not isinstance(pictures, bool):
+            entry["pictures"] = pictures
         out["steps"].append(entry)
+    uploads = data.get("uploads", [])
+    out["uploads"] = copy.deepcopy(uploads) if isinstance(uploads, list) else []
     out["pending"] = copy.deepcopy(data.get("pending")) if out["status"] == "waiting" else None
     return out
 
