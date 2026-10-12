@@ -46,7 +46,8 @@ ACTIONS: dict[str, dict[str, Any]] = {
     "write_file": {"required": {"path": str, "content": str}, "optional": {},
                    "about": "write a whole text file (new or replaced); waits for the person's approval"},
     "edit_file": {"required": {"path": str, "old": str, "new": str}, "optional": {},
-                  "about": "replace old with new in a file, where old appears exactly once; waits for approval"},
+                  "about": "replace old with new in a file, where old appears exactly once (a miss shows the "
+                           "closest lines with their numbers); waits for approval"},
     "run_command": {"required": {"argv": list}, "optional": {"cwd": str},
                     "about": "run a command, as a list like [\"pytest\", \"-q\"] (no shell), in the workspace, or "
                              "in a repo you fetched with cwd \"scratch:NAME\" (always waits for approval); "

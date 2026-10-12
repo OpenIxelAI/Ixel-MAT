@@ -142,3 +142,51 @@ def test_search_with_no_match_still_names_the_skipped_folder(ws):
 def test_a_file_named_build_is_still_searched(ws):
     _write(ws, "build", "needle\n")
     assert ws.search("needle") == "build:1: needle"
+
+
+# ── edit_file misses ─────────────────────────────────────────────────────────
+
+FAKE_KEY = "sk-" + "FAKE" * 7
+
+
+def test_a_miss_shows_the_closest_line_with_its_number(ws):
+    lines = [f"item = {n}" for n in range(1, 21)]
+    lines[11] = "total = compute(items, 6)"
+    _write(ws, "calc.py", "\n".join(lines) + "\n")
+    with pytest.raises(WorkspaceError) as caught:
+        ws.prepare_edit("calc.py", "total = compute(items, 5)", "total = 0")
+    message = str(caught.value)
+    assert "0 times" in message
+    assert "closest lines" in message
+    assert "12: total = compute(items, 6)" in message
+    shown = [line for line in message.splitlines() if line[:2] == "  " and line[2:3].isdigit()]
+    assert 1 <= len(shown) <= 3
+
+
+def test_a_miss_with_nothing_close_shows_no_lines(ws):
+    _write(ws, "calc.py", "item = 1\nitem = 2\n")
+    with pytest.raises(WorkspaceError, match="0 times") as caught:
+        ws.prepare_edit("calc.py", "zzzzzzzz qqqqqqqq", "x")
+    assert "closest lines" not in str(caught.value)
+
+
+def test_a_miss_never_shows_a_secret_in_the_closest_lines(ws):
+    _write(ws, "settings.txt", f"name = demo\nOPENAI_API_KEY={FAKE_KEY}\n")
+    with pytest.raises(WorkspaceError) as caught:
+        ws.prepare_edit("settings.txt", f"OPENAI_API_KEY={FAKE_KEY[:-1]}X", "OPENAI_API_KEY=")
+    assert "closest lines" in str(caught.value)  # the line is close, so it's shown, with the key masked
+    assert FAKE_KEY not in str(caught.value)
+
+
+def test_a_multi_line_miss_shows_the_line_that_differs(ws):
+    _write(ws, "calc.py", "def total(items):\n    count = 1\n    return count\n")
+    with pytest.raises(WorkspaceError) as caught:
+        ws.prepare_edit("calc.py", "def total(items):\n    count = 2\n    return count\n", "x")
+    assert "  2:     count = 1" in str(caught.value)
+
+
+def test_an_edit_that_matches_once_still_works(ws):
+    _write(ws, "calc.py", "item = 1\ntotal = compute(items, 5)\n")
+    pending = ws.prepare_edit("calc.py", "total = compute(items, 5)", "total = compute(items, 6)")
+    ws.apply(pending)
+    assert (ws.root / "calc.py").read_text(encoding="utf-8") == "item = 1\ntotal = compute(items, 6)\n"

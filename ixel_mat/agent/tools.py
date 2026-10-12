@@ -51,6 +51,9 @@ MAX_SEARCH_LINES = 200
 MAX_SEARCH_FILE_BYTES = 1024 * 1024
 MAX_SEARCH_FILES = 20_000      # a search stops looking after this many files, so a huge folder can't hang it
 MAX_SEARCH_LINE_CHARS = 300    # a long matching line is shown cut to this
+NEAREST_LINES = 3              # an edit whose old text isn't in the file shows this many of the file's closest lines
+NEAREST_MIN_RATIO = 0.6        # a file line at least this similar (0 to 1) to the old text counts as close
+MAX_NEAREST_SCAN_LINES = 20_000  # a long file is only scanned this far for close lines
 MAX_WRITE_BYTES = 1024 * 1024
 BINARY_PROBE = 8 * 1024        # a NUL byte in this much of the start means the file isn't text
 # A file that isn't valid UTF-8 is still read when at most this share of its characters had to be replaced
@@ -220,6 +223,39 @@ def _hit_lines(text: str | None, rel: str, pattern: str) -> list[str]:
                 line = line[:MAX_SEARCH_LINE_CHARS] + " […]"
             out.append(f"{rel}:{number}: {line}")
     return out
+
+
+def _nearest_lines(text: str, old: str) -> str:
+    """The file's lines closest to the text the model asked to replace, as a note for an edit's error, each with
+    its line number so the model can copy the exact text; '' when none is close enough (or old has no text)."""
+    file_lines = text.splitlines()[:MAX_NEAREST_SCAN_LINES]
+    wanted = [line.strip() for line in old.splitlines() if line.strip()][:5]
+    candidates = [(number, line) for number, line in enumerate(file_lines, start=1) if line.strip()]
+    matcher = difflib.SequenceMatcher(autojunk=False)
+    found: dict[int, tuple[float, str]] = {}
+    for want in wanted:
+        matcher.set_seq2(want)
+        top: tuple[float, int, str] | None = None
+        for number, line in candidates:
+            matcher.set_seq1(line.strip())
+            if matcher.quick_ratio() < NEAREST_MIN_RATIO:  # a cheap check first; ratio() is the slow one
+                continue
+            ratio = matcher.ratio()
+            if ratio >= NEAREST_MIN_RATIO and (top is None or ratio > top[0]):
+                top = (ratio, number, line)  # equal ratios keep the lower line number
+        if top is not None:
+            ratio, number, line = top
+            if number not in found or ratio > found[number][0]:
+                found[number] = (ratio, line)
+    best = sorted(found.items(), key=lambda item: (-item[1][0], item[0]))[:NEAREST_LINES]
+    rows = []
+    for number, (_, line) in sorted(best):
+        if len(line) > MAX_SEARCH_LINE_CHARS:
+            line = line[:MAX_SEARCH_LINE_CHARS] + " […]"
+        rows.append(f"  {number}: {line}")
+    if not rows:
+        return ""
+    return mask_secrets("\nThe closest lines in the file:\n" + "\n".join(rows))
 
 
 def _is_folder(entry: os.DirEntry) -> bool:
@@ -945,7 +981,8 @@ class Workspace:
         return self._pending(real, old, content, fingerprint)
 
     def prepare_edit(self, path: str, old: str, new: str) -> PendingWrite:
-        """Check an edit that replaces old with new, where old appears exactly once, and make its diff."""
+        """Check an edit that replaces old with new, where old appears exactly once, and make its diff. When old
+        isn't in the file, the error shows the file's closest lines with their numbers (_nearest_lines)."""
         if not isinstance(old, str) or not old:
             raise WorkspaceError("old must be the exact text to replace")
         if not isinstance(new, str):
@@ -960,7 +997,8 @@ class Workspace:
             old, new = old.replace("\n", "\r\n"), new.replace("\r\n", "\n").replace("\n", "\r\n")
         count = text.count(old)
         if count == 0:
-            raise WorkspaceError(f"old appears 0 times in {path!r}; copy it exactly from read_file")
+            raise WorkspaceError(f"old appears 0 times in {path!r}; copy it exactly from read_file"
+                                 + _nearest_lines(text, old))
         if count > 1:
             raise WorkspaceError(f"old appears {count} times in {path!r}; include more of the lines around it "
                                  "so it appears once")
