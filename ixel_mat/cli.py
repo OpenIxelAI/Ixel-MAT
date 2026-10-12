@@ -927,7 +927,8 @@ def cmd_ask(argv: list[str]) -> int:
                                                         "out of usage, the next answers")
     parser.add_argument("--model", metavar="NAME", help="the model for this run only, nothing saved")
     parser.add_argument("--effort", metavar="LEVEL",
-                        help="the thinking level for this run only; ixel effort AGENT lists them")
+                        help="the thinking level for this run only; ixel effort AGENT lists them. "
+                             "With several agents it's the first one's; the others use their own")
     parser.add_argument("--list", action="store_true", help="list the models you can ask, and stop")
     parser.add_argument("--timeout", type=float, help="seconds to wait for the answer")
     code = parser.add_argument_group("code or documents to attach (read-only: nothing runs, nothing changes)")
@@ -975,9 +976,11 @@ def cmd_ask(argv: list[str]) -> int:
     if args.list:  # with Private on, only the models it lets answer
         agents = agent_list({name: cfg for name, cfg in settings.agent_configs.items() if settings.yours(name)})
         if args.json:
-            # features: what this ixel ask can do, for programs that call it (Handoff)
+            # features: what this ixel ask can do, for programs that call it (Handoff). effort-first: --effort
+            # with several agents sets the first one's level
             print(json.dumps({"agents": agents,
-                              "features": ["new-files", "head", "fallback", "error-kind", "model", "effort"]},
+                              "features": ["new-files", "head", "fallback", "error-kind", "model", "effort",
+                                           "effort-first"]},
                              indent=2))
             return 0
         if not agents and settings.private and settings.agent_configs:
@@ -1009,9 +1012,9 @@ def cmd_ask(argv: list[str]) -> int:
         if not cfgs:
             parser.error("--agent needs a name (--list shows the choices)")
         if args.model is not None or args.effort is not None:  # this run only: the config file isn't touched
-            if len(cfgs) > 1:
-                parser.error("--model and --effort go with one --agent")
-            cfg = cfgs[0]
+            if args.model is not None and len(cfgs) > 1:
+                parser.error("--model goes with one --agent (with several, --effort sets the first one's)")
+            cfg = cfgs[0]  # with several agents, --effort is the first one's; the others keep their own settings
             if args.model is not None:
                 newest = cfg.type == "http" and provider_for_url(cfg.url) is not None
                 if not (args.model in ALIASES or valid_model_id(args.model)):
@@ -1028,7 +1031,7 @@ def cmd_ask(argv: list[str]) -> int:
                 except ValueError as exc:
                     return fail(str(exc))
                 cfg = dataclasses.replace(cfg, effort="" if level == "default" else level)
-            cfgs = [cfg]
+            cfgs = [cfg, *cfgs[1:]]
         for cfg in cfgs:
             if not settings.yours(cfg.name):
                 return fail(f"Private is on, and {cfg.label} isn't on your computers. Ask one of your own models, or "

@@ -1169,6 +1169,9 @@ details.original > summary:hover { color: var(--text-2); }
 .needs .fallback-row[hidden] { display: none; }
 .needs .fallback-row input { margin: 2px 0 0; flex: none; }
 .needs .model-row small { color: var(--muted); font-size: 12px; }
+.needs .effort-row { display: flex; flex-direction: column; gap: 6px; }
+.needs .effort-row[hidden] { display: none; }
+.needs .effort-row small { color: var(--muted); font-size: 12px; }
 .needs .pick-rows { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .needs .pick-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; width: 100%; }
 .needs .pick-row input { flex: 1 1 180px; min-width: 0; height: 34px; }
