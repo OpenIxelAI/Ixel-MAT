@@ -14,7 +14,7 @@ the repository is public, so if you don't see it, email us.
 
 | Asset | Where it lives |
 |---|---|
-| Your API keys | `~/.config/ixel-mat/keys.enc` (0600), encrypted with a key kept in your system's keychain (below). On a computer with no keychain Ixel can use, or one that won't keep that key, `~/.config/ixel-mat/.env` (0600), in plain text. Or your shell environment |
+| Your API keys | `~/.config/ixel-mat/keys.enc` (0600; on Windows an access list that lets only your account in), encrypted with a key kept in your system's keychain (below). On a computer with no keychain Ixel can use, or one that won't keep that key, `~/.config/ixel-mat/.env` (0600), in plain text. Or your shell environment |
 | Your subscription logins | Each CLI's own storage (`~/.claude`, `~/.codex`, `~/.gemini`…). Ixel never reads these |
 | Your files | Anything your user account can read |
 | Your code | Only the diff or files you name for a review (`--diff`, `--file`…) are read, once, and sent to the models on your panel (below) |
@@ -91,6 +91,18 @@ anyway: from your keychain, which gives them to programs you run (below), or fro
   if an Ixel that stopped mid-save left it behind for 2 minutes). When the keychain is still asking for
   your password as Ixel stops waiting for a new item, the lock stays until it answers (or those 2 minutes
   pass), so no other Ixel makes a different one meanwhile.
+- **Owner-only on Windows too.** File modes mean nothing there, so each time Ixel writes `keys.enc` it sets
+  an access list with `icacls`: first on `~/.config/ixel-mat` (so the file starts out owner-only, as does
+  anything else made in that folder), then on `keys.enc`, in both cases with inheritance off and full control
+  for your account's SID only, found with `whoami /user`. `icacls.exe` and `whoami.exe` are run by their full
+  path under `%SystemRoot%\System32`, as an argument list (no shell), with no window and a 10-second
+  limit, so an `icacls.exe` planted in the folder you run Ixel in never runs. If that fails, the keys are
+  saved anyway, Ixel logs why (never a key), and Health warns and gives the `icacls` line that fixes it.
+  Health also warns when the file or the folder inherits its access from above, or lists another account.
+  The Windows `Administrators` group can still take ownership of the file and change that list, so this
+  keeps other accounts out of it, not someone with administrator rights. The file is encrypted either way,
+  with a key kept in your keychain (above). On macOS and Linux Health checks that group and others can't read
+  `keys.enc` (mode 0600), and gives `chmod 600` when they can.
 - **What the keychain doesn't stop.** A program running as you can usually ask the keychain too: Windows
   gives it to any program you run, an unlocked Linux keyring to any program in your session, and a Mac
   asks first, except for the Python that saved it (a script run with that same Python counts as it). While

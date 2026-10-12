@@ -8,6 +8,9 @@ saved passwords, so a Mac asks at most once and no key comes near Windows' size 
 computer with no keychain Ixel can use, or one that won't keep that item (before there's a keys.enc),
 keys stay in ~/.config/ixel-mat/.env as plain text (0600).
 
+On Windows, where file modes mean nothing, keys.enc and its folder get an access list that lets only your
+account in (icacls, secure_owner_only); Health reads it back (read_acl, acl_problems).
+
 Flow:
   1. `ixel setup` or the app's Settings saves a key (save_secret, set_live)
   2. On startup, load_env() reads them (moving any it finds in .env into keys.enc) into os.environ
@@ -16,10 +19,13 @@ Flow:
 """
 from __future__ import annotations
 
+import codecs
+import csv
 import json
 import logging
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -71,6 +77,12 @@ _KEYCHAINS = {
 # The tests set this (tests/conftest.py, before Ixel is imported, so the programs the suite starts get it
 # too): a keychain that lives in memory, so no test reads or changes yours. Only under the tests (_under_test)
 TEST_KEYCHAIN_VAR = "IXEL_TEST_KEYCHAIN"
+# whoami and icacls are quick local programs: one that hasn't answered in this long is left, not waited for
+ACL_TIMEOUT = 10.0
+# subprocess.CREATE_NO_WINDOW exists on Windows only
+_CREATE_NO_WINDOW = 0x08000000
+# The signed-in user's (account, SID), once whoami has said (a failure isn't kept)
+_USER: tuple[str, str] | None = None
 
 
 def write_private_file(path: Path, data: bytes) -> None:
@@ -139,6 +151,148 @@ def normalize_secret_input(value: str) -> str:
         return ""
     cleaned = value.replace("\r", "").replace("\n", "").strip().strip('"').strip("'")
     return "".join(ch for ch in cleaned if ord(ch) <= 255)
+
+
+# ── Owner-only access on Windows ──────────────────────────────────────────────
+
+def _system_tool(name: str) -> str:
+    """One of Windows' own programs, by its full path: a bare name would run an icacls.exe planted in the
+    current folder."""
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", name)
+
+
+def _run_tool(argv: list[str]) -> tuple[int, str]:
+    """Run one of those programs (no shell, no window, no input) and give its exit code and what it printed.
+    OSError and subprocess.TimeoutExpired are the caller's to catch."""
+    done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=ACL_TIMEOUT,
+                          creationflags=_CREATE_NO_WINDOW, env=child_env(nested=False))
+    try:
+        codecs.lookup("oem")  # the console's code page, which these programs print in (Windows only)
+        codec = "oem"
+    except LookupError:
+        codec = "utf-8"
+    return done.returncode, done.stdout.decode(codec, errors="replace")
+
+
+def _why(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"no answer in {ACL_TIMEOUT:.0f} s"
+    if isinstance(exc, OSError):
+        return exc.strerror or type(exc).__name__
+    return type(exc).__name__
+
+
+def parse_whoami(text: str) -> tuple[str, str] | None:
+    """(account, SID) from `whoami /user /fo csv /nh`: "desktop-abc\\me","S-1-5-21-1-2-3-1001". None when
+    it isn't that."""
+    for row in csv.reader(text.splitlines()):
+        if len(row) == 2 and row[1].startswith("S-1-"):
+            return row[0], row[1]
+    return None
+
+
+def user_sid() -> tuple[str, str] | None:
+    """The signed-in user's (account, SID). whoami is asked once per run; None when it couldn't say."""
+    global _USER
+    if _USER is None:
+        try:
+            code, out = _run_tool([_system_tool("whoami.exe"), "/user", "/fo", "csv", "/nh"])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        _USER = parse_whoami(out) if code == 0 else None
+    return _USER
+
+
+def _grant(sid: str, folder: bool) -> str:
+    return f"*{sid}:(OI)(CI)F" if folder else f"*{sid}:F"
+
+
+def owner_only_argv(path: Path, sid: str, folder: bool = False) -> list[str]:
+    """The icacls call that takes away what path inherits and leaves access to the account with this SID
+    only (a folder: and to what's made in it)."""
+    return [_system_tool("icacls.exe"), str(path), "/inheritance:r", "/grant:r", _grant(sid, folder)]
+
+
+def secure_owner_only(path: Path, folder: bool = False) -> bool:
+    """Limit path to the signed-in user's account, on Windows, where a file's mode means nothing (a folder:
+    and, through inheritance, what's made in it afterwards). True when that's done, and off Windows.
+    Never raises, so the keys it guards are saved either way: it logs why (never a key) and returns False,
+    and Health reports it."""
+    if sys.platform != "win32":
+        return True
+    try:
+        who = user_sid()
+        if who is None:
+            why = "Ixel couldn't tell which Windows account this is"
+        else:
+            code, _ = _run_tool(owner_only_argv(path, who[1], folder))
+            why = "" if code == 0 else f"icacls exited with {code}"
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        why = _why(exc)
+    if why:
+        logger.warning("Couldn't limit %s to your account (%s)", path, why)
+    return not why
+
+
+def parse_icacls(text: str, path: Path) -> list[tuple[str, str]] | None:
+    """The (who, rights) entries in `icacls <path>`'s output, e.g. ("NT AUTHORITY\\SYSTEM", "(I)(F)"), or
+    None when it isn't an answer about path. The first line is path as it was given and then the first
+    entry, each later entry has a line of its own, and a blank line ends them (a summary in the person's
+    language follows)."""
+    lines: list[str] = []
+    for raw in text.split("\n"):
+        line = raw.rstrip("\r")
+        if not line.strip():
+            break
+        lines.append(line)
+    given = str(path)
+    if not lines or lines[0][:len(given)].lower() != given.lower() or lines[0][len(given):len(given) + 1] != " ":
+        return None
+    lines[0] = lines[0][len(given):]
+    entries = []
+    for line in lines:
+        who, found, rights = line.strip().partition(":(")
+        if found and who:
+            entries.append((who, "(" + rights))
+    return entries or None
+
+
+def acl_problems(entries: list[tuple[str, str]], account: str, sid: str) -> tuple[bool, list[str]]:
+    """What's wrong with an access list for the user (account, sid): whether any entry is inherited, and who
+    besides the user has an entry of their own that lets them in. Mandatory labels (a low-integrity folder's)
+    and denials let no one in, so they don't count."""
+    mine = {account.lower(), sid.lower(), f"*{sid}".lower()}
+    inherited, others = False, []
+    for who, rights in entries:
+        if "(DENY)" in rights or any(flag in rights for flag in ("(NW)", "(NR)", "(NX)")):
+            continue
+        if "(I)" in rights:
+            inherited = True
+        elif who.lower() not in mine and who not in others:
+            others.append(who)
+    return inherited, others
+
+
+def read_acl(path: Path) -> tuple[list[tuple[str, str]] | None, str]:
+    """path's access list as parse_icacls gives it, and why it's None when icacls couldn't be asked."""
+    try:
+        code, out = _run_tool([_system_tool("icacls.exe"), str(path)])
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return None, _why(exc)
+    if code != 0:
+        return None, "icacls failed"
+    entries = parse_icacls(out, path)
+    return entries, "" if entries else "icacls gave an answer Ixel doesn't understand"
+
+
+def owner_only_fix(path: Path, sid: str, folder: bool, extras: list[str]) -> str:
+    """The line to paste in cmd or PowerShell that does what secure_owner_only does, and takes the extras
+    (acl_problems') off the list. The quotes matter: PowerShell reads bare parentheses as code."""
+    line = f'icacls "{path}" /inheritance:r /grant:r "{_grant(sid, folder)}"'
+    for name in extras:
+        who = f"*{name}" if name.upper().startswith("S-1-") else name
+        line += f' /remove:g "{who}"'
+    return line
 
 
 # ── The keychain ──────────────────────────────────────────────────────────────
@@ -588,7 +742,12 @@ def _write_keys(token: bytes, unreadable: bool, opened: list[Path]) -> None:
             target = _free_aside()
         _replace(_KEYS_FILE, target)
         logger.warning("%s couldn't be opened with the keychain's key; kept as %s", _KEYS_FILE.name, aside.name)
+    # Windows: the folder first, so the temp file starts out owner-only (it inherits from the folder). If an
+    # ACL can't be set, the keys are saved anyway and Health says so
+    _KEYS_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    secure_owner_only(_KEYS_FILE.parent, folder=True)
     write_private_file(_KEYS_FILE, token)
+    secure_owner_only(_KEYS_FILE)
     # The keys are saved now: a file Windows won't let go of yet is only left a little longer
     for path in opened:
         with suppress(OSError):
