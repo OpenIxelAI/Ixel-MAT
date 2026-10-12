@@ -706,71 +706,105 @@ def _new_problems(settings):
 
 # ── Add-ons ───────────────────────────────────────────────────────────────────
 
-def addons_list(settings) -> dict:
-    """Each add-on Ixel knows, and whether it's on, installed and pinned (see addons.py)."""
+# The [addons] key the old code wrote in config.toml. It no longer switches anything: on/off and approval live
+# in ~/.ixel/addons/state.json, which only set_addon writes. set_addon takes the old line out when it sees one.
+LEGACY_SETTINGS = {"diagram-design": "diagram_design"}
+
+
+def _legacy_section(config: dict) -> dict:
+    """config.toml's [addons] table, or {} when there's none (or the file couldn't be read)."""
+    if config.get("_error"):
+        return {}
+    section = config.get("addons")
+    return section if isinstance(section, dict) else {}
+
+
+def card_row(card, config: dict) -> dict:
+    """One add-on card as the page shows it (see docs/addon-cards.md)."""
     from ixel_mat import addons
-    return {"addons": addons.status(settings.config)}
+    legacy_key = LEGACY_SETTINGS.get(card.id)
+    was_on = legacy_key is not None and _legacy_section(config).get(legacy_key) is True
+    return {**card.to_dict(),
+            "written_by_agent": not card.builtin,
+            "version": card.source.commit[:12],
+            "path": str(card.files_dir) if card.installed else "",
+            "was_on_before": was_on and not (card.on and card.approved),
+            "plain": addons.describe_permissions(card)}
+
+
+def addons_list(settings) -> dict:
+    """Each add-on card Ixel has, built-in and agent-written, and the cards it couldn't read."""
+    from ixel_mat import addons
+    return {"addons": [card_row(c, settings.config) for c in addons.all_cards()],
+            "problems": addons.card_problems()}
 
 
 def set_addon(settings, body: Any) -> dict:
-    """Switch an add-on on (download and unpack its pinned release, then [addons] <setting> = true) or off (the
-    key taken out, then its files removed)."""
+    """Switch an add-on on (the card approved as shown, its pinned files downloaded and checked) or off (its
+    files removed); either way an old [addons] line in config.toml is taken out."""
     from ixel_mat import addons
     if not isinstance(body, dict):
         raise SettingsError("Expected a JSON object.")
-    name, on = body.get("name"), body.get("on")
-    if not isinstance(name, str) or name not in addons.ADDONS:
+    card_id, on = body.get("id"), body.get("on")
+    card = addons.card_by_id(card_id) if isinstance(card_id, str) else None
+    if card is None:
         raise SettingsError("That isn't an add-on Ixel has.")
-    addon = addons.ADDONS[name]
     if not isinstance(on, bool):
-        raise SettingsError(f"{addon.label} must be on or off.")
-    if settings.config.get("_error"):
-        raise SettingsError("There's no settings file this page can change. Run ixel setup first.", 409)
+        raise SettingsError(f"{card.name} must be on or off.")
+    legacy_key = LEGACY_SETTINGS.get(card.id)
+    section = _legacy_section(settings.config)
+    has_legacy = legacy_key is not None and legacy_key in section
     path = _path(settings)
+    tidy = has_legacy and path is not None
     version = body.get("version")
-    if not isinstance(version, str) or (not version and path is not None):
-        raise SettingsError("The page didn't say which version of the file it read. Here it is again; make the "
-                            "change once more.", 409)
     # Before downloading anything: a page that read an older file is told now, not after the download
-    if path is not None and edit.file_version(path) != version:
-        raise SettingsError("The settings file changed since this page read it. Here it is again; make the "
-                            "change once more.", 409)
-    section = settings.config.get("addons") if isinstance(settings.config.get("addons"), dict) else {}
-    after = {k: v for k, v in section.items() if k != addon.setting}
+    if tidy:
+        if not isinstance(version, str) or not version:
+            raise SettingsError("The page didn't say which version of the file it read. Here it is again; make "
+                                "the change once more.", 409)
+        if edit.file_version(path) != version:
+            raise SettingsError("The settings file changed since this page read it. Here it is again; make the "
+                                "change once more.", 409)
     if on:
+        shown = body.get("card_sha256")
+        if not isinstance(shown, str) or not shown:
+            raise SettingsError(f"Turning on {card.name} needs your approval first. Turn its switch on to see what "
+                                "it may do, then approve it.", 409)
+        # The approval is for the card the dialog showed: any edit since changes its sha256
+        if shown != card.card_sha256:
+            raise SettingsError(f"{card.name}'s card changed since you looked at it. Here it is again: look it over "
+                                "and approve it once more.", 409)
         try:
-            addons.install(addon)
+            addons.ensure_installed(card)
         except addons.AddonError as exc:
             raise SettingsError(str(exc), exc.status) from None
-        after[addon.setting] = True
-    if on or path is not None:
-        value = True if on else edit.REMOVE
-
-        def change_text(text: str) -> str:
-            return edit.set_values(text, ("addons",), {addon.setting: value})
-        made = path is None
-        if made:
-            path, version = _new_file(version)
-        try:
-            edit.change_file(path, change_text, version, backup=not (made or _holds_secrets(settings.config)),
-                             check=_new_problems(settings))
-        except edit.Changed as exc:
-            raise SettingsError(f"{exc} Here it is again; make the change once more.", 409) from None
-        except edit.EditError as exc:
-            raise SettingsError(f"Ixel didn't change the file: {exc}. Change it by hand in {path}.", 422) from None
-        finally:
-            if made and path.read_text(encoding="utf-8") == NEW_FILE:
-                path.unlink()  # the change didn't go in: no empty file left behind
-    if on:
-        said = f"{addon.label} is on. Press Diagram in Ask, or start a question with /diagram."
+        addons.approve_and_switch_on(card)
+        said = f"{card.name} is on."
+        if card.id == "diagram-design":
+            said += " Press Diagram in Ask, or start a question with /diagram."
+        elif card.use.trigger:
+            said += f" Start a question with {card.use.trigger} to use it."
     else:
+        addons.switch_off(card.id)
         try:
-            addons.remove(addon)
+            addons.remove(card)  # an agent card's addon.toml stays
         except OSError as exc:
-            raise SettingsError(f"{addon.label} is off, but Ixel couldn't remove its files: "
-                                f"{exc.strerror or exc}. Delete {addons.folder(addon)} by hand.", 500) from None
-        said = f"{addon.label} is off and its files are removed."
-    return {"message": said, "addons": addons.status({**settings.config, "addons": after})}
+            raise SettingsError(f"{card.name} is off, but Ixel couldn't remove its files: "
+                                f"{exc.strerror or exc}. Delete {card.files_dir} by hand.", 500) from None
+        said = f"{card.name} is off and its files are removed."
+    config = settings.config
+    if tidy:
+        try:  # the old line, and [addons] with it when nothing else is in it
+            edit.change_file(path, lambda text: edit.set_values(text, ("addons",), {legacy_key: edit.REMOVE},
+                                                                drop_empty=True),
+                             version, backup=not _holds_secrets(settings.config), check=_new_problems(settings))
+        except (edit.EditError, SettingsError) as exc:  # edit.Changed is an EditError
+            said += (f" Ixel couldn't take the old {legacy_key} line out of {path} ({exc}); it does nothing now, "
+                     "so you can delete it by hand.")
+        else:
+            config = {**config, "addons": {k: v for k, v in section.items() if k != legacy_key}}
+    return {"message": said, "addons": [card_row(c, config) for c in addons.all_cards()],
+            "problems": addons.card_problems()}
 
 
 # ── Keys ──────────────────────────────────────────────────────────────────────

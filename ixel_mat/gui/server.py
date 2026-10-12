@@ -461,6 +461,15 @@ class GuiServer:
         saver_configs = settings.saver_configs()
         verifier = settings.verifier
         triage = settings.active_triage
+        diagram = addons.diagram_card()
+        diagram_models = []
+        if diagram is not None:
+            from ixel_mat.ask import is_ready
+            choices = addons.diagram_choices([cfg for cfg in settings.panel_configs().values() if is_ready(cfg)],
+                                             settings.pricing)
+            default = addons.default_choice(choices)
+            diagram_models = [{**c.to_dict(), "default": default is not None and c.id == default.id}
+                              for c in choices]
         return web.json_response(_clean({
             "version": __version__,
             "agents": agents[:MAX_PANEL],
@@ -483,7 +492,9 @@ class GuiServer:
             },
             "sound": _sound_now(settings.config),
             # Ask offers its Diagram button while Diagram Design is on
-            "addons": {"diagram": addons.is_on(settings.config, addons.DIAGRAM_DESIGN)},
+            "addons": {"diagram": diagram is not None},
+            # The models Diagram can use, with the one it picks by itself marked default
+            "diagram_models": diagram_models,
             "warnings": settings.warnings,
         }))
 
@@ -1289,41 +1300,52 @@ class GuiServer:
     async def _diagram(self, request: web.Request) -> web.StreamResponse:
         """Make a diagram; streams NDJSON: start, model, check, retry, then final (with the id it's shown under)
         or error. Closing the page cancels the model call."""
+        import dataclasses
         from ixel_mat.ask import is_ready
         body = await self._handoff_body(request)
         if isinstance(body, web.Response):
             return body
-        question, wanted = body.get("question"), body.get("agent")
+        question, wanted, model = body.get("question"), body.get("agent"), body.get("model")
         if not isinstance(question, str) or not question.strip():
             return _json_error(400, "Say what to draw.")
         if len(question) > MAX_QUESTION_CHARS:
             return _json_error(400, f"The question is longer than {MAX_QUESTION_CHARS:,} characters.")
         if wanted is not None and not isinstance(wanted, str):
             return _json_error(400, "agent must be a model's name.")
+        if model is not None and not isinstance(model, str):
+            return _json_error(400, "model must be a model's name.")
         settings = await asyncio.to_thread(self._load_settings)
-        if not await asyncio.to_thread(addons.is_on, settings.config, addons.DIAGRAM_DESIGN):
+        card = await asyncio.to_thread(addons.diagram_card)
+        if card is None:
             return web.json_response({"error": "Diagram Design is off. Turn it on in Settings, under Add-ons.",
                                       "code": "addon_off"}, status=409)
         ready = [cfg for cfg in settings.panel_configs().values() if is_ready(cfg)]
-        if wanted:
-            chosen = next((cfg for cfg in ready if cfg.name == wanted), None)
-            if chosen is None:
-                return _json_error(409, f"{wanted} isn't a model on your panel that's ready to ask. Pick another.")
-        elif ready:
-            chosen = ready[0]
-        else:
+        choices = addons.diagram_choices(ready, settings.pricing)
+        if not choices:
             return _json_error(409, "None of the models on your panel is ready to ask. Add one in Settings, or "
                                     "run ixel setup.")
+        if wanted:
+            choice = addons.find_choice(choices, wanted, model)
+            if choice is None:
+                if not any(c.agent == wanted for c in choices):
+                    return _json_error(409, f"{wanted} isn't a model on your panel that's ready to ask. "
+                                            "Pick another.")
+                return _json_error(409, f"{wanted} can't run {model} for diagrams. Pick another.")
+        else:
+            choice = addons.default_choice(choices)
+        chosen = next(cfg for cfg in ready if cfg.name == choice.agent)
+        if choice.model:
+            chosen = dataclasses.replace(chosen, model=choice.model)
         if self._diagram_lock.locked():
             return _json_error(409, "A diagram is already being made.")
         async with self._diagram_lock:
             response = web.StreamResponse(headers={"Content-Type": "application/x-ndjson; charset=utf-8"})
             await response.prepare(request)
-            await self._stream_diagram(request, response, chosen, question.strip())
+            await self._stream_diagram(request, response, chosen, question.strip(), card.files_dir)
             return response
 
     async def _stream_diagram(self, request: web.Request, response: web.StreamResponse, cfg,
-                              question: str) -> None:
+                              question: str, folder: Path) -> None:
         from ixel_mat.ask import AskError
         make_task: asyncio.Task | None = None
         watchdog: asyncio.Task | None = None
@@ -1361,8 +1383,8 @@ class GuiServer:
         watchdog = asyncio.create_task(watch_connection())
         self._reviews.add(page_gone)  # stopped with Ixel, as a review is
         try:
-            make_task = asyncio.create_task(addons.make_diagram(cfg, question, addons.folder(addons.DIAGRAM_DESIGN),
-                                                                on_event=on_event))
+            # No timeout here: make_diagram gives a model on your own computer longer
+            make_task = asyncio.create_task(addons.make_diagram(cfg, question, folder, on_event=on_event))
             try:
                 result = await make_task
             except asyncio.CancelledError:
