@@ -772,7 +772,8 @@ STATIC = Path(gui_server.__file__).parent / "static"
 def test_the_page_keeps_no_question_or_answer_in_browser_storage():
     """Edge and Chrome may write a page's storage into a profile folder (in `ixel gui`, your own browser's): only
     the session key, this tab's id and the Board's folders may go there. Conversations live in Ixel's memory."""
-    allowed = {"TOKEN_KEY", "TAB_KEY", "OLD_STORE_KEY", "RECENT_KEY", "HANDOFF_PROJECT_KEY"}
+    allowed = {"TOKEN_KEY", "TAB_KEY", "OLD_STORE_KEY", "RECENT_KEY", "HANDOFF_PROJECT_KEY",
+               "DIAGRAM_MODEL_KEY"}  # which model draws diagrams: a choice, not a question or answer
     for script in sorted(STATIC.glob("*.js")):
         code = script.read_text(encoding="utf-8")
         for api in ("indexedDB", "caches.", "document.cookie", "serviceWorker", "openDatabase"):
