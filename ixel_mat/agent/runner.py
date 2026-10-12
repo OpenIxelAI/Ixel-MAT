@@ -10,6 +10,12 @@ The page gets the same run with long results cut to 4 KB; the model and the save
 Pictures from view_file travel with the next model call only, and only to a model that sees pictures; the
 step's result tells any other model that it can't look at them. The files the person attached to the run are
 listed in its prompt. A follow-up's prompt also holds the earlier run's goal, answer and last steps.
+
+Adding a tool from a GitHub link (ixel_mat/agent/cards.py does the work): fetch_repo downloads a repo into
+the agent's scratch folder after approval, tree_hash works out the hash a card's [source] needs and only
+what this run fetched and hashed can go in a card, and write_addon_card shows the whole checked card and
+writes ~/.ixel/addons/<id>/addon.toml after approval. A command with cwd scratch:NAME always asks. The run
+never turns a card on: the person does that in Settings › Add-ons.
 """
 from __future__ import annotations
 
@@ -24,6 +30,7 @@ from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 
+from ixel_mat.agent import cards
 from ixel_mat.agent.protocol import Action, NEEDS_APPROVAL, ProtocolError, build_prompt, parse_reply
 from ixel_mat.agent.sandbox import can_sandbox, run_command
 from ixel_mat.agent.store import AgentStore
@@ -49,6 +56,24 @@ _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
 def clip_result(text: str) -> str:
     """A tool result for the page, at most 4 KB of UTF-8 without splitting a character."""
     return text.encode("utf-8")[:MAX_PAGE_RESULT_BYTES].decode("utf-8", errors="ignore")
+
+
+def _in_workspace(cwd: object) -> bool:
+    """Whether run_command's cwd means the workspace: none given, or '.'. Anything else has to be a fetched
+    copy, scratch:NAME."""
+    return cwd is None or cwd == "."
+
+
+def _fetch_note(args: dict) -> str:
+    """What the approval card says a fetch_repo will do. ValueError for a link or commit that isn't allowed,
+    so the step fails without asking."""
+    owner, repo = cards.parse_repo_url(args["url"])
+    ref = cards.check_ref(args.get("commit"))
+    limit = cards.MAX_REPO_BYTES
+    size = f"{limit // (1024 * 1024)} MB" if limit >= 1024 * 1024 else f"{limit} bytes"
+    return (f"Download {cards.CODELOAD}/{owner}/{repo}/tar.gz/{ref} into the agent's scratch folder as "
+            f"scratch:{cards.scratch_name(owner, repo)} (regular files only, at most {size} and "
+            f"{cards.MAX_REPO_FILES:,} files). Nothing is run.")
 
 
 async def _ask_model(cfg: AgentConfig, prompt: str, pictures: tuple = (),
@@ -105,11 +130,15 @@ class AgentRun:
     run_id lets the app name the run before it starts, so the files the person attaches can be kept under
     that id (uploads/<run id>/); without it the run gets a fresh one. effort is the thinking level sent with
     every model call ("" sends none). follows is the earlier run a follow-up continues, {"id", "goal",
-    "answer", "steps"}: its prompt starts with them, and the run records the earlier one's id."""
+    "answer", "steps"}: its prompt starts with them, and the run records the earlier one's id.
+
+    addons_dir is where write_addon_card puts cards (None: ~/.ixel/addons) and builtin_dir the folder of
+    Ixel's own add-ons whose ids a card can't take (None: ixel_mat/addons, if it's there); tests give both."""
 
     def __init__(self, cfg: AgentConfig, workspace: Path | str | Workspace, goal: str, store: AgentStore,
                  max_steps: int = 25, ask: Ask | None = None, run_id: str | None = None, computer: bool = False,
-                 effort: str = "", follows: dict | None = None):
+                 effort: str = "", follows: dict | None = None, addons_dir: Path | str | None = None,
+                 builtin_dir: Path | str | None = None):
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
             raise ValueError("max_steps must be a positive whole number")
         if not isinstance(goal, str) or not goal.strip():
@@ -123,13 +152,19 @@ class AgentRun:
         if follows is not None and (not isinstance(follows, dict) or not isinstance(follows.get("id"), str)
                                     or not _RUN_ID.fullmatch(follows["id"])):
             raise ValueError("follows must be the earlier run, with its id")
+        for folder in (addons_dir, builtin_dir):
+            if folder is not None and not isinstance(folder, (str, Path)):
+                raise ValueError("addons_dir and builtin_dir must be folders")
         self.cfg = cfg
         self.computer = computer
         self.effort = effort
         self.follows = deepcopy(follows)
+        self.addons_dir = Path(addons_dir) if addons_dir is not None else None
+        self.builtin_dir = Path(builtin_dir) if builtin_dir is not None else None
         if isinstance(workspace, Workspace):
             self.workspace = (workspace if workspace.computer == computer else
-                              Workspace(workspace.root, uploads=workspace.uploads, computer=computer))
+                              Workspace(workspace.root, uploads=workspace.uploads, computer=computer,
+                                        scratch=workspace.scratch))
         else:
             self.workspace = Workspace(Path(workspace), computer=computer)
         self.goal = goal
@@ -138,6 +173,8 @@ class AgentRun:
         self.id = run_id if run_id is not None else secrets.token_hex(16)
         if self.workspace.uploads is None:
             self.workspace.uploads = store.uploads_dir(self.id)
+        if self.workspace.scratch is None:
+            self.workspace.scratch = store.scratch_dir()  # not made here: fetch_repo makes it, private
         self.started = time.time()
         self.status = "running"
         self.answer = ""
@@ -156,6 +193,9 @@ class AgentRun:
         self._command_cancel = threading.Event()
         self._pictures: list = []  # from view_file: they go with the next model call, and then they're gone
         self._saw = 0              # how many pictures the last view_file kept, for its step
+        # What this run fetched and hashed, by scratch name, in the shape cards.check_source takes:
+        # {"repo_url", "commit", "hashes": {subdir: (tree_sha256, files)}}. A card's [source] must match it.
+        self._fetched: dict[str, dict] = {}
         self._save()
 
     async def _default_ask(self, prompt: str, pictures: tuple | list = (),
@@ -296,6 +336,8 @@ class AgentRun:
             return
         prepared = None
         opened = None
+        card = None   # a checked add-on card, waiting to be written
+        note = ""     # what the approval card says when the action has no diff
         self._saw = 0
         try:
             needs_approval = action.action in NEEDS_APPROVAL
@@ -304,14 +346,27 @@ class AgentRun:
             elif action.action == "edit_file":
                 prepared = await asyncio.to_thread(self.workspace.prepare_edit, **action.args)
             elif action.action == "run_command":
-                needs_approval = self.computer or not self.store.is_allowed(self.workspace.root, action.args["argv"])
+                cwd = action.args.get("cwd")
+                in_copy = not _in_workspace(cwd)
+                if in_copy:  # a fetched repo: it always asks, and the allowlist isn't looked at
+                    _, name = self.workspace.scratch_cwd(cwd)
+                    note = (f"Run in scratch:{name}, the copy of a GitHub repo fetched into Ixel's scratch "
+                            "folder, not in the workspace.")
+                needs_approval = in_copy or self.computer or not self.store.is_allowed(
+                    self.workspace.root, action.args["argv"])
+            elif action.action == "fetch_repo":
+                note = _fetch_note(action.args)  # a bad link or commit fails here, without asking
+            elif action.action == "write_addon_card":
+                card = await asyncio.to_thread(cards.prepare_card, action.args["id"], action.args["card"],
+                                               self._fetched, self.addons_dir, self.builtin_dir)
+                note = card.summary  # the whole card
             elif action.action == "open":
                 opened = await asyncio.to_thread(self.workspace.open_argv, **action.args)
             if needs_approval:
                 self._decision = None
                 self._decision_event.clear()
                 self.pending = {"n": step["n"], "action": action.action, "args": deepcopy(action.args),
-                                "diff": prepared.diff if prepared is not None else "",
+                                "diff": prepared.diff if prepared is not None else note,
                                 "argv": list(action.args["argv"]) if action.action == "run_command" else [],
                                 "sandboxed": (not self.computer and can_sandbox()
                                               if action.action == "run_command" else False)}
@@ -330,7 +385,7 @@ class AgentRun:
                     self.steps.append(step)
                     self._save()
                     return
-            ok, result = await self._execute(action, prepared, opened)
+            ok, result = await self._execute(action, prepared, opened, card)
             step.update(ok=ok, result=mask_secrets(result, [self.cfg.token]))
         except (WorkspaceError, ValueError, KeyError, OSError) as exc:
             step.update(ok=False, result=mask_secrets(str(exc), [self.cfg.token]))
@@ -341,12 +396,27 @@ class AgentRun:
             self._save()
 
     async def _execute(self, action: Action, prepared: PendingWrite | None,
-                       opened: list[str] | None = None) -> tuple[bool, str]:
+                       opened: list[str] | None = None, card: cards.PendingCard | None = None) -> tuple[bool, str]:
         if prepared is not None:
             return True, await asyncio.to_thread(self.workspace.apply, prepared)
+        if action.action == "fetch_repo":
+            return True, await self._fetch(action.args)
+        if action.action == "tree_hash":
+            return True, await self._tree_hash(**action.args)
+        if action.action == "write_addon_card":
+            if card is None:
+                raise ValueError("the card wasn't checked; propose write_addon_card again")
+            return True, await asyncio.to_thread(cards.write_card, card)
         if action.action in ("run_command", "open"):
+            where = ""
             if action.action == "run_command":
-                result = await asyncio.to_thread(run_command, action.args["argv"], self.workspace.root,
+                folder = self.workspace.root
+                if not _in_workspace(action.args.get("cwd")):
+                    # Looked at again: the folder is the copy as it is now, and sandboxed on a Mac unless
+                    # Computer access is on (which is also the only time it has the network)
+                    folder, name = self.workspace.scratch_cwd(action.args["cwd"])
+                    where = f"; ran in scratch:{name}"
+                result = await asyncio.to_thread(run_command, action.args["argv"], folder,
                                                  cancel=self._command_cancel, computer=self.computer)
             else:
                 result = await asyncio.to_thread(self.workspace.open, **action.args, expected_argv=opened,
@@ -354,7 +424,8 @@ class AgentRun:
             status = "stopped" if result.cancelled else ("timed out" if result.timed_out
                                                           else f"exit code {result.returncode}")
             sandbox = "sandboxed" if result.sandboxed else "ran without a sandbox"
-            return result.returncode == 0 and not result.cancelled, f"{status}; {sandbox}\n{result.output}"
+            return (result.returncode == 0 and not result.cancelled,
+                    f"{status}; {sandbox}{where}\n{result.output}")
         if action.action in ("view_file", "screenshot"):
             if action.action == "screenshot" and not self.cfg.sees_pictures:
                 return False, f"{self.cfg.label} can't see pictures, so screenshot shows nothing."
@@ -364,6 +435,48 @@ class AgentRun:
         else:
             tool = getattr(self.workspace, action.action)
         return True, await asyncio.to_thread(tool, **action.args)
+
+    async def _fetch(self, args: dict) -> str:
+        """An approved fetch_repo. It runs in this task, so Stop cancels it, and cards.fetch_repo removes its
+        temp files then. What came of it is remembered for this run: write_addon_card's [source] has to match."""
+        found = await cards.fetch_repo(args["url"], args.get("commit"), self.store.scratch_dir())
+        self._fetched[found.name] = {"repo_url": found.repo_url, "commit": found.commit,
+                                     "hashes": {"": (found.tree_sha256, found.files)}}
+        return found.text()
+
+    async def _tree_hash(self, repo: str, subdir: str = "") -> str:
+        """tree_hash: the card's tree_sha256 and files for a fetched copy, or a folder in it, worked out here.
+
+        A hash is only remembered for a repo this run fetched, and only while the copy is still the files
+        that were downloaded (a command run in it may have changed them): then it'd no longer be what the
+        commit holds, and a card couldn't say it was."""
+        if not cards.is_scratch_name(repo):
+            raise ValueError(f"{repo!r} isn't a fetched repo's name; use the OWNER-REPO name fetch_repo gave")
+        folder = self.store.scratch_dir() / repo
+        if folder.is_symlink() or not folder.is_dir():
+            raise ValueError(f"there's no fetched repo {repo!r}; use fetch_repo first")
+        entry = self._fetched.get(repo)
+        fetched_hash = entry["hashes"][""][0] if entry is not None else None
+
+        def work() -> tuple[str, int]:
+            whole = cards.tree_hash(folder, "")
+            if fetched_hash is not None and whole[0] != fetched_hash:
+                raise ValueError(f"scratch:{repo} isn't the files fetch_repo downloaded any more (a command "
+                                 "changed it?), so its hash wouldn't match the commit; use fetch_repo again "
+                                 "for a fresh copy, and tree_hash before you run anything in it")
+            return whole if not subdir else cards.tree_hash(folder, subdir)
+
+        tree, files = await asyncio.to_thread(work)
+        where = f"scratch:{repo}/{subdir}" if subdir else f"scratch:{repo} (the whole repo)"
+        lines = [f"tree_hash of {where}:", f'tree_sha256 = "{tree}"', f"files = {files}"]
+        if entry is None:
+            lines.append("This run hasn't fetched this repo, so a card can't use this hash; use fetch_repo "
+                         "on it first.")
+        else:
+            entry["hashes"][subdir] = (tree, files)
+            lines.append(f'Copy both into the card\'s [source], with repo = "{entry["repo_url"]}", commit = '
+                         f'"{entry["commit"]}"' + (f', subdir = "{subdir}"' if subdir else "") + ".")
+        return "\n".join(lines)
 
     async def _look(self, action: Action) -> str:
         """Run view_file or an approved screenshot. Its pictures wait for the next model call, at most
@@ -401,6 +514,9 @@ class AgentRun:
                 raise ValueError("Computer access requires approval every time; Always allow isn't available.")
             if not approve or self.pending["action"] != "run_command":
                 raise ValueError("Always allow needs an approved command.")
+            if not _in_workspace(self.pending["args"].get("cwd")):
+                raise ValueError("A command in a fetched repo asks every time; Always allow isn't available "
+                                 "for it.")
             self.store.allow(self.workspace.root, self.pending["argv"])
         self._approvals.append({"n": self.pending["n"], "action": self.pending["action"],
                                 "args": deepcopy(self.pending["args"]), "approve": approve,

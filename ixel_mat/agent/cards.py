@@ -226,12 +226,10 @@ async def _read_limited(resp: aiohttp.ClientResponse, limit: int) -> bytes:
     return bytes(data)
 
 
-async def resolve_commit(owner: str, repo: str, ref: str | None = None) -> str:
-    """The full commit sha (40 lowercase hex characters) of ref, which is HEAD when it's empty. A full sha is
-    returned as it is, without asking GitHub; a branch, a tag or a short sha is looked up through
-    GET {GITHUB_API}/repos/<owner>/<repo>/commits/<ref>. ValueError when it can't be found."""
-    _check_owner(owner)
-    _check_repo(repo)
+def check_ref(ref: object) -> str:
+    """A commit as the model may name it: a full sha (returned in lower case), a short sha, a branch or a tag
+    (letters, digits and . _ - /, no '..'); HEAD when it's empty or None. ValueError for anything else. No
+    request is made."""
     if ref is not None and not isinstance(ref, str):
         raise ValueError("a commit must be text")
     ref = (ref or "").strip() or "HEAD"
@@ -240,6 +238,18 @@ async def resolve_commit(owner: str, repo: str, ref: str | None = None) -> str:
     if (not _REF.fullmatch(ref) or ".." in ref or ref.startswith("/") or ref.endswith("/") or "//" in ref):
         raise ValueError("a commit is a 40-character sha, a short sha, a branch or a tag "
                          "(letters, digits and . _ - /)")
+    return ref
+
+
+async def resolve_commit(owner: str, repo: str, ref: str | None = None) -> str:
+    """The full commit sha (40 lowercase hex characters) of ref, which is HEAD when it's empty. A full sha is
+    returned as it is, without asking GitHub; a branch, a tag or a short sha is looked up through
+    GET {GITHUB_API}/repos/<owner>/<repo>/commits/<ref>. ValueError when it can't be found."""
+    _check_owner(owner)
+    _check_repo(repo)
+    ref = check_ref(ref)
+    if _FULL_SHA.fullmatch(ref):
+        return ref
     url = f"{GITHUB_API}/repos/{owner}/{repo}/commits/{ref}"
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=API_TIMEOUT)) as session:
