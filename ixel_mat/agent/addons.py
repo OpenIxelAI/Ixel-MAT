@@ -115,7 +115,7 @@ class _Server:
     async def _serve(self) -> None:
         request = None
         try:
-            with open(os.devnull, "w") as errlog:
+            with open(os.devnull, "w", encoding="utf-8") as errlog:
                 async with stdio_client(self.parameters, errlog=errlog) as streams:
                     async with ClientSession(*streams, read_timeout_seconds=self.timeout) as session:
                         await asyncio.wait_for(session.initialize(), self.timeout)
