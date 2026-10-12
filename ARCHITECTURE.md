@@ -280,16 +280,19 @@ never waiting for the keychain or another save; what that leaves undone runs on 
 (`secrets._load_later`), and Health runs its Ixel checks off the loop. `where_keys_are()` says where they
 are for Health, `ixel status`, `ixel setup` and Settings.
 On Windows, where modes mean nothing, `_write_keys` calls `secrets.secure_owner_only` on the config folder
-before writing `keys.enc` and on the file after: `icacls <path> /inheritance:r /grant:r *<SID>:F`
-(`(OI)(CI)F` for the folder), with the SID from `whoami /user /fo csv /nh` (`user_sid`), both run by their
-path under `%SystemRoot%\System32` as argument lists, 10 s each. It never raises: a failure is logged and
-the keys are saved anyway. Health's keys check reads the lists back (`read_acl`, `parse_icacls`,
-`acl_problems`), warns with the one-line `owner_only_fix` when the file or folder inherits or lists another
-account, and on macOS and Linux checks that `keys.enc` isn't readable by group or others. `parse_whoami`,
-`parse_icacls`, `acl_problems` and `owner_only_argv` are pure, so tests cover them on every system. The loader
-validates each field and reports problems as warnings instead of failing. Config in the current folder
-is never read. `config.example.toml` documents every option, and `tests/test_docs.py` keeps it loading
-cleanly and matching the CLI presets.
+before writing `keys.enc` and on the file after. That's two `icacls` calls, since one that fails half-way
+isn't undone: first `icacls <path> /remove:g <SYSTEM, Administrators, OWNER RIGHTS> /grant:r *<SID>:F`
+(`(OI)(CI)F` for the folder, `owner_only_argv`), and only if that exits 0 `icacls <path> /inheritance:r`
+(`no_inheritance_argv`). A failure of the second leaves the account with its own entry, so it's never locked
+out. The SID comes from `whoami /user /fo csv /nh` (`user_sid`); both programs are run by their path
+under `%SystemRoot%\System32` as argument lists, 10 s each. It never raises: a failure is logged, saying
+which call failed, and the keys are saved anyway. Health's keys check reads the lists back (`read_acl`,
+`parse_icacls`, `acl_problems`), warns with the one-line `owner_only_fix` when the file or folder inherits or
+lists another account, and on macOS and Linux checks that `keys.enc` isn't readable by group or others.
+`parse_whoami`, `parse_icacls`, `acl_problems`, `owner_only_argv` and `no_inheritance_argv` are pure, so
+tests cover them on every system. The loader validates each field and reports problems as warnings instead
+of failing. Config in the current folder is never read. `config.example.toml` documents every option, and
+`tests/test_docs.py` keeps it loading cleanly and matching the CLI presets.
 
 ## Tests and CI
 

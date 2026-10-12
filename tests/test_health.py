@@ -468,10 +468,13 @@ def test_on_windows_the_real_access_list_is_owner_only_and_health_sees_it_change
     assert check.state == "warn" and "/remove:g" in check.fix
     extras = secrets.acl_problems(secrets.read_acl(keys)[0], account, sid)[1]
     assert extras and check.fix == secrets.owner_only_fix(keys, sid, False, extras)
-    argv = secrets.owner_only_argv(keys, sid)  # the fix, as an argv: it's never given to a shell
+    argv = secrets.owner_only_argv(keys, sid)  # the fix, as argv lists: they're never given to a shell
     for name in extras:
         argv += ["/remove:g", f"*{name}" if name.upper().startswith("S-1-") else name]
     done = subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+    assert done.returncode == 0, done.stdout
+    done = subprocess.run(secrets.no_inheritance_argv(keys), capture_output=True, stdin=subprocess.DEVNULL,
+                          timeout=30)
     assert done.returncode == 0, done.stdout
     assert health.keys_check().state == "ok"
 
