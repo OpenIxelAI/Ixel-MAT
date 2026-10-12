@@ -18,7 +18,7 @@ the repository is public, so if you don't see it, email us.
 | Your subscription logins | Each CLI's own storage (`~/.claude`, `~/.codex`, `~/.gemini`…). Ixel never reads these |
 | Your files | Anything your user account can read |
 | Your code | Only the diff or files you name for a review (`--diff`, `--file`…) are read, once, and sent to the models on your panel (below) |
-| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`, each with the time it was saved. Each one is deleted once it's 24 hours old, by the next `ixel` command after that (continuing the conversation doesn't keep its earlier questions longer), and all of them at once by `ixel forget` (or Forget in the app's Settings). The terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and so does the browser app: Ixel's own server keeps each tab's conversations so a reload brings them back, never the browser's storage, and they're gone when Ixel stops. `ixel forget` also deletes the app window's browser storage (`ixel app`'s Edge or Chrome profile, and on a Mac Ixel.app's WebKit storage). Gemini CLI, Copilot and OpenCode save every question they're asked in their own folders; Ixel removes what each run saved (below) |
+| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`, each with the time it was saved. Each one is deleted once it's 24 hours old, by the next `ixel` command after that (continuing the conversation doesn't keep its earlier questions longer), and all of them at once by `ixel forget` (or Forget in the app's Settings). The terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and so does the browser app: Ixel's own server keeps each tab's conversations so a reload brings them back, never the browser's storage, and they're gone when Ixel stops. `ixel forget` also deletes the app window's browser storage (`ixel app`'s Edge or Chrome profile, on a Mac Ixel.app's WebKit storage, and on Linux Ixel's own GTK window's). Gemini CLI, Copilot and OpenCode save every question they're asked in their own folders; Ixel removes what each run saved (below) |
 | Your usage and money | Every model call is billed to you |
 
 ## Who we assume might be hostile
@@ -394,9 +394,10 @@ network.
   an earlier Ixel kept in that tab's `sessionStorage` (`ixel-conversations`). Restored text is rendered the
   same way as live text. The browser's storage keeps the Board's recent folders and the last /handoff project
   (`localStorage`), never a question or answer. On Linux, Ixel's own window (GTK with WebKit) keeps that
-  storage, and WebKit's cache, where WebKitGTK puts them for a program named `ixel` (usually
-  `~/.local/share/ixel` and `~/.cache/ixel`). `ixel forget` doesn't delete those: it says where they are, to
-  delete with Ixel closed.
+  storage, and WebKit's cache, in `gtk` in Ixel's own folder (`~/.local/state/ixel-mat/gtk`, or under
+  `$XDG_STATE_HOME`), which `ixel forget` deletes. A window from an earlier Ixel kept them where WebKitGTK
+  puts them for a program named `ixel` (usually `~/.local/share/ixel` and `~/.cache/ixel`), and `ixel forget`
+  says where those are, to delete with Ixel closed.
 - Spell check, writing suggestions and autofill are off in every box you type into (`spellcheck`,
   `writingsuggestions`, `autocomplete`): in Edge, enhanced spell check and text predictions send what's typed
   to Microsoft, and autofill keeps it in the browser profile.
