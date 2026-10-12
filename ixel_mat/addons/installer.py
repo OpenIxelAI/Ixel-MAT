@@ -1,14 +1,14 @@
 """
-Add-ons: other people's skills that Ixel can fetch and use, off until you switch them on.
+Installing an add-on: the files its card pins, fetched from GitHub and unpacked safely.
 
-There is one so far, Diagram Design (Cathryn Lavery's MIT-licensed skill for making a
-diagram as one HTML file, in your brand). Switching it on downloads the GitHub tarball of
-one pinned commit and unpacks only skills/diagram-design/ into ~/.ixel/addons/diagram-design.
-Nothing else in the archive is ever written, and an archive with anything odd in it (an
-absolute path, '..', a link, a device, an oversized file) is refused whole, before a single
-file is written. The extracted files are checked against the pinned tree hash this Ixel
-ships with (the tarball's own bytes aren't stable enough to pin) before they replace what
-was there. Switching it off removes the folder.
+Every add-on is a card (docs/addon-cards.md), and the card holds the pin: a GitHub repo,
+one commit, the folder in it to install, and the tree hash and file count of that folder.
+Switching an add-on on downloads the GitHub tarball of that commit and unpacks only that
+folder into ~/.ixel/addons/<id>/files/. Nothing else in the archive is ever written, and an
+archive with anything odd in it (an absolute path, '..', a link, a device, an oversized
+file) is refused whole, before a single file is written. The extracted files are checked
+against the card's tree hash (the tarball's own bytes aren't stable enough to pin) before
+they replace what was there. Switching it off removes files/.
 """
 from __future__ import annotations
 
@@ -23,50 +23,28 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
-from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
+from typing import TYPE_CHECKING
 
 from ixel_mat.addons import paths
 
-__all__ = ["AddonError", "Addon", "DIAGRAM_DESIGN", "ADDONS", "PINNED_COMMIT", "PINNED_TREE_SHA256",
-           "PINNED_TREE_FILES", "MAX_TARBALL_BYTES", "MAX_FILE_BYTES", "DOWNLOAD_TIMEOUT", "tarball_url", "folder",
-           "installed", "download", "extract", "tree_hash", "install", "remove"]
+if TYPE_CHECKING:
+    from ixel_mat.addons.cards import Card
+
+__all__ = ["AddonError", "MAX_TARBALL_BYTES", "MAX_FILE_BYTES", "DOWNLOAD_TIMEOUT", "tarball_url", "download",
+           "extract", "tree_hash", "installed", "install", "ensure_installed", "remove", "remove_legacy"]
 
 MAX_TARBALL_BYTES = 50 * 1024 * 1024
 MAX_FILE_BYTES = 20 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 120
-# Filled in by a person (the recipe is in the plan): while either is empty install() refuses.
-# The tree hash is tree_hash() of the extracted subdir, not of the tarball bytes
-PINNED_COMMIT = "7a2e22170ee838e859d8142ba825d83f8b6375e6"
-PINNED_TREE_SHA256 = "e4adecc695f6367ce202995133e6e1fe5d18b6e4e142a06bd30926d72bfbb4a1"
-PINNED_TREE_FILES = 279
 
 _CHUNK = 64 * 1024
 # A small gzip can unpack to a great deal: caps on what one archive may hold and write
 _MAX_MEMBERS = 20_000
 _MAX_FILES = 5_000
 _MAX_EXTRACTED_BYTES = 200 * 1024 * 1024
-
-
-@dataclass(frozen=True)
-class Addon:
-    name: str
-    label: str
-    about: str
-    author: str
-    license: str
-    repo: str
-    commit: str
-    tree_sha256: str
-    files: int
-    subdir: str
-    setting: str
-
-
-DIAGRAM_DESIGN = Addon("diagram-design", "Diagram Design", "diagrams as one HTML file, in your brand",
-                       "Cathryn Lavery", "MIT", "cathrynlavery/diagram-design", PINNED_COMMIT, PINNED_TREE_SHA256,
-                       PINNED_TREE_FILES, "skills/diagram-design", "diagram_design")
-ADDONS = {DIAGRAM_DESIGN.name: DIAGRAM_DESIGN}
+# What install() keeps in a card's folder; the rest of a built-in card's folder is the old layout
+_KEEP = ("files", "files.part", "files.old")
 
 
 class AddonError(Exception):
@@ -79,16 +57,21 @@ class AddonError(Exception):
         self.code = code
 
 
-def tarball_url(addon: Addon) -> str:
-    return f"https://codeload.github.com/{addon.repo}/tar.gz/{addon.commit}"
+def tarball_url(card: Card) -> str:
+    owner, repo = urllib.parse.urlsplit(card.source.repo).path.strip("/").split("/")
+    return f"https://codeload.github.com/{owner}/{repo}/tar.gz/{card.source.commit}"
 
 
-def folder(addon: Addon) -> Path:
-    return paths.ADDONS_DIR / addon.name
-
-
-def installed(addon: Addon) -> bool:
-    return (folder(addon) / "SKILL.md").is_file()
+def installed(card: Card) -> bool:
+    """True when the card's files/ is a real folder (not a link, nor reached through a
+    linked card folder) with something in it."""
+    files = card.files_dir
+    if card.dir.is_symlink() or files.is_symlink() or not files.is_dir():
+        return False
+    try:
+        return any(files.iterdir())
+    except OSError:
+        return False
 
 
 def _https(url: str) -> bool:
@@ -199,15 +182,19 @@ def tree_hash(root: Path) -> tuple[int, str]:
 def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_FILE_BYTES,
             expect: tuple[int, str] | None = None) -> int:
     """Unpack <topfolder>/<subdir>/... of a .tar.gz into dest, replacing what was there, and
-    return how many files were written. Every member is checked before anything is written:
-    one unsafe member anywhere refuses the whole archive. Files are copied out one by one
-    (never TarFile.extract/extractall) into a .part folder that then takes dest's place;
-    the archive's own modes are ignored (files 0o644, folders 0o755). With expect, a
-    (file count, tree_hash hex) pair, the .part folder must match it or it is removed and
-    dest is left as it was."""
-    sub = [p for p in subdir.strip("/").split("/") if p and p != "."]
-    if not sub or ".." in sub:
-        raise AddonError(f"{subdir!r} isn't a folder inside the archive.", 400, "unsafe")
+    return how many files were written; subdir '' unpacks everything under the top folder.
+    Every member is checked before anything is written: one unsafe member anywhere refuses
+    the whole archive. Files are copied out one by one (never TarFile.extract/extractall)
+    into a .part folder beside dest that then takes dest's place; the archive's own modes
+    are ignored (files 0o644, folders 0o755). With expect, a (file count, tree_hash hex)
+    pair, the .part folder must match it or it is removed and dest is left as it was."""
+    if subdir == "":
+        sub: list[str] = []
+    else:
+        sub = [p for p in subdir.strip("/").split("/") if p and p != "."]
+        if not sub or ".." in sub:
+            raise AddonError(f"{subdir!r} isn't a folder inside the archive.", 400, "unsafe")
+    what = subdir or "the archive"
     depth = len(sub) + 1
     wanted: list[tuple[tarfile.TarInfo, list[str]]] = []
     files = total = 0
@@ -230,9 +217,11 @@ def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_F
         except (tarfile.TarError, OSError, EOFError, zlib.error) as exc:
             raise AddonError(f"The download isn't a readable .tar.gz: {exc}", 502, "bad_archive") from exc
         if not files:
-            raise AddonError(f"the archive has no {subdir}", 502, "no_subdir")
+            raise AddonError(f"the archive has no {subdir or 'files'}", 502, "no_subdir")
         if files > _MAX_FILES or total > _MAX_EXTRACTED_BYTES:
-            raise AddonError(f"{subdir} in the archive is too big to install.", 502, "too_big")
+            too_big = f"{subdir} in the archive is too big to install." if subdir else \
+                "The archive is too big to install."
+            raise AddonError(too_big, 502, "too_big")
 
         part = dest.with_name(dest.name + ".part")
         dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -263,14 +252,14 @@ def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_F
             if expect is not None:
                 count, digest = tree_hash(part)
                 if count != expect[0] or digest != expect[1].strip().lower():
-                    raise AddonError("The download isn't the release this Ixel was made for (its files don't "
-                                     "match the pinned ones), so nothing was installed.", 409, "tree_mismatch")
+                    raise AddonError("The download isn't the release the card pins (its files don't match "
+                                     "the card's pinned files), so nothing was installed.", 409, "tree_mismatch")
         except AddonError:
             _clear(part)
             raise
         except (tarfile.TarError, OSError, EOFError, zlib.error) as exc:
             _clear(part)
-            raise AddonError(f"Couldn't unpack {subdir}: {exc}", 500, "write") from exc
+            raise AddonError(f"Couldn't unpack {what}: {exc}", 500, "write") from exc
 
     old = dest.with_name(dest.name + ".old")
     _clear(old)
@@ -287,28 +276,100 @@ def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_F
     return files
 
 
-def install(addon: Addon, *, fetch=None) -> Path:
-    """Download the pinned release of addon and unpack its subdir into folder(addon).
-    The unpacked files must match addon's pinned tree hash and file count, or nothing is
-    installed. fetch(url) -> bytes stands in for download in tests."""
-    if not addon.commit or not addon.tree_sha256:
-        raise AddonError(f"This Ixel has no pinned release of {addon.label} yet.", 409, "unpinned")
-    data = (fetch or download)(tarball_url(addon))
-    paths.ADDONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    extract(data, addon.subdir, folder(addon), expect=(addon.files, addon.tree_sha256))
-    return folder(addon)
-
-
-def remove(addon: Addon) -> bool:
-    """Remove addon's folder (a link to one is unlinked, never followed); True if
-    something was there."""
-    path = folder(addon)
-    for leftover in (path.with_name(path.name + ".part"), path.with_name(path.name + ".old")):
-        _clear(leftover)
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-        return True
-    if path.is_dir():
+def _delete(path: Path) -> None:
+    """Remove path whatever it is: a real folder with everything in it, anything else
+    (a link included, never followed) unlinked."""
+    if stat.S_ISDIR(os.lstat(path).st_mode):
         shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def install(card: Card, *, fetch=None) -> Path:
+    """Download the commit the card pins and unpack its subdir into card.files_dir. The
+    unpacked files must match the card's tree hash and file count, or nothing is
+    installed and the old files/ stays as it was. Then the old layout, if any, is cleared.
+    fetch(url) -> bytes stands in for download in tests."""
+    if card.dir.is_symlink():
+        raise AddonError(f"~/.ixel/addons/{card.id} is a link; Ixel won't install through it. Remove the link and "
+                         "switch it on again.", 409, "unsafe")
+    data = (fetch or download)(tarball_url(card))
+    paths.ADDONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fresh = not card.dir.exists()
+    try:
+        extract(data, card.source.subdir, card.files_dir, expect=(card.source.files, card.source.tree_sha256))
+    except AddonError:
+        # A refused install leaves nothing behind, not even the folder it made for files/
+        if fresh:
+            try:
+                card.dir.rmdir()
+            except OSError:
+                pass
+        raise
+    remove_legacy(card)
+    return card.files_dir
+
+
+def ensure_installed(card: Card, *, fetch=None) -> bool:
+    """Make sure the card's pinned files are installed, as the switch is turned on: files
+    already there whose tree hash matches the card are kept, anything else is installed
+    again. True when it downloaded."""
+    if installed(card) and tree_hash(card.files_dir) == (card.source.files, card.source.tree_sha256):
+        remove_legacy(card)
+        return False
+    install(card, fetch=fetch)
+    return True
+
+
+def remove(card: Card) -> bool:
+    """Remove the card's installed files (a link is unlinked, never followed); an agent
+    card's addon.toml always stays. True if something was there."""
+    if card.dir.is_symlink():
+        if not card.builtin:
+            raise AddonError(f"~/.ixel/addons/{card.id} is a link; Ixel won't remove anything through it.",
+                             409, "unsafe")
+        card.dir.unlink()
         return True
-    return False
+    for leftover in (card.dir / "files.part", card.dir / "files.old"):
+        _clear(leftover)
+    removed = False
+    if card.files_dir.is_symlink() or card.files_dir.exists():
+        _delete(card.files_dir)
+        removed = True
+    if card.builtin:
+        removed = remove_legacy(card) or removed
+        try:
+            card.dir.rmdir()  # only when empty
+        except OSError:
+            pass
+    return removed
+
+
+def remove_legacy(card: Card) -> bool:
+    """Clear a built-in card's old install, from before cards: the files unpacked straight
+    into ~/.ixel/addons/<id>/ (SKILL.md at its root), and the <id>.part and <id>.old
+    folders beside it. True if it removed something.
+
+    Such an install isn't carried over: only the Settings approval route writes state.json,
+    so treating it as switched on would be an approval nobody gave. Its switch shows off,
+    and turning it on again downloads into files/ and clears the old files here."""
+    if not card.builtin:
+        return False
+    removed = False
+    root = card.dir
+    if not root.is_symlink() and root.is_dir():
+        try:
+            legacy = stat.S_ISREG(os.lstat(root / "SKILL.md").st_mode)
+        except OSError:
+            legacy = False
+        if legacy:
+            for entry in root.iterdir():
+                if entry.name not in _KEEP:
+                    _delete(entry)
+                    removed = True
+    for name in (f"{card.id}.part", f"{card.id}.old"):
+        sibling = paths.ADDONS_DIR / name
+        if sibling.is_symlink() or sibling.exists():
+            _delete(sibling)
+            removed = True
+    return removed
