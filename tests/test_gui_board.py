@@ -506,3 +506,20 @@ def test_with_the_real_handoff(tmp_path):
     assert any(a["op"] == "approve" for a in task["actions"])
     assert out["stale"][0] == 409 and out["stale"][1]["code"] == "changed"
     assert out["fresh"][0] == 200 and out["fresh"][1]["task"]["run"]["state"] == "approved"
+
+
+def test_the_board_asks_handoff_who_takes_over_at_a_usage_limit(project, fake):
+    fake.answer("fallbacks", {"data": {"fallbacks": ["claude:claude-sonnet-5-5", "codex", 3],
+                                       "words": "claude-sonnet-5-5, then codex"}})
+    [(status, found)] = get(gui_with(fake.command), f"/api/board/fallbacks?project={q(project)}&agent=claude&kind=edit"
+                                                    "&models=claude-opus-5-5")
+    assert status == 200 and found == {"fallbacks": ["claude:claude-sonnet-5-5", "codex"],
+                                       "words": "claude-sonnet-5-5, then codex"}
+    call = fake.calls()[-1]["request"]
+    assert call["op"] == "fallbacks" and call["args"] == {"agent": "claude", "kind": "edit", "models": ["claude-opus-5-5"]}
+    # an answer names no models; a Handoff that can't say gives none, and nothing is shown
+    get(gui_with(fake.command), f"/api/board/fallbacks?project={q(project)}&agent=gemini&kind=answer")
+    assert fake.calls()[-1]["request"]["args"] == {"agent": "gemini", "kind": "answer"}
+    fake.answer("fallbacks", {"error": {"code": "unknown_op", "message": "no such op"}})
+    [(status, found)] = get(gui_with(fake.command), f"/api/board/fallbacks?project={q(project)}&agent=claude")
+    assert status == 200 and found == {"fallbacks": [], "words": ""}

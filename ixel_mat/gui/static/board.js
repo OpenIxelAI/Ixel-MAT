@@ -1268,6 +1268,56 @@ function runPicker(asked, agent, worker) {
   return { row, args, ready, problem };
 }
 
+// Who takes over when a model hits its usage limit: the next best models, from Handoff's benchmark rankings, that
+// this computer has. Shown before the yes, with a switch; approve sends exactly the list shown (Handoff seals it),
+// so a run goes on with the next model, and says so, instead of stopping with nothing done. Nothing is shown by a
+// Handoff that can't say, and nothing is sent then.
+function fallbackRow(asked, t, agent, kindNow, modelsNow) {
+  const state = asked.fallback || (asked.fallback = { on: true, list: [], words: "", key: "", listKey: "" });
+  const box = el("input", { type: "checkbox", id: "needs-fallback", "data-key": "needs-fallback" });
+  box.checked = state.on;
+  box.addEventListener("change", () => { state.on = box.checked; });
+  const words = el("span", {});
+  const row = el("label", { class: "fallback-row", for: "needs-fallback", hidden: true }, box, words);
+  // (the line stays as it is while the list for a new pick comes, so the form doesn't jump under the pointer)
+  const draw = () => {
+    row.hidden = !state.list.length || kindNow() === "image";
+    words.textContent = `If a model hits its usage limit, go on with ${state.words || state.list.join(", then ")}`;
+  };
+  let asking = 0;
+  let pending = Promise.resolve();  // the list for what's picked now, on its way
+  const refresh = () => {
+    const kind = kindNow();
+    const models = modelsNow() || [];
+    const key = `${agent}|${kind}|${models.join(",")}`;
+    if (key === state.key) { draw(); return pending; }
+    state.key = key;
+    if (kind === "image" || !agent) {
+      state.list = [];
+      state.listKey = key;
+      draw();
+      return (pending = Promise.resolve());
+    }
+    const mine = ++asking;
+    const query = new URLSearchParams({ project: board.project, agent, kind, models: models.join(",") });
+    pending = getJSON(`/api/board/fallbacks?${query}`)
+      .then((found) => {
+        if (mine !== asking) return;  // (something newer was picked meanwhile)
+        state.list = Array.isArray(found.fallbacks) ? found.fallbacks.filter((f) => typeof f === "string").slice(0, 5) : [];
+        state.words = typeof found.words === "string" ? found.words : "";
+      })
+      .catch(() => { if (mine === asking) state.list = []; })  // (a run without fallbacks stops at a limit, as before)
+      .finally(() => { if (mine === asking) { state.listKey = key; draw(); } });
+    return pending;
+  };
+  state.key = "";
+  refresh();
+  // Only the list shown for what's picked now: approve seals it
+  const args = () => (state.on && state.list.length && state.listKey === state.key && kindNow() !== "image"
+    ? { fallbacks: [...state.list] } : {});
+  return { row, refresh, args };
+}
+
 // What the person typed or picked lives in `asked.draft`, so a redraw (or a refusal) keeps it
 function needsForm(asked, t) {
   const a = asked.action;
@@ -1312,14 +1362,19 @@ function needsForm(asked, t) {
       show();
       form.append(picker.row);
     }
+    const backup = fallbackRow(asked, t, agent, kindNow, () => (picker && kindNow() === "edit" ? picker.args().models : null));
+    form.addEventListener("change", backup.refresh);
+    form.append(backup.row);
     read = () => {
       const kind = kindNow();
-      return { ...(a.args || {}), kind, ...(picker && kind === "edit" ? picker.args() : {}) };
+      return { ...(a.args || {}), kind, ...(picker && kind === "edit" ? picker.args() : {}), ...backup.args() };
     };
     check = async () => {
-      if (!picker || kindNow() !== "edit") return "";
+      if (!picker || kindNow() !== "edit") { await backup.refresh(); return ""; }
       await picker.ready();
-      return picker.problem();
+      const problem = picker.problem();
+      await backup.refresh();  // (the list for the models as typed now, which approve seals)
+      return problem;
     };
   }
   const cancel = el("button", { type: "button", class: "btn", "data-key": "needs-cancel" }, "Cancel");
