@@ -46,6 +46,9 @@ trigger = "/diagram"             # optional; a word starting with "/"
 output = "html"                  # "text" | "html" | "file" | "image"
 ```
 
+`terms` (optional, top level) is a short plain-words note on licence or terms limits, such as "MIT: keep the
+copyright notice with copies of its files"; the approval dialog shows it.
+
 ### What each kind means
 - **skill**: instructions and templates (an Agent Skill folder with a `SKILL.md`). Ixel or the agent
   reads them; nothing runs except the `commands` the card lists.

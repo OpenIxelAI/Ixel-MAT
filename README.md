@@ -50,9 +50,10 @@ with pipx or uv, see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Terminal:** `ixel`, then type a question. `/review`, `/saver` and the rest are in [the terminal guide](https://ixelai.com/docs/terminal/).
 - **Plugin** for Claude Desktop, Claude Code, Codex and Cursor: `ixel mcp --setup`, then ask your app for "a
   second opinion from the Ixel panel".
-- **Add-ons:** Settings → Add-ons switches on
-  [Diagram Design](https://github.com/cathrynlavery/diagram-design) (MIT, by Cathryn Lavery); then the Diagram
-  toggle in Ask, or `/diagram` before a question, answers with a diagram as one HTML file.
+- **Add-ons:** Settings → Add-ons lists each add-on's card and asks you to approve what it may do before it's
+  switched on. [Diagram Design](https://github.com/cathrynlavery/diagram-design) (MIT, by Cathryn Lavery) comes
+  with Ixel; once it's on, the Diagram toggle in Ask (with a choice of model), or `/diagram` before a question,
+  answers with a diagram as one HTML file.
 
 ## Privacy
 
