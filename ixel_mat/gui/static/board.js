@@ -1278,7 +1278,7 @@ function fallbackRow(asked, t, agent, kindNow, modelsNow) {
   box.checked = state.on;
   box.addEventListener("change", () => { state.on = box.checked; });
   const words = el("span", {});
-  const row = el("label", { class: "fallback-row", for: "needs-fallback" }, box, words);
+  const row = el("label", { class: "fallback-row", for: "needs-fallback", hidden: true }, box, words);
   // (the line stays as it is while the list for a new pick comes, so the form doesn't jump under the pointer)
   const draw = () => {
     row.hidden = !state.list.length || kindNow() === "image";
