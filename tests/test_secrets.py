@@ -738,19 +738,23 @@ def test_whoami_output_that_isnt_an_account_and_a_sid_gives_none(text):
     assert secrets.parse_whoami(text) is None
 
 
+# What every owner-only icacls call takes off: the entries a new folder or file can come with on Windows
+REMOVE_DEFAULTS = ["/remove:g", "*S-1-5-18", "/remove:g", "*S-1-5-32-544", "/remove:g", "*S-1-3-4"]
+
+
 def test_the_icacls_call_for_a_file_is_an_argv_list_with_the_path_as_one_item(monkeypatch, tmp_path):
     monkeypatch.setenv("SystemRoot", str(tmp_path / "Win"))
     path = tmp_path / "Some One" / "keys.enc"
     argv = secrets.owner_only_argv(path, SID)
-    assert isinstance(argv, list) and len(argv) == 5
+    assert isinstance(argv, list) and len(argv) == 11
     assert Path(argv[0]) == tmp_path / "Win" / "System32" / "icacls.exe"
     assert argv[1] == str(path)
-    assert argv[2:] == ["/inheritance:r", "/grant:r", f"*{SID}:F"]
+    assert argv[2:] == ["/inheritance:r", *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:F"]
 
 
 def test_the_icacls_call_for_a_folder_grants_what_is_made_in_it_too(tmp_path):
     argv = secrets.owner_only_argv(tmp_path, SID, folder=True)
-    assert argv[1:] == [str(tmp_path), "/inheritance:r", "/grant:r", f"*{SID}:(OI)(CI)F"]
+    assert argv[1:] == [str(tmp_path), "/inheritance:r", *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:(OI)(CI)F"]
 
 
 def test_the_programs_are_found_in_windows_own_folder_even_without_systemroot(monkeypatch, tmp_path):
@@ -765,13 +769,13 @@ def test_a_file_is_limited_to_the_users_account_on_windows(monkeypatch, tmp_path
     assert secrets.secure_owner_only(path) is True
     assert [Path(argv[0]).name for argv in tools.calls] == ["whoami.exe", "icacls.exe"]
     assert tools.calls[0][1:] == ["/user", "/fo", "csv", "/nh"]
-    assert tools.calls[1][1:] == [str(path), "/inheritance:r", "/grant:r", f"*{SID}:F"]
+    assert tools.calls[1][1:] == [str(path), "/inheritance:r", *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:F"]
 
 
 def test_a_folder_is_limited_with_inheritance_for_what_is_made_in_it(monkeypatch, tmp_path):
     tools = on_windows(monkeypatch)
     assert secrets.secure_owner_only(tmp_path, folder=True) is True
-    assert tools.calls[-1][1:] == [str(tmp_path), "/inheritance:r", "/grant:r", f"*{SID}:(OI)(CI)F"]
+    assert tools.calls[-1][1:] == [str(tmp_path), "/inheritance:r", *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:(OI)(CI)F"]
 
 
 def test_whoami_is_asked_once_and_its_answer_kept(monkeypatch, tmp_path):
