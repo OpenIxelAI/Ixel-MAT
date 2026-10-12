@@ -175,7 +175,7 @@ def tree_hash(root: Path) -> tuple[int, str]:
     """(how many regular files, sha256 hex) of the tree under root: the sha256 of the
     UTF-8 of f"{rel}\\0{sha}\\n" for every regular file, sorted by rel, where rel is its
     path under root with '/' separators and sha its own sha256 hex. Links are never
-    followed, and only regular files count."""
+    followed, and only regular files count; file modes are not part of the hash."""
     entries: list[tuple[str, str]] = []
     for here, _dirs, names in os.walk(root, followlinks=False):
         for each in names:
@@ -195,9 +195,11 @@ def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_F
     return how many files were written; subdir '' unpacks everything under the top folder.
     Every member is checked before anything is written: one unsafe member anywhere refuses
     the whole archive. Files are copied out one by one (never TarFile.extract/extractall)
-    into a .part folder beside dest that then takes dest's place; the archive's own modes
-    are ignored (files 0o644, folders 0o755). With expect, a (file count, tree_hash hex)
-    pair, the .part folder must match it or it is removed and dest is left as it was."""
+    into a .part folder beside dest that then takes dest's place. Only the execute bit of the
+    archive's modes is kept: a file is 0o755 when its member has any execute bit and 0o644
+    otherwise, folders are 0o755, and setuid, setgid and sticky are never kept. With expect,
+    a (file count, tree_hash hex) pair, the .part folder must match it or it is removed and
+    dest is left as it was."""
     if subdir == "":
         sub: list[str] = []
     else:
@@ -254,11 +256,10 @@ def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_F
                         if written > max_file_bytes:
                             raise _unsafe(member.name, f"is bigger than {max_file_bytes // (1024 * 1024)} MB")
                         out.write(chunk)
+                os.chmod(target, 0o755 if member.mode & 0o111 else 0o644)
             # Only folders and regular files were made in part, so walking it follows no links
-            for root, dirs, names in os.walk(part):
+            for root, _dirs, _names in os.walk(part):
                 os.chmod(root, 0o755)
-                for each in names:
-                    os.chmod(os.path.join(root, each), 0o644)
             if expect is not None:
                 count, digest = tree_hash(part)
                 if count != expect[0] or digest != expect[1].strip().lower():
