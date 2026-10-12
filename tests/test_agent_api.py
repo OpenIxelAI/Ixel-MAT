@@ -18,9 +18,9 @@ from ixel_mat.runtime import Settings
 TOKEN = "obviously-fake-agent-session-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 RUN_KEYS = {"id", "status", "goal", "model", "workspace", "started", "answer", "error", "steps",
-            "pending", "usage", "uploads", "computer"}
+            "pending", "usage", "uploads", "computer", "follows"}
 STEP_KEYS = {"n", "thought", "action", "args", "ok", "result", "usage"}
-ROW_KEYS = {"id", "goal", "status", "started", "model", "workspace"}
+ROW_KEYS = {"id", "goal", "status", "started", "model", "workspace", "computer", "follows"}
 
 
 def action(name, **args):

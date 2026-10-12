@@ -9,7 +9,7 @@ The page gets the same run with long results cut to 4 KB; the model and the save
 
 Pictures from view_file travel with the next model call only, and only to a model that sees pictures; the
 step's result tells any other model that it can't look at them. The files the person attached to the run are
-listed in its prompt.
+listed in its prompt. A follow-up's prompt also holds the earlier run's goal, answer and last steps.
 """
 from __future__ import annotations
 
@@ -38,7 +38,8 @@ from ixel_mat.pictures import megabytes
 from ixel_mat.runtime import CONNECT_TIMEOUT
 from ixel_mat.usage import Usage, call_usage
 
-# A stand-in for the model gets the prompt, and pictures= as well on a turn that has pictures to send
+# A stand-in for the model gets the prompt, pictures= as well on a turn that has pictures to send, and
+# effort= on every call of a run that has one
 Ask = Callable[..., Awaitable[tuple[str, dict | None]]]
 MAX_PAGE_RESULT_BYTES = 4 * 1024
 _TERMINAL = ("done", "stopped", "failed")
@@ -50,9 +51,11 @@ def clip_result(text: str) -> str:
     return text.encode("utf-8")[:MAX_PAGE_RESULT_BYTES].decode("utf-8", errors="ignore")
 
 
-async def _ask_model(cfg: AgentConfig, prompt: str, pictures: tuple = ()) -> tuple[str, dict | None]:
+async def _ask_model(cfg: AgentConfig, prompt: str, pictures: tuple = (),
+                     effort: str = "") -> tuple[str, dict | None]:
     """Ask a model with the agent's whole prompt, using the same lifecycle and usage as ixel ask. pictures go
-    along only to a model that sees them (the runner says so in the step's result for any other)."""
+    along only to a model that sees them (the runner says so in the step's result for any other); effort, when
+    given, is the thinking level for the call, one the model takes."""
     if not is_ready(cfg):
         raise AskError(f"{cfg.label} has no API key yet. Run: ixel setup")
     agent = create_agent(cfg)
@@ -71,6 +74,8 @@ async def _ask_model(cfg: AgentConfig, prompt: str, pictures: tuple = ()) -> tup
         options: dict = {}
         if pictures and cfg.sees_pictures:
             options["pictures"] = list(pictures)
+        if effort:
+            options["effort"] = effort
         try:
             reply = await asyncio.wait_for(agent.send_and_receive(prompt, use_full_session=True,
                                                                   on_usage=reported.append, **options),
@@ -98,10 +103,13 @@ class AgentRun:
     """Work on one goal in one workspace. ask can be an async stand-in for the model in tests.
 
     run_id lets the app name the run before it starts, so the files the person attaches can be kept under
-    that id (uploads/<run id>/); without it the run gets a fresh one."""
+    that id (uploads/<run id>/); without it the run gets a fresh one. effort is the thinking level sent with
+    every model call ("" sends none). follows is the earlier run a follow-up continues, {"id", "goal",
+    "answer", "steps"}: its prompt starts with them, and the run records the earlier one's id."""
 
     def __init__(self, cfg: AgentConfig, workspace: Path | str | Workspace, goal: str, store: AgentStore,
-                 max_steps: int = 25, ask: Ask | None = None, run_id: str | None = None, computer: bool = False):
+                 max_steps: int = 25, ask: Ask | None = None, run_id: str | None = None, computer: bool = False,
+                 effort: str = "", follows: dict | None = None):
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
             raise ValueError("max_steps must be a positive whole number")
         if not isinstance(goal, str) or not goal.strip():
@@ -110,8 +118,15 @@ class AgentRun:
             raise ValueError("a run id is letters, digits, - and _ only")
         if not isinstance(computer, bool):
             raise ValueError("computer must be true or false")
+        if not isinstance(effort, str):
+            raise ValueError("effort must be text")
+        if follows is not None and (not isinstance(follows, dict) or not isinstance(follows.get("id"), str)
+                                    or not _RUN_ID.fullmatch(follows["id"])):
+            raise ValueError("follows must be the earlier run, with its id")
         self.cfg = cfg
         self.computer = computer
+        self.effort = effort
+        self.follows = deepcopy(follows)
         if isinstance(workspace, Workspace):
             self.workspace = (workspace if workspace.computer == computer else
                               Workspace(workspace.root, uploads=workspace.uploads, computer=computer))
@@ -143,8 +158,9 @@ class AgentRun:
         self._saw = 0              # how many pictures the last view_file kept, for its step
         self._save()
 
-    async def _default_ask(self, prompt: str, pictures: tuple | list = ()) -> tuple[str, dict | None]:
-        return await _ask_model(self.cfg, prompt, tuple(pictures))
+    async def _default_ask(self, prompt: str, pictures: tuple | list = (),
+                           effort: str = "") -> tuple[str, dict | None]:
+        return await _ask_model(self.cfg, prompt, tuple(pictures), effort)
 
     def _uploads(self) -> list[dict]:
         """The run's attached files as the page shows them: {id, name, kind}."""
@@ -163,7 +179,8 @@ class AgentRun:
                 "workspace": str(self.workspace.root), "started": self.started, "answer": self.answer,
                 "error": self.error, "steps": steps,
                 "pending": deepcopy(self.pending) if self.status == "waiting" else None,
-                "usage": dict(self.usage), "uploads": self._uploads(), "computer": self.computer}
+                "usage": dict(self.usage), "uploads": self._uploads(), "computer": self.computer,
+                "follows": self.follows["id"] if self.follows else None}
 
     def to_dict(self) -> dict:
         """The run for the app, with the shape in AGENT_BETA.md and results clipped to 4 KB."""
@@ -171,7 +188,8 @@ class AgentRun:
 
     def _save(self) -> None:
         data = self._snapshot(page=False)
-        data.update(approvals=deepcopy(self._approvals), calls=deepcopy(self._calls), max_steps=self.max_steps)
+        data.update(approvals=deepcopy(self._approvals), calls=deepcopy(self._calls), max_steps=self.max_steps,
+                    effort=self.effort, earlier=deepcopy(self.follows))
         self.store.save_session(data)
 
     def start(self) -> asyncio.Task:
@@ -210,15 +228,18 @@ class AgentRun:
                 except OSError:
                     attached = []
                 prompt = build_prompt(self.goal, self.store.prompt_files(), self.store.skills(), history,
-                                      uploads=attached, computer=self.computer)
+                                      uploads=attached, computer=self.computer, follows=self.follows)
                 self.usage["calls"] += 1
                 self._save()
                 sent = list(self._pictures)
+                # Only what this call has: a stand-in that takes the prompt alone still works without either
+                options: dict = {}
+                if sent:
+                    options["pictures"] = sent
+                if self.effort:
+                    options["effort"] = self.effort
                 try:
-                    if sent:
-                        reply, usage = await self._ask(prompt, pictures=sent)
-                    else:
-                        reply, usage = await self._ask(prompt)
+                    reply, usage = await self._ask(prompt, **options)
                 finally:
                     self._pictures = []  # they go with one call only, whether or not it worked
                 if self.status == "stopped":
