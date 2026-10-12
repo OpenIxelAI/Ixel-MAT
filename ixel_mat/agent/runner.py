@@ -398,7 +398,7 @@ class AgentRun:
                         break
                     shown = clip_bad_reply(reply if isinstance(reply, str) else str(reply))
                     self._retry = {"n": len(self.steps) + 1, "action": "invalid_reply", "args": {},
-                                   "thought": "", "ok": False,
+                                   "thought": "", "ok": False, "retry": True,
                                    "result": f"Parse error: {exc}\nSend one corrected JSON action.\n"
                                              f"Your bad reply was:\n{shown}"}
                     self._pictures = sent  # the corrected reply is the next call, and it still needs to see them
@@ -419,7 +419,7 @@ class AgentRun:
                         break
                     self._repeat_warned = True
                     self._retry = {"n": len(self.steps) + 1, "action": "repeating", "args": {},
-                                   "thought": "", "ok": False,
+                                   "thought": "", "ok": False, "retry": True,
                                    "result": f"You have {loop}, so this reply was not run. Do something "
                                              "different, or use finish with what you have."}
                     self._pictures = sent  # the next call is this turn again, and it still needs to see them
