@@ -113,3 +113,79 @@ All JSON, behind the app's session token like every other route.
 ## Usage
 
 Each model call is recorded the way `ixel ask` records one (`call_usage`), and the run shows the total.
+
+# Beta 2: files and pictures, computer access, a chat-style page
+
+What changes after the first beta, from Angel's notes: the page should feel like other agent apps (simple,
+one conversation, the work happening quietly), the agent must take photos, video and any other file, it gets
+an opt-in **Computer access** switch with a warning, and the composer gets a `/` menu like other agents'.
+
+## Files, photos and video (like Hermes' vision and file tools, OpenClaw's media handling)
+
+- `read_file` also reads documents: PDF, Word, Excel, PowerPoint, RTF, ODF and the rest that
+  `ixel_mat.documents.read_document` knows, returning their text (and saying how many pictures they hold).
+  Plain text files work as before.
+- New action `view_file` (`path`): a picture (PNG, JPEG, GIF, WebP, HEIC, BMP, TIFF) goes to the model with its
+  **next** call, cleaned the way Ask cleans pictures (`ixel_mat.pictures`). A video (MP4, MOV, M4V, WebM, MKV,
+  AVI) gives up to 6 frames spread over it, taken with `ffmpeg` when it's installed (each frame a picture as
+  above), else its size and length only and a note that ffmpeg would show its frames. A PDF or slide deck
+  gives its first pictures. A model that can't see pictures (its config's `sees_pictures` is false) is told
+  so in the step's result instead, and nothing is sent. At most 8 pictures per model call, 20 MB in all.
+- **Your files in a run:** the composer's attach button (and dropping files on the page) uploads them; they're
+  kept in the agent's folder under `uploads/<run id>/`, never in the workspace, and the run's first prompt lists
+  them. The agent reaches them as `upload:NAME` in `read_file` and `view_file`. 50 MB per file, 10 files per run.
+- `list_dir` marks each entry's kind (`picture`, `video`, `document`, `text`, `other`) so the model knows
+  what to use on it.
+
+## Computer access (off by default)
+
+A switch on the composer (and `/computer on|off`). Turning it on shows a warning once per run, which you
+confirm:
+
+> Computer access lets the agent work outside the folder you picked: read and change files anywhere in
+> your home folder, run commands without the sandbox and with the network, take screenshots and open apps,
+> files and links. Every change, command, screenshot and open still waits for your Approve, but an approved
+> command can do anything you can. Turn it on only for a model and a goal you trust.
+
+With it on, for that run only:
+- Paths may be absolute or start with `~`, anywhere under the home folder. Secret files (the spec's list,
+  plus `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/Library/Keychains`, browser profiles) are still refused.
+- `run_command` runs without `sandbox-exec`, with the network; still the key-free environment; still an
+  approval every time (the allowlist doesn't apply).
+- New action `screenshot` (no args): after approval, a picture of the screen (`screencapture -x` on macOS;
+  elsewhere the step says it isn't supported), given to the model like `view_file`.
+- New action `open` (`target`: a path, an `https://` link, or an app name): after approval, opened with
+  `open` (macOS), `xdg-open` (Linux) or `start` (Windows), never through a shell.
+- The run shows a red **Computer access** badge, and its session records that it was on.
+
+## Run options
+
+`POST /api/agent/start` also takes:
+- `computer` (bool, default false): Computer access for this run; `true` also needs `"confirmed": true`
+  (the page sends it once you've confirmed the warning).
+- `fast` (bool): at most 10 steps and the model's lowest effort Ixel knows for it.
+- `effort` (one of Ixel's levels or ""): passed to the model on every call.
+- `follows` (a run id): a follow-up. The prompt starts with that run's goal, its answer and its last few
+  steps, so the conversation goes on. The page sends it for a message typed under a finished run.
+- `uploads` (list of upload ids from `POST /api/agent/upload`).
+
+`POST /api/agent/upload` (multipart, one file per request, field `file`) → `{"id", "name", "kind", "size"}`.
+`GET /api/agent/run` adds `"computer": bool`, `"follows": id or null`, `"uploads": [{"id", "name", "kind"}]`,
+and on a step whose action showed pictures, `"pictures": n`.
+
+## The page (simple and clean, like a chat with an agent)
+
+- **One column, a conversation.** Your message on the right; the agent's work under it as one quiet
+  "Working…" line that expands into short rows (an icon and a verb: "Read greet.py", "Searched for 'TODO'",
+  "Looked at photo.jpg", "Edited greet.py"), collapsed to "Worked for 40 s · 6 steps" when the run ends;
+  then its answer as plain text (markdown). Approvals appear in the conversation as a card with the diff or
+  the exact command and Approve / Deny (and Always allow for commands without Computer access).
+- **The composer** at the bottom: a text box ("Ask the agent to do something…"), the attach button, and
+  chips under it for the folder, the model, Fast, and Computer access (red when on). Enter sends,
+  Shift+Enter is a new line. Typing under a finished run sends a follow-up.
+- **The `/` menu**: typing `/` at the start opens a list you can filter and pick from with the arrows and
+  Enter: `/new` (a new conversation), `/model NAME`, `/folder PATH`, `/fast` (on/off), `/effort LEVEL`,
+  `/computer on|off`, `/attach`, `/memory`, `/stop`, `/help`.
+- **History** behind a button at the top (a list of earlier conversations); **Memory and skills** behind
+  another, as now. No side column.
+- Light and dark, the app's variables, no new libraries, nothing kept in browser storage.
