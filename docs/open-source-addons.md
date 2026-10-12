@@ -86,9 +86,14 @@ Tests in `tests/test_addons.py`.
 ### Settings → Add-ons
 - New section **Add-ons**, one row: "Diagram Design: diagrams as one HTML file, in your brand. By
   Cathryn Lavery, MIT." with a switch, off by default.
-- On: download `https://codeload.github.com/cathrynlavery/diagram-design/tar.gz/<PINNED_SHA>`, check
-  its sha256 against the value pinned in `addons.py`, extract only `skills/diagram-design/` into
-  `~/.ixel/addons/diagram-design/` (refuse absolute paths, `..`, links and devices). Saves
+- On: download `https://codeload.github.com/cathrynlavery/diagram-design/tar.gz/<PINNED_COMMIT>`,
+  extract only `skills/diagram-design/` into a temporary folder (refuse absolute paths, `..`, links and
+  devices), check the extracted files against the tree hash pinned in `addons.py`, and only then move
+  them to `~/.ixel/addons/diagram-design/`; a mismatch is refused. The tree hash, not the tarball's
+  sha256, because codeload's gzip output isn't guaranteed byte-stable: for each regular file under
+  `skills/diagram-design/`, take (its path relative to that folder with `/`, the sha256 of its bytes),
+  sort by path, join as `f"{rel}\0{sha}\n"` and sha256 the UTF-8 result. Pinned: commit `7a2e221`,
+  279 files, `e4adecc6…bfbb4a1`. Saves
   `addons.diagram_design = true`. Off: removes the folder and the setting.
 - `GET /api/addons` lists add-ons with on/off, version and folder path (the agent can load the skill
   from there).
@@ -127,7 +132,27 @@ On a Mac, AirLLM's `AutoModel` always uses its MLX class, which only knows the L
 take the generic path, which is CUDA-only. Results of the Mac test are recorded below.
 
 ### Mac test result
-_(filled in by the test run)_
+Run on 2026-10-12 on a Mac mini (Apple M4, 16 GB, internal SSD), AirLLM 4.0.0 with MLX 0.32.3, Python
+3.13. Same prompt everywhere ("Explain in two sentences why the sky is blue."), greedy, 50 new tokens.
+
+| Run | Weights | Seconds per token | 50 tokens | Peak memory |
+|---|---|---|---|---|
+| AirLLM, TinyLlama 1.1B Chat (Llama layout) | fp16, split per layer (2.0 GB) | **1.99** | 99 s (+30 s to split the layers once) | 1.66 GB (process) |
+| Ollama, `tinyllama` | Q4 (0.7 GB) | 0.008 | 0.4 s (+4.9 s load) | 0.7 GB (model) |
+| Ollama, `qwen3:4b-instruct` | Q4 (2.5 GB) | 0.029 | 1.5 s | 2.9 GB (model) |
+| AirLLM, Qwen3-0.6B | fp16 | **fails** | | 1.94 GB before the error |
+
+- TinyLlama runs and answers sensibly, but about 250 times slower than Ollama with the same model, and
+  ~70 times slower than a 4B model in Ollama. Every token reloads every layer from disk.
+- Qwen3-0.6B splits fine, then stops with `ValueError: Module does not have parameter named "q_norm"`:
+  `AutoModel` on macOS always builds the MLX Llama class, so a non-Llama model can't run on a Mac at
+  all, whatever its size. The headline models (Qwen3, DeepSeek, Kimi) are in that group.
+- Scaling the TinyLlama number by size on disk, a 70B Llama would take roughly 30 s per token at 4-bit
+  (~35 GB) and about 2 minutes at fp16 (~140 GB) here.
+
+**Verdict:** no AirLLM integration. On a 16 GB Mac, Ollama (or LM Studio) with a quantised model is two
+orders of magnitude faster for anything that fits, and AirLLM's big-model path doesn't run on macOS.
+Downloaded weights and split-layer folders were deleted after the test.
 
 ---
 
