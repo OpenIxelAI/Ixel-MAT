@@ -78,7 +78,8 @@ class CommandResult:
     confined: "full" (sandbox-exec on a Mac or bubblewrap on Linux: network denied, writes only in the
     workspace and the temp folder), "writes-only" (Windows: writes only in the workspace and a private temp
     folder, but the network is on and reads aren't limited) or "none". sandboxed is True only for "full";
-    when sandbox is left out it follows sandboxed."""
+    when sandbox is left out it follows sandboxed. started is False when the command was never started
+    because the Windows sandbox couldn't be set up."""
     argv: list[str]
     returncode: int | None
     output: str
@@ -86,6 +87,7 @@ class CommandResult:
     sandboxed: bool
     cancelled: bool = False
     sandbox: str = ""
+    started: bool = True
 
     def __post_init__(self) -> None:
         if not self.sandbox:
@@ -394,7 +396,7 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
         winsandbox.mark_broken(exc)
         return CommandResult(argv, 126, f"[not run: the Windows sandbox couldn't be set up: {exc}. Nothing was "
                                         "started. Commands will say they aren't sandboxed until Ixel is "
-                                        "restarted.]", False, False, sandbox="none")
+                                        "restarted.]", False, False, sandbox="none", started=False)
     except FileNotFoundError:
         return CommandResult(argv, 127, f"there's no program {argv[0]!r} (check the name, or give its full path)",
                              False, sandboxed, sandbox=kind)

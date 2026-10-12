@@ -44,6 +44,8 @@ def environment(tmp_path, monkeypatch):
     workspace.mkdir(parents=True)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(secrets, "_ENV_DIR", home / ".config" / "ixel-mat")
+    # Commands here are fake: a card shouldn't depend on this computer's sandbox
+    monkeypatch.setattr(runner, "sandbox_kind", lambda: "none")
     store = AgentStore(home / ".config" / "ixel-mat" / "agent")
     configs = {
         "fake-local": AgentConfig(name="fake-local", label="Fake local", type="http",

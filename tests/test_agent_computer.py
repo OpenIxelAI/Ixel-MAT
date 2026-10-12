@@ -309,6 +309,7 @@ def test_computer_commands_ignore_the_allowlist_and_always_wait(home: Path, monk
 
     monkeypatch.setattr(runner, "run_command", command)
     monkeypatch.setattr(runner, "can_sandbox", lambda: True)
+    monkeypatch.setattr(runner, "sandbox_kind", lambda: "full")
 
     async def scenario() -> None:
         argv = ["fake-check", "--quick"]

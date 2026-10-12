@@ -58,8 +58,11 @@ machine), cron jobs and sub-agents.
   network access denied and writes allowed only in the workspace and the temp folder. Reads aren't limited:
   a sandboxed command can still read any file your user can, except that on Linux the secret and browser
   folders (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser profiles, and Ixel's own config folder) are hidden from it.
-  Where there is no sandbox (Windows for now, or Linux without a working `bwrap`) the approval card says it is
-  not sandboxed.
+  On Windows it runs with a low-integrity token in a job object (`ixel_mat/agent/winsandbox.py`): writes only
+  in the workspace and a private temp folder, but the network is on and reads aren't limited, so the secret and
+  browser folders can be read there; the approval card says "Partly sandboxed". Where there is no sandbox (a
+  Windows sandbox that failed its test, or Linux without a working `bwrap`) the approval card says it is not
+  sandboxed. MCP add-ons aren't sandboxed on Windows. See `docs/windows-sandbox-design.md`.
 - On Linux the sandbox needs `bwrap` on the PATH and permission for it to start. If it's missing, install it
   (Debian/Ubuntu: `sudo apt install bubblewrap`; Fedora: `sudo dnf install bubblewrap`; Arch:
   `sudo pacman -S bubblewrap`). Ubuntu 24.04+ also blocks it through AppArmor until it's allowed:
@@ -106,11 +109,15 @@ All JSON, behind the app's session token like every other route.
    "workspace": "…", "started": 0, "answer": "…", "error": "…",
    "steps": [{"n": 1, "thought": "…", "action": "read_file", "args": {}, "ok": true, "result": "…",
               "usage": {}}],
-   "pending": {"n": 4, "action": "edit_file", "args": {}, "diff": "…", "argv": [], "sandboxed": true},
+   "pending": {"n": 4, "action": "run_command", "args": {}, "diff": "", "argv": ["pytest", "-q"],
+               "sandbox": "full", "sandboxed": true},
    "usage": {"calls": 3, "cost": 0.0}}
   ```
-  `pending` is null unless `status` is `waiting`; `diff` is set for writes, `argv` and `sandboxed` for
-  commands. Results in `steps` are clipped to 4 KB for the page (the model sees more).
+  `pending` is null unless `status` is `waiting`; `diff` is set for writes, `argv`, `sandbox` and
+  `sandboxed` for commands. `sandbox` is `"full"` (macOS, Linux: network denied, writes only in the
+  workspace and the temp folder), `"writes-only"` (Windows: writes only in the workspace and a private temp
+  folder, but the network is on and reads aren't limited) or `"none"`; `sandboxed` is true only for
+  `"full"`. Results in `steps` are clipped to 4 KB for the page (the model sees more).
 - `POST /api/agent/decide` `{"id", "approve": true|false, "always": false}` → the run. `always` adds the
   command's argv to the allowlist (refused for shells and interpreters).
 - `POST /api/agent/stop` `{"id"}` → the run, `stopped`.
@@ -221,7 +228,8 @@ New actions (they work with or without Computer access):
 - `tree_hash` (`repo`: the scratch name, `subdir`): the card spec's `tree_sha256` and `files` for that
   folder, computed by Ixel (never by the model).
 - `run_command` takes an optional `cwd`: `scratch:<owner>-<repo>` runs the approved command in that scratch
-  copy (sandboxed on macOS and Linux; the network only with Computer access), to try the tool.
+  copy (sandboxed on macOS and Linux, with the network only with Computer access; on Windows sandboxed for
+  writes only, with the network on and reads not limited), to try the tool.
 - `write_addon_card` (`id`, `card`: the TOML text): Ixel checks the card against every rule in the spec
   (unknown keys, ids, kinds, the commit and hash shapes, the repo URL, subdir, commands and placeholders)
   and that `[source]`'s `commit`, `tree_sha256` and `files` match what `fetch_repo`/`tree_hash` computed for

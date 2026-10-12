@@ -29,7 +29,8 @@ def test_scratch_commands_have_no_always_allow_and_say_where_they_run():
     code = (STATIC / "agent.js").read_text(encoding="utf-8")
     assert 'args.cwd.startsWith("scratch:")' in code
     assert "(command && !computerOn && !scratch) || addon" in code
-    assert code.count("Ixel's copy of the downloaded repo, not the workspace") == 2
+    # One line each for a command that is fully sandboxed, sandboxed for writes only (Windows) and not sandboxed
+    assert code.count("Ixel's copy of the downloaded repo, not the workspace") == 3
 
 
 def test_the_fixes_add_no_innerhtml():

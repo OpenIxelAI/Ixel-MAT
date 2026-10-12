@@ -1,6 +1,7 @@
 """
 One shared list of secret folders (keys, browser profiles and sessions, Ixel's own config), for the agent's
-command sandboxes to hide: the Linux one (bubblewrap) now, and the Windows one later.
+command sandboxes to hide: the Linux one (bubblewrap) does. The Windows one (a low-integrity token) limits
+writes only and can't hide them, so a command there can read these folders.
 """
 from __future__ import annotations
 
