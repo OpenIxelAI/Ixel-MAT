@@ -90,20 +90,24 @@ Tests in `tests/test_addons.py`.
   Cathryn Lavery, MIT." with a switch, off by default.
 - On: download `https://codeload.github.com/cathrynlavery/diagram-design/tar.gz/<PINNED_COMMIT>`,
   extract only `skills/diagram-design/` into a temporary folder (refuse absolute paths, `..`, links and
-  devices), check the extracted files against the tree hash pinned in `addons.py`, and only then move
-  them to `~/.ixel/addons/diagram-design/`; a mismatch is refused. The tree hash, not the tarball's
+  devices), check the extracted files against the tree hash pinned in its card, and only then move
+  them to `~/.ixel/addons/diagram-design/files/`; a mismatch is refused. The tree hash, not the tarball's
   sha256, because codeload's gzip output isn't guaranteed byte-stable: for each regular file under
   `skills/diagram-design/`, take (its path relative to that folder with `/`, the sha256 of its bytes),
   sort by path, join as `f"{rel}\0{sha}\n"` and sha256 the UTF-8 result. Pinned: commit `7a2e221`,
-  279 files, `e4adecc6…bfbb4a1`. Saves
-  `addons.diagram_design = true`. Off: removes the folder and the setting.
+  279 files, `e4adecc6…bfbb4a1`. Turning it
+  on shows the approval dialog first; on/off and approval are kept in `~/.ixel/addons/state.json`. Off: removes
+  `files/`. An install made by an earlier Ixel (files straight in `~/.ixel/addons/diagram-design/`, and
+  `diagram_design = true` under `[addons]` in config.toml) isn't carried over: turn the switch on again to
+  approve it, and the old files and the old line are removed then.
 - `GET /api/addons` lists add-ons with on/off, version and folder path (the agent can load the skill
   from there).
 
 ### Ask → Diagram
 - With the add-on on, the composer shows a **Diagram** toggle; typing `/diagram ` at the start of a
   question turns it on.
-- With it on, the question goes to one model (the first chosen on the panel) instead of the panel.
+- With it on, the question goes to one model (picked beside the Diagram toggle: by default Haiku when a ready panel member can run it, else the cheapest
+  ready model by price) instead of the panel.
   Ixel picks the diagram type by matching the request against the type list (architecture, flowchart,
   sequence, timeline, quadrant, ...; default architecture), then sends as reference material:
   `SKILL.md`, `references/style-guide.md`, `references/type-<type>.md` and
@@ -123,10 +127,12 @@ from a reply, self-check pass/fail/retry with a fake model, toggle on/off throug
 - The diagram is shown from `GET /diagram/<id>` in a sandboxed iframe (`sandbox="allow-scripts"`, its
   own CSP, no same-origin) rather than via `srcdoc`, because a `srcdoc` frame inherits the page's CSP
   and would block the diagram's own scripts.
-- The release is pinned in `ixel_mat/addons.py` as `PINNED_COMMIT`, `PINNED_TREE_FILES` and
-  `PINNED_TREE_SHA256` (the tree hash described above). To move the pin: clone the new commit, compute
-  `addons.tree_hash()` of its `skills/diagram-design/` folder, and update all three.
-- Section 1 (Reverse engineer tab) isn't built: a model safety check stopped both the plan and the first builder, so it was left out of this branch.
+- The release is pinned in the card, `ixel_mat/addons/diagram-design.toml` (`[source]` `commit`,
+  `tree_sha256` and `files`). To move the pin: download the new commit, compute `addons.tree_hash()` of its
+  `skills/diagram-design/` folder, and update all three. Anyone who had it on approves it again, since the card
+  changed.
+- Diagram calls to a local model (Ollama, LM Studio) wait up to 600 seconds instead of 180, and a failure says
+  the model needs a context window of at least 16k tokens for the skill's material.
 
 ---
 
