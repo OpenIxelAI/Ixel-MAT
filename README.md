@@ -38,12 +38,13 @@ Build), with no API key.
 - It is not an unattended agent. A run starts when you start it, pauses whenever it needs your approval, and ends
   at a step limit (25 by default). The beta has no cron jobs and no messaging channels. The Board's Merge pushes
   nothing.
-- The Agent's sandbox has limits. A command it runs has no network and can write only in the workspace and the
-  temp folder, but only on macOS (`sandbox-exec`) and on Linux (bubblewrap, which has to be installed and allowed
-  to start), and only while Computer access is off. It can still read your files, except that on Linux your SSH,
-  cloud and browser folders and Ixel's own config folder are hidden from it. On Windows, on Linux without a
-  working bubblewrap, or with Computer access on, an approved command runs as you and can do anything you can.
-  The approval card says which.
+- The Agent's sandbox has limits. On macOS (`sandbox-exec`) and on Linux (bubblewrap, which has to be installed
+  and allowed to start), a command it runs has no network, can write only in the workspace and the temp folder,
+  and can't read your SSH, cloud and browser folders, credential files or Ixel's own config folder; it can still
+  read your other files. On Windows a command can write only in the workspace and a private temp folder, but it
+  has the network and can read any file you can, those folders included. On Linux without a working bubblewrap,
+  on Windows when its sandbox can't start, or with Computer access on, an approved command runs as you and can
+  do anything you can. The approval card says which.
 
 ## Install
 
