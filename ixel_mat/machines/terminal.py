@@ -10,7 +10,11 @@ readable. The argv goes as separate arguments, never one string a shell would re
 - Mac: kitty or Alacritty when installed, else Terminal.app, through a private one-shot .command file: a
   /bin/sh script with each argument quoted (opening a file needs no Automation permission, unlike
   scripting Terminal).
-- Linux: konsole, gnome-terminal, kitty, alacritty or xterm.
+- Linux: $TERMINAL first (split only to find its program, never run through a shell), then the first of
+  x-terminal-emulator, xdg-terminal-exec, Ptyxis, GNOME Console (kgx), GNOME Terminal, Konsole, Xfce Terminal,
+  Tilix, foot, WezTerm, Alacritty, kitty and xterm that's installed. Each gets the command as separate
+  arguments in the form it takes; Tilix's -e takes one string, so it gets the command quoted with
+  shlex.join, which Tilix parses itself, not a shell.
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from ixel_mat.agents.launch import find_on_path
@@ -30,14 +35,48 @@ WINDOWS = sys.platform == "win32"
 MAC = sys.platform == "darwin"
 MACOS_TERMINAL = "Terminal.app"
 NAMES = {"wt.exe": "Windows Terminal", "cmd.exe": "a console window", MACOS_TERMINAL: "Terminal",
-         "konsole": "Konsole", "gnome-terminal": "GNOME Terminal", "kitty": "kitty", "alacritty": "Alacritty",
-         "xterm": "xterm"}
+         "x-terminal-emulator": "your default terminal", "xdg-terminal-exec": "your default terminal",
+         "ptyxis": "Ptyxis", "kgx": "GNOME Console", "konsole": "Konsole", "gnome-terminal": "GNOME Terminal",
+         "xfce4-terminal": "Xfce Terminal", "tilix": "Tilix", "foot": "foot", "wezterm": "WezTerm",
+         "kitty": "kitty", "alacritty": "Alacritty", "xterm": "xterm"}
+INSTALL_HINT = ("Install a terminal such as GNOME Console (gnome-console), Konsole, Xfce Terminal (xfce4-terminal) "
+                "or xterm from your package manager, or set $TERMINAL to the one you use.")
+
+# The Linux terminals, in the order they're looked for: each builds what follows its program from held, the
+# helper's argv, which they all run as it is, with no shell. "--" keeps the terminal's own option parser off
+# our arguments (foot would take the -c as its --config); Alacritty refuses it. Tilix's -e takes one string
+# that Tilix splits itself, so it gets held quoted with shlex.join.
+LINUX_TERMINALS: dict[str, Callable[[list[str]], list[str]]] = {
+    "x-terminal-emulator": lambda held: ["-e", *held],
+    "xdg-terminal-exec": lambda held: list(held),
+    "ptyxis": lambda held: ["--new-window", "--", *held],
+    "kgx": lambda held: ["--", *held],
+    "gnome-terminal": lambda held: ["--", *held],
+    "konsole": lambda held: ["-e", *held],
+    "xfce4-terminal": lambda held: ["-x", *held],
+    "tilix": lambda held: ["-e", shlex.join(held)],
+    "foot": lambda held: ["--", *held],
+    "wezterm": lambda held: ["start", "--", *held],
+    "alacritty": lambda held: ["-e", *held],
+    "kitty": lambda held: ["--", *held],
+    "xterm": lambda held: ["-e", *held],
+}
 
 
 def no_screen() -> bool:
     """Linux with no desktop to open a window on (over ssh, or a server): a terminal would start and show
     nothing."""
     return not (WINDOWS or MAC or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _chosen() -> str | None:
+    """The program $TERMINAL names, when it's there. Only its first word is looked for (the rest are its own
+    options, and none of it goes through a shell)."""
+    try:
+        words = shlex.split(os.environ.get("TERMINAL", ""))
+    except ValueError:
+        return None
+    return find_on_path(words[0]) if words else None
 
 
 def find() -> str | None:
@@ -49,7 +88,10 @@ def find() -> str | None:
     elif MAC:
         candidates = ("kitty", "alacritty")
     else:
-        candidates = ("konsole", "gnome-terminal", "kitty", "alacritty", "xterm")
+        chosen = _chosen()
+        if chosen:
+            return chosen
+        candidates = tuple(LINUX_TERMINALS)
     for name in candidates:
         path = find_on_path(name)
         if path:
@@ -113,8 +155,12 @@ def _mac_command_file(argv: list[str]) -> str:
     return _one_shot(argv, ".command", '#!/bin/sh\nrm -f -- "$0"\n' + shlex.join(_held(argv)) + "\n")
 
 
+def _name(terminal: str) -> str:
+    return Path(terminal.replace("\\", "/")).name.lower()
+
+
 def _is(terminal: str, *names: str) -> bool:
-    return Path(terminal.replace("\\", "/")).name.lower() in names
+    return _name(terminal) in names
 
 
 def argv_for(terminal: str, argv: list[str]) -> list[str]:
@@ -128,10 +174,10 @@ def argv_for(terminal: str, argv: list[str]) -> list[str]:
         return _held(argv)
     if terminal == MACOS_TERMINAL:
         return ["/usr/bin/open", "-a", "Terminal", _mac_command_file(argv)]
-    if _is(terminal, "gnome-terminal", "kitty"):
-        return [terminal, "--", *_held(argv)]
-    # konsole, alacritty (which refuses --) and xterm: what follows -e is run as it is, no shell
-    return [terminal, "-e", *_held(argv)]
+    held = _held(argv)
+    build = LINUX_TERMINALS.get(_name(terminal))
+    # A program that's not in the table (a $TERMINAL of its own) gets -e, as x-terminal-emulator takes it
+    return [terminal, *(build(held) if build else ["-e", *held])]
 
 
 def creationflags(terminal: str) -> int:
@@ -146,8 +192,8 @@ def open_window(argv: list[str], terminal: str | None = None) -> str:
     if not terminal:
         raise SSHError("There's no desktop here to open a terminal window on. Run the line below in your terminal."
                        if no_screen() else
-                       "There's no terminal program Ixel knows here (Konsole, GNOME Terminal, kitty, Alacritty or "
-                       "xterm). Install one, or run the line below in yours.", "no_terminal")
+                       f"There's no terminal program Ixel knows here. {INSTALL_HINT} Or run the line below in yours.",
+                       "no_terminal")
     line = argv_for(terminal, argv)
     try:
         proc = subprocess.Popen(line, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

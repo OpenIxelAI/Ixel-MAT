@@ -595,8 +595,10 @@ scripted panels. End-to-end runs check that only the question and the anonymous 
   ssh, the terminal and `ssh-keygen` get their arguments as a list; Windows Terminal, which splits its own
   command line at `;`, gets only Python and a private one-shot script holding the exact list, and
   `cmd.exe` is never asked to read one. On a Mac, Terminal.app opens a private one-shot `/bin/sh` script
-  that deletes itself, with each argument quoted (`shlex`). The line the page offers to paste
-  (`ixel machines connect NAME`) is quoted for your shell too.
+  that deletes itself, with each argument quoted (`shlex`). On Linux, `$TERMINAL` is only split to find its
+  program, never run through a shell, and Tilix, whose `-e` takes one command string, gets the arguments
+  quoted with `shlex.join`. The line the page offers to paste (`ixel machines connect NAME`) is quoted for
+  your shell too.
 - **Trust on first use, then strict.** A server's key is learned by ssh itself (so `~/.ssh/config`'s
   HostName, Port and ProxyJump apply) into a temporary file, with every way of signing in switched off.
   A server can still let a client in with no credentials at all (and so could someone in between, before
