@@ -355,7 +355,8 @@ def test_computer_access_needs_the_warning_confirmed(environment):
 def test_fast_caps_a_run_at_ten_steps_and_the_models_lowest_effort(environment):
     _, workspace, store, _ = environment
     (workspace / "note.txt").write_text("A fake note.\n", encoding="utf-8")
-    ask = ScriptedAsk(*[action("read_file", path="note.txt")] * 20)
+    # a different last line each time, so the run isn't taken for repeating itself
+    ask = ScriptedAsk(*[action("read_file", path="note.txt", end=n) for n in range(1, 21)])
     gui = gui_for(environment, ask)
 
     async def scenario(client):

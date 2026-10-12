@@ -76,7 +76,7 @@ def test_finished_run_has_the_page_shape_and_saves_every_step(tmp_path):
         assert page["answer"] == "The folder is empty."
         assert page["error"] == "" and page["pending"] is None
         assert [step["action"] for step in page["steps"]] == ["list_dir", "finish"]
-        assert all(set(step) == {"n", "thought", "action", "args", "ok", "result", "usage"}
+        assert all(set(step) == {"n", "thought", "action", "args", "ok", "result", "usage", "ms", "tokens"}
                    for step in page["steps"])
         assert page["steps"][0]["result"] == "(empty folder)"
         assert page["steps"][0]["ok"] is True
@@ -84,7 +84,11 @@ def test_finished_run_has_the_page_shape_and_saves_every_step(tmp_path):
         saved = run.store.load_session(run.id)
         assert saved["status"] == "done" and saved["steps"] == page["steps"]
         assert saved["approvals"] == []
-        assert page["usage"] == {"calls": 2, "cost": 0.0}
+        usage = page["usage"]
+        assert set(usage) == {"calls", "cost", "input_tokens", "output_tokens", "ms"}
+        assert usage["calls"] == 2 and usage["cost"] == 0.0
+        assert usage["input_tokens"] == 0 and usage["output_tokens"] == 0
+        assert usage["ms"] == sum(step["ms"] for step in page["steps"])
 
     asyncio.run(scenario())
 
@@ -120,9 +124,9 @@ def test_two_bad_replies_fail_and_are_saved(tmp_path):
     asyncio.run(scenario())
 
 
-def test_a_second_bad_reply_after_a_good_step_also_fails(tmp_path):
+def test_two_bad_replies_in_a_row_after_a_good_step_also_fail(tmp_path):
     async def scenario():
-        ask = ScriptedAsk("not JSON", _reply("list_dir"), "not JSON again")
+        ask = ScriptedAsk(_reply("list_dir"), "not JSON", "not JSON again")
         run = _run(tmp_path, ask)
         run.start()
         page = await _done(run)

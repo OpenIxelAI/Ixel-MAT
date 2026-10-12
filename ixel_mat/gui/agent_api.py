@@ -99,6 +99,12 @@ def page_run(data: dict) -> dict:
         pictures = step.get("pictures")
         if isinstance(pictures, int) and not isinstance(pictures, bool):
             entry["pictures"] = pictures
+        for name in ("ms", "batch"):  # a step's time, and the first step of the reads it was run with
+            value = step.get(name)
+            if isinstance(value, int) and not isinstance(value, bool):
+                entry[name] = value
+        if isinstance(step.get("tokens"), dict):
+            entry["tokens"] = copy.deepcopy(step["tokens"])
         out["steps"].append(entry)
     uploads = data.get("uploads", [])
     out["uploads"] = copy.deepcopy(uploads) if isinstance(uploads, list) else []
