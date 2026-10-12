@@ -69,7 +69,7 @@ def test_finished_run_has_the_page_shape_and_saves_every_step(tmp_path):
         run.start()
         page = await _done(run)
         assert set(page) == {"id", "status", "goal", "model", "workspace", "started", "answer", "error",
-                             "steps", "pending", "usage"}
+                             "steps", "pending", "usage", "uploads"}
         assert page["status"] == "done"
         assert page["model"] == "fake"
         assert page["workspace"] == str(tmp_path / "workspace")
