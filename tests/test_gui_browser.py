@@ -2869,3 +2869,69 @@ def test_board_shows_who_takes_over_at_a_usage_limit_and_seals_what_it_showed(gu
     approve = [args for op, args in fake.actions if op == "approve"][-1]
     assert "fallbacks" not in approve and page.locator(".fallback-row:not([hidden])").count() == 0
     assert not errors
+
+
+def test_board_lets_the_person_untick_single_agents_on_the_fallback_line(gui_url, browser):
+    fake = FakeBoard()
+    fake.fallbacks = {"edit": ["codex:gpt-6-astra", "claude:claude-sonnet-5-5", "codex:gpt-5.1"],
+                      "answer": ["codex", "gemini"]}
+    fake.tasks["T-6"] = fake.task(6, "Add a parser", "open", "claude")
+    base = fake.detail
+
+    def detail(ref):
+        data = base(ref)
+        if ref == "T-6":
+            data["actions"][0] = {**data["actions"][0], "args": {"agent": "claude", "kind": "edit"},
+                                  "kinds": ["edit", "answer", "review"]}
+            data["task"]["workers"] = WORKERS
+        return data
+    fake.detail = detail
+    page, errors, _ = open_board(browser, fake)
+    page.goto(gui_url)
+    page.click(".rail-item[data-view=board]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+
+    # One toggle per agent, grouped in order (codex's two entries are one toggle), all on
+    page.wait_for_selector(".fallback-row:not([hidden])")
+    chips = [text.strip() for text in page.locator(".fallback-agents .fallback-agent").all_inner_texts()]
+    assert chips == ["codex", "claude"]
+    assert page.is_checked('[data-key="needs-fallback-agent:codex"]')
+    assert page.is_checked('[data-key="needs-fallback-agent:claude"]')
+    assert page.get_attribute('[data-key="needs-fallback-agent:claude"]', "aria-label") == "Go on with claude"
+
+    # Unticking codex drops its entries from the words and from what's sent
+    page.uncheck('[data-key="needs-fallback-agent:codex"]')
+    wait_until(page, "document.querySelector('.fallback-row').innerText.trim() === "
+                     "'If a model hits its usage limit, go on with claude:claude-sonnet-5-5'")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["fallbacks"] == ["claude:claude-sonnet-5-5"]
+
+    # Every agent unticked reads as the switch off: nothing is sent
+    fake.tasks["T-6"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    page.wait_for_selector(".fallback-row:not([hidden])")
+    page.uncheck('[data-key="needs-fallback-agent:codex"]')
+    page.uncheck('[data-key="needs-fallback-agent:claude"]')
+    assert not page.is_checked("#needs-fallback")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert "fallbacks" not in approve
+
+    # A new pick starts the choice over: codex is on again for the answer's agents
+    fake.tasks["T-6"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    page.wait_for_selector(".fallback-row:not([hidden])")
+    page.uncheck('[data-key="needs-fallback-agent:codex"]')
+    page.check("input[name=needs-kind][value=answer]")
+    wait_until(page, "document.querySelector('.fallback-row').innerText.includes('codex, then gemini')")
+    assert page.is_checked('[data-key="needs-fallback-agent:codex"]')
+    assert page.locator(".fallback-agents .fallback-agent").count() == 2
+    assert not errors
