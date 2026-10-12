@@ -110,8 +110,8 @@ def test_list_dir_of_a_heavy_folder_named_as_path_lists_inside_it(ws):
 
 
 def test_a_folder_holding_only_a_heavy_folder_says_so(ws):
-    _write(ws, "web/dist/app.js", "x")
-    assert ws.list_dir("web") == "[skipped dist/: heavy folders; list one by naming it as path]"
+    _write(ws, "web/node_modules/app.js", "x")
+    assert ws.list_dir("web") == "[skipped node_modules/: heavy folders; list one by naming it as path]"
 
 
 def test_search_skips_heavy_folders_and_names_what_it_skipped(ws):
