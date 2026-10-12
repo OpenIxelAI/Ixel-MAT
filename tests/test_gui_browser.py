@@ -647,6 +647,11 @@ class FakeBoard:
         self.usage = None  # and model by model
         self.fallbacks = None  # who takes over at a usage limit, from a Handoff that says: kind -> list
         self.asked_fallbacks = []  # what the page asked about
+        self.crew = None   # the crew a Handoff with auto-crew picks (the /api/board/crew body); None: it can't
+        self.crew_error = None  # (message, status): a crew question it refuses
+        self.hold_crew = False  # keep the crew question waiting (a small model takes seconds) until release_crew()
+        self.held_crew = []  # the questions kept waiting
+        self.asked_crew = []  # what the page asked about
         self.tasks = {
             "T-1": self.task(1, "Pick the launch date " + HOSTILE, "open", "human"),
             "T-2": self.task(2, "Write release notes", "in_progress", "claude",
@@ -688,6 +693,22 @@ class FakeBoard:
                          "content": f"seen-{ref}-{t['updated_at']}"}, "events": events,
                 "claims": [], "overlaps": [], "children": [], "outputs": outputs, "actions": actions}
 
+    def crew_answer(self):
+        if self.crew_error:
+            message, status = self.crew_error
+            return {"error": message, "code": "invalid"}, status
+        if self.crew is None:
+            return {"error": "This Handoff can't pick a crew yet. Update it: handoff update",
+                    "code": "no_auto_crew"}, 404
+        return self.crew, 200
+
+    def release_crew(self):
+        """Answer the crew questions kept waiting."""
+        held, self.held_crew = self.held_crew, []
+        for route in held:
+            data, status = self.crew_answer()
+            route.fulfill(status=status, content_type="application/json", body=json.dumps(data))
+
     def handle(self, route):
         from urllib.parse import parse_qs, urlparse
         url = urlparse(route.request.url)
@@ -721,6 +742,12 @@ class FakeBoard:
             if query.get("models", "").startswith("claude-haiku"):
                 found = ["ollama:qwen3:4b-instruct"]
             return reply({"fallbacks": found, "words": ", then ".join(found)})
+        if url.path == "/api/board/crew":
+            self.asked_crew.append(query)
+            if self.hold_crew:
+                self.held_crew.append(route)
+                return None
+            return reply(*self.crew_answer())
         if url.path == "/api/board/agents":
             return reply({"agents": [{"name": "claude"}, {"name": "codex"}, {"name": "grok", "label": "Grok"}],
                           "problems": []})
@@ -1118,6 +1145,193 @@ def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_
     page.click(".task-card[data-ref=T-3]")
     page.click("#task-panel .actions .btn.primary")
     assert page.locator("#needs-run-mode").count() == 0
+    assert not errors, errors
+
+
+AUTO_CREW = {  # what a Handoff with auto-crew picks for a small code task: a planner, a builder, a checker
+    "job": "code", "size": "small", "how": "model",
+    "chain": ["claude-fable-5-1", "claude-haiku-5-5", "codex:gpt-5.1"],
+    "efforts": {"claude-fable-5-1": "low", "claude-haiku-5-5": "medium", "codex:gpt-5.1": "medium"},
+    "roles": [
+        {"role": "plans", "model": "claude-fable-5-1", "effort": "low", "why": "A small change needs a short plan."},
+        {"role": "builds", "model": "claude-haiku-5-5", "effort": "medium", "why": "Haiku is enough for the edits."},
+        {"role": "checks", "model": "codex:gpt-5.1", "effort": "medium", "why": "A second family reads the diff."},
+    ],
+}
+
+
+def test_board_auto_crew_picks_editable_rows_and_sends_what_it_showed(gui_url, browser):
+    fake = FakeBoard()
+    fake.tasks["T-6"] = fake.task(6, "Add a parser", "open", "claude")
+    base = fake.detail
+
+    def detail(ref):
+        data = base(ref)
+        if ref == "T-6":  # a Handoff that says what its workers take: an edit, on a worker that runs a chain
+            data["actions"][0] = {**data["actions"][0], "args": {"agent": "claude", "kind": "edit"},
+                                  "kinds": ["edit", "answer", "review"]}
+            data["task"]["workers"] = WORKERS
+        return data
+    fake.detail = detail
+    page, errors, _ = open_board(browser, fake)
+    page.goto(gui_url)
+    page.click(".rail-item[data-view=board]")
+    auto = "[data-key=needs-auto]"
+    submit = ".needs button[type=submit]"
+    models = ["claude-fable-5-1", "claude-haiku-5-5", "codex:gpt-5.1"]
+
+    def open_run():  # the Run form, fresh: the run is cleared, another card is opened and this one again
+        fake.tasks["T-6"]["run"] = None
+        page.click(".task-card[data-ref=T-1]")
+        page.click(".task-card[data-ref=T-6]")
+        page.click("#task-panel .actions .btn.primary")
+
+    def approved():
+        return [args for op, args in fake.actions if op == "approve"][-1]
+
+    def until(check, what, timeout=15):  # (the page answers while this waits)
+        deadline = time.monotonic() + timeout
+        while not check():
+            assert time.monotonic() < deadline, f"timed out waiting for {what}"
+            page.wait_for_timeout(50)
+
+    def crew_efforts():
+        return [page.input_value(f"[data-key=needs-crew-effort-{i}]") for i in range(3)]
+
+    # A Handoff that doesn't list auto-crew: no switch, the form as it was, and no question about a crew
+    open_run()
+    assert page.is_visible("#needs-run-mode") and page.locator(auto).count() == 0
+    page.select_option("#needs-run-mode", "chain")
+    assert page.locator("[data-key=needs-model-0]").count() == 1 and page.locator(".crew-rows").count() == 0
+    assert fake.asked_crew == []
+    page.click("[data-key=needs-cancel]")
+    fake.hello = {**fake.hello, "features": ["auto-crew"]}  # one that does, and picks (slowly: the answer is held)
+    fake.crew = AUTO_CREW
+    fake.hold_crew = True
+    page.reload()  # (a goto to the same address only moves within the page, which keeps the Handoff it knew)
+    page.click(".rail-item[data-view=board]")
+
+    # Auto on: the mode choice goes, it says it's picking, then the crew shows as rows
+    open_run()
+    assert page.inner_text("label[for=needs-auto]") == "Auto: let Handoff pick the crew"
+    assert not page.is_checked(auto) and page.is_visible("#needs-run-mode")
+    page.check(auto)
+    until(lambda: fake.held_crew, "the page to ask for the crew")
+    assert page.inner_text(".crew-status") == "Picking a crew…"
+    assert page.get_attribute(".crew-status", "role") == "status"
+    assert page.is_hidden("#needs-run-mode") and page.is_hidden(".pick-rows")
+    assert page.locator(".crew-row").count() == 0
+    fake.hold_crew = False
+    fake.release_crew()
+    page.wait_for_selector("[data-key=needs-crew-model-2]")
+    wait_until(page, "document.querySelectorAll('[data-key=needs-crew-effort-2] option').length === 4")
+    assert page.text_content(".crew-status") == ""
+    assert page.locator(".crew-role").all_inner_texts() == ["Plans", "Builds", "Checks"]
+    assert page.locator(".crew-why").all_inner_texts() == [
+        "A small change needs a short plan.", "Haiku is enough for the edits.", "A second family reads the diff."]
+    assert [page.input_value(f"[data-key=needs-crew-model-{i}]") for i in range(3)] == models
+    assert crew_efforts() == ["low", "medium", "medium"]
+    # The model boxes offer the picker's own suggestions; each effort list is what that model takes
+    for i in range(3):
+        assert page.get_attribute(f"[data-key=needs-crew-model-{i}]", "list") == "needs-models-claude"
+    assert page.locator("#needs-models-claude option").count() > 0
+    assert page.locator("[data-key=needs-crew-effort-0] option").all_inner_texts() == [
+        "Default effort", "Low effort", "Medium effort", "High effort", "Extra high effort", "Max effort"]
+    assert page.locator("[data-key=needs-crew-effort-2] option").all_inner_texts() == [
+        "Default effort", "Low effort", "Medium effort", "High effort"]  # (gpt-5.1 stops at High)
+    # Named for a screen reader, and the buttons say what they do
+    assert page.get_attribute(".crew-rows", "aria-label") == "Crew Handoff picked"
+    assert page.get_attribute("[data-key=needs-crew-model-0]", "aria-label") == "Model for plans"
+    assert page.get_attribute("[data-key=needs-crew-effort-0]", "aria-label") == "Effort for claude-fable-5-1"
+    assert page.inner_text("[data-key=needs-crew-max]") == "All max"
+    assert page.inner_text("[data-key=needs-crew-low]") == "All low"
+    assert "Handoff picked these for this task" in page.inner_text(".crew-hint")
+    assert len(fake.asked_crew) == 1
+    assert fake.asked_crew[0]["task"] == "T-6" and fake.asked_crew[0]["project"] == "/repos/shop"
+    # The usage-limit line follows the crew's models
+    until(lambda: fake.asked_fallbacks and fake.asked_fallbacks[-1].get("models") == ",".join(models),
+          "the fallbacks for the crew's models")
+
+    # Switching Auto off brings the mode choice back; on again shows the same crew without asking again
+    page.uncheck(auto)
+    assert page.is_visible("#needs-run-mode") and page.locator(".crew-row").count() == 0
+    assert page.locator("[data-key=needs-crew-max]").count() == 0
+    page.check(auto)
+    page.wait_for_selector("[data-key=needs-crew-model-2]")
+    page.wait_for_timeout(200)
+    assert len(fake.asked_crew) == 1 and crew_efforts() == ["low", "medium", "medium"]
+
+    # All max: the highest level each model takes; All low: the lowest
+    all_efforts = "[...document.querySelectorAll('.crew-row select')]"
+    page.click("[data-key=needs-crew-max]")
+    wait_until(page, all_efforts + ".map((s) => s.value).join() === 'max,max,high'")
+    assert page.evaluate(all_efforts + ".every((s) => s.value === s.options[s.options.length - 1].value)")
+    page.click("[data-key=needs-crew-low]")
+    wait_until(page, all_efforts + ".map((s) => s.value).join() === 'low,low,low'")
+
+    # Edit a model and two efforts: approve sends the rows as shown, in order, and no "auto"
+    page.fill("[data-key=needs-crew-model-1]", "claude-sonnet-5-5")
+    page.press("[data-key=needs-crew-model-1]", "Tab")
+    assert page.get_attribute("[data-key=needs-crew-effort-1]", "aria-label") == "Effort for claude-sonnet-5-5"
+    page.select_option("[data-key=needs-crew-effort-1]", "high")
+    page.select_option("[data-key=needs-crew-effort-0]", "max")
+    shown = ["claude-fable-5-1", "claude-sonnet-5-5", "codex:gpt-5.1"]
+    until(lambda: fake.asked_fallbacks[-1].get("models") == ",".join(shown), "the fallbacks for the edited crew")
+    page.click(submit)
+    wait_until(page, "!document.querySelector('.needs')")
+    assert approved() == {
+        "agent": "claude", "kind": "edit", "models": shown,
+        "efforts": {"claude-fable-5-1": "max", "claude-sonnet-5-5": "high", "codex:gpt-5.1": "low"},
+        "shown": f"seen-T-6-{fake.tasks['T-6']['updated_at']}", "task": "T-6"}
+
+    # Auto left off: exactly what the form sent before, and the crew is never asked for
+    open_run()
+    page.click(submit)
+    wait_until(page, "!document.querySelector('.needs')")
+    assert "models" not in approved() and "efforts" not in approved() and len(fake.asked_crew) == 1
+
+    # Auto on and off again: the form's own choice goes, not the crew's rows
+    open_run()
+    page.check(auto)
+    page.wait_for_selector("[data-key=needs-crew-model-2]")
+    page.uncheck(auto)
+    page.select_option("[data-key=needs-effort-0]", "xhigh")
+    page.click(submit)
+    wait_until(page, "!document.querySelector('.needs')")
+    assert "models" not in approved() and approved()["efforts"] == {"": "xhigh"}
+
+    # Approve before the crew is there: it waits, then sends the crew as picked
+    fake.hold_crew = True
+    open_run()
+    page.check(auto)
+    until(lambda: len(fake.held_crew) == 1, "the page to ask for the crew")
+    sent = len(fake.actions)
+    page.click(submit)
+    page.wait_for_timeout(300)
+    assert len(fake.actions) == sent and page.locator(".needs").count() > 0
+    fake.hold_crew = False
+    fake.release_crew()
+    wait_until(page, "!document.querySelector('.needs')")
+    assert approved()["models"] == models
+    assert approved()["efforts"] == AUTO_CREW["efforts"]
+
+    # A refused crew: the message shows, approve says what to do and sends nothing, and Auto off goes on
+    message = "Handoff could not reach its small model to pick a crew."
+    fake.crew_error = (message, 400)
+    open_run()
+    page.check(auto)
+    wait_until(page, "document.querySelector('.crew-status').textContent.includes('could not reach')")
+    assert page.inner_text(".crew-status") == "Couldn't pick a crew: " + message
+    assert page.locator(".crew-row").count() == 0 and page.locator("[data-key=needs-crew-max]").count() == 0
+    sent = len(fake.actions)
+    page.click(submit)
+    page.wait_for_selector(".board-notice.error")
+    assert "Switch Auto off to pick the models yourself." in page.inner_text(".board-notice.error")
+    assert len(fake.actions) == sent and page.is_checked(auto)
+    page.uncheck(auto)
+    page.click(submit)
+    wait_until(page, "!document.querySelector('.needs')")
+    assert "models" not in approved() and len(fake.actions) > sent
     assert not errors, errors
 
 

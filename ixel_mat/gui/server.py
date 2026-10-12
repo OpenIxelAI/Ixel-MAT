@@ -355,6 +355,7 @@ class GuiServer:
         app.router.add_get("/api/board/levels", self._board_levels)
         app.router.add_get("/api/board/models", self._board_models)
         app.router.add_get("/api/board/fallbacks", self._board_fallbacks)
+        app.router.add_get("/api/board/crew", self._board_crew)
         app.router.add_post("/api/board/action", self._board_action)
         app.router.add_get("/api/connections", self._connections)
         app.router.add_post("/api/connections/host", self._connections_host)
@@ -898,19 +899,28 @@ class GuiServer:
             raise handoff_api.HandoffApiError("not_installed", "Handoff isn't installed on this computer.")
         return await asyncio.to_thread(handoff_api.call, op, root, args, command)
 
-    async def _board_hello_route(self, request: web.Request) -> web.Response:
-        """Is there a Handoff that has the Board's door? Asked once, then remembered."""
-        from ixel_mat.gui import handoff, handoff_api
-        if self._board_hello is None or not self._board_hello.get("ok"):
+    async def _board_hello_now(self, refresh: bool = False) -> dict:
+        """Handoff's hello (is there a Handoff with the Board's door, and what it can do), asked once while it
+        answers well, then remembered. Asked again while it doesn't answer well, or when `refresh` is set."""
+        from ixel_mat.gui import handoff_api
+        if self._board_hello is None or not self._board_hello.get("ok") or refresh:
             try:
                 hello = await self._handoff_call("hello")
-                self._board_hello = {"ok": handoff_api.version_ok(hello), "version": hello.get("handoff_version", "")}
+                features = hello.get("features") if isinstance(hello.get("features"), list) else []
+                self._board_hello = {"ok": handoff_api.version_ok(hello), "version": hello.get("handoff_version", ""),
+                                     "features": [f for f in features if isinstance(f, str)][:50]}
                 if not self._board_hello["ok"]:
                     self._board_hello["problem"] = "outdated"
             except handoff_api.HandoffApiError as exc:
                 self._board_hello = {"ok": False, "version": "", "problem": exc.code, "message": str(exc)}
-        update = "handoff update" if self._board_hello.get("problem") == "outdated" else ""
-        return web.json_response(_clean({**self._board_hello, "install": handoff.how_to_install(), "update": update,
+        return self._board_hello
+
+    async def _board_hello_route(self, request: web.Request) -> web.Response:
+        """Is there a Handoff that has the Board's door? Asked once, then remembered."""
+        from ixel_mat.gui import handoff
+        hello = await self._board_hello_now()
+        update = "handoff update" if hello.get("problem") == "outdated" else ""
+        return web.json_response(_clean({**hello, "install": handoff.how_to_install(), "update": update,
                                          "project": handoff.default_project()}))
 
     async def _board_levels(self, request: web.Request) -> web.Response:
@@ -956,6 +966,59 @@ class GuiServer:
         found = [f for f in data.get("fallbacks") or [] if isinstance(f, str)][:5]
         words = data.get("words") if isinstance(data.get("words"), str) and found else ""
         return web.json_response(_clean({"fallbacks": found, "words": words[:500]}))
+
+    async def _board_crew(self, request: web.Request) -> web.Response:
+        """The crew Handoff picks for a task (or some text): the models, each one's effort and why, for the Board
+        to show before the person approves; the Board sends back what it showed. A Handoff that can't pick one
+        gets an error the page can read, and the Board then offers no Auto."""
+        from ixel_mat.gui import handoff_api
+        hello = await self._board_hello_now()
+        if hello.get("ok") and "auto-crew" not in hello.get("features", []):
+            hello = await self._board_hello_now(refresh=True)  # a Handoff updated since the Board last asked
+        if not hello.get("ok"):
+            # Not installed, a timeout, or too old: each keeps its own problem and message
+            code = hello.get("problem") or "outdated"
+            message = hello.get("message")
+            if not isinstance(message, str) or not message:
+                message = ("This Handoff is too old for the Board. Update it: handoff update" if code == "outdated"
+                           else "Handoff isn't answering.")
+            return self._board_error(handoff_api.HandoffApiError(code, message))
+        if "auto-crew" not in hello.get("features", []):
+            return web.json_response({"error": "This Handoff can't pick a crew yet. Update it: handoff update",
+                                      "code": "no_auto_crew"}, status=404)
+        task = request.query.get("task", "").strip()
+        text = request.query.get("text", "").strip()
+        effort_all = request.query.get("effort_all", "").strip().lower()
+        if bool(task) == bool(text) or (task and not re.fullmatch(r"T-[0-9]{1,6}", task)):
+            return web.json_response({"error": "Give the task (T-N) or the text to pick a crew for.",
+                                      "code": "invalid"}, status=400)
+        # The page sends the task id, not the text, so the GET query stays small
+        if len(text) > 4000:
+            return web.json_response({"error": "That text is longer than 4000 characters. Give the task (T-N) instead.",
+                                      "code": "invalid"}, status=400)
+        if effort_all and not re.fullmatch(r"[a-z]{1,10}", effort_all):
+            return web.json_response({"error": "That isn't an effort level.", "code": "invalid"}, status=400)
+        args = {**({"task": task} if task else {"text": text}), **({"effort_all": effort_all} if effort_all else {})}
+        try:
+            root = handoff_api.check_project(request.query.get("project"))
+            data = await self._handoff_call("crew", root, args)
+        except handoff_api.HandoffApiError as exc:
+            return self._board_error(exc)
+
+        def short(value: Any, limit: int) -> str:
+            return value[:limit] if isinstance(value, str) else ""
+
+        efforts = data.get("efforts") if isinstance(data.get("efforts"), dict) else {}
+        roles = data.get("roles") if isinstance(data.get("roles"), list) else []
+        chain = data.get("chain") if isinstance(data.get("chain"), list) else []
+        return web.json_response(_clean({
+            "job": short(data.get("job"), 20), "size": short(data.get("size"), 20), "how": short(data.get("how"), 20),
+            "chain": [m[:80] for m in chain if isinstance(m, str)][:6],
+            "efforts": dict([(k, v[:10]) for k, v in efforts.items()
+                             if isinstance(k, str) and len(k) <= 80 and isinstance(v, str)][:6]),
+            "roles": [{"role": short(r.get("role"), 80), "model": short(r.get("model"), 80),
+                       "effort": short(r.get("effort"), 10), "why": short(r.get("why"), 300)}
+                      for r in roles if isinstance(r, dict)][:6]}))
 
     async def _board_projects(self, request: web.Request) -> web.Response:
         """Git repositories on this computer, for the Board to offer before a project is picked."""

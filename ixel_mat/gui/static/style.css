@@ -1155,16 +1155,17 @@ details.original > summary:hover { color: var(--text-2); }
 .needs .kind span { display: flex; flex-direction: column; }
 .needs .kind small { color: var(--muted); font-size: 12px; }
 .needs-buttons, .dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; }
-.needs textarea, .needs select, .needs .pick-row input, .field input, .field textarea, .field select {
+.needs textarea, .needs select, .needs .pick-row input, .needs .crew-row input, .field input, .field textarea, .field select {
   width: 100%; padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: 8px;
   background: var(--sunken); color: var(--text); font: inherit; font-size: 13.5px; resize: vertical;
 }
 .needs select, .field select { height: 34px; padding: 0 8px; }
-.needs textarea:focus-visible, .needs select:focus-visible, .needs .pick-row input:focus-visible, .field input:focus-visible,
+.needs textarea:focus-visible, .needs select:focus-visible, .needs .pick-row input:focus-visible,
+.needs .crew-row input:focus-visible, .field input:focus-visible,
 .field textarea:focus-visible, .field select:focus-visible { outline: none; box-shadow: var(--ring); }
 
 .needs .model-row { display: flex; flex-direction: column; gap: 6px; }
-.needs .model-row[hidden] { display: none; }
+.needs .model-row[hidden], .needs .model-row > [hidden] { display: none; }
 .needs .fallback-row { display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .needs .fallback-row[hidden] { display: none; }
 .needs .fallback-row input { margin: 2px 0 0; flex: none; }
@@ -1186,6 +1187,27 @@ details.original > summary:hover { color: var(--text-2); }
 .needs .pick-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; width: 100%; }
 .needs .pick-row input { flex: 1 1 180px; min-width: 0; height: 34px; }
 .needs .pick-row select { flex: 0 1 auto; width: auto; }
+.needs .auto-crew {
+  display: flex; align-items: flex-start; gap: 8px; color: var(--text); font-size: 13px; line-height: 1.4;
+  cursor: pointer;
+}
+.needs .auto-crew input { margin: 2px 0 0; flex: none; accent-color: var(--accent-fill); }
+.needs .crew-rows { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; width: 100%; }
+.needs .crew-rows:empty, .needs .crew-actions:empty { display: none; }
+.needs .crew-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; width: 100%; }
+.needs .crew-role { flex: 0 0 92px; color: var(--text-2); font-size: 12px; }
+.needs .crew-row input { flex: 1 1 180px; min-width: 0; height: 34px; }
+.needs .crew-row select { flex: 0 1 auto; width: auto; }
+.needs .crew-why {
+  flex: 1 1 220px; min-width: min(100%, 14em); color: var(--muted); font-size: 12px; line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.needs .crew-why:empty { display: none; }
+.needs .crew-status { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.needs .crew-status:empty { display: none; }
+.needs .crew-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.needs .crew-hint { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.needs .crew-hint:empty { display: none; }
 .needs .worker-enable { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .needs .worker-enable:empty { display: none; }
 .needs .pick-role { flex: 0 0 92px; color: var(--text-2); font-size: 12px; }
@@ -1264,6 +1286,7 @@ details.original > summary:hover { color: var(--text-2); }
 }
 
 @media (max-width: 640px) {
+  .needs .crew-why { flex-basis: 100%; }  /* the reason wraps under the model and effort */
   .board-project { padding: 8px 12px; }
   .board-prs { padding: 8px 12px 10px; }
   .pr { flex-wrap: wrap; }

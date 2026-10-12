@@ -100,7 +100,7 @@ const statusClass = (status) => `pill s-${STATUS_WORDS[status] ? status : "other
 let dot = null;
 let visible = false;
 let timer = null;
-let hello = null;      // whether there's a Handoff with the Board's door: { ok, problem, install, update, project }
+let hello = null;      // Handoff's door: { ok, problem, install, update, project, features }
 let project = "";      // the folder the person picked (Handoff's root for it once read)
 let board = null;      // the board last read for `project`: { exists, revision, project, counts, tasks }
 let failure = null;    // what went wrong with the last look: { message, code }
@@ -1123,51 +1123,128 @@ function closeNeeds() {
 }
 
 // How an edit runs: on the worker's own model, on one model, or as a chain of up to four, biggest first, each at an
-// effort the worker takes (and, where Ixel knows them, the model takes). What's picked lives in `asked.run`, so a
-// redraw keeps it. Returns the row and args(), the approve args it makes ({} for the worker's own model, as it is).
-function runPicker(asked, agent, worker) {
+// effort the worker takes (and, where Ixel knows them, the model takes). Auto, when this Handoff can pick a crew,
+// asks it once for this task and shows that crew, still editable; approve sends those rows, never a bare "auto",
+// so what was seen is what is sealed. What's picked lives in `asked.run` (not `asked.draft`, the kind), so a redraw
+// keeps it. Returns the row and args(), the approve args it makes ({} for the worker's own model, as it is).
+function runPicker(asked, agent, worker, t) {
   const names = WORKER_MODELS[agent] || { suggest: [], one: worker.default_model || "", chain: [] };
   const tidy = (model) => (LOWERCASE_MODELS.has(agent) ? (model || "").trim().toLowerCase() : (model || "").trim());
-  const state = asked.run || (asked.run = { mode: "own", rows: [{ model: "", effort: "" }] });
+  const state = asked.run || (asked.run = { mode: "own", rows: [{ model: "", effort: "" }], auto: false });
+  if (state.auto === undefined) state.auto = false;  // a choice remembered from before Auto existed
   const levels = new Map();  // model -> the levels it takes, once the server has said
   const asking = new Map();  // model -> the server's answer on its way
   const listId = `needs-models-${agent}`;
   const rows = el("div", { class: "pick-rows" });
+  const modeLabel = el("label", { for: "needs-run-mode" }, "Which model?");
   const mode = el("select", { id: "needs-run-mode", "data-key": "needs-run-mode" },
     el("option", { value: "own" }, worker.local ? "The server's first model" : `${agent}'s own model`),
     el("option", { value: "one" }, "One model"),
     worker.chain ? el("option", { value: "chain" }, "A chain of models, biggest first") : null);
   mode.value = state.mode;
   const hint = el("small", {});
+  // Only a Handoff that lists auto-crew, and a worker that runs a chain: otherwise the form is as it was
+  const autoOn = !!(hello && Array.isArray(hello.features) && hello.features.includes("auto-crew") && worker.chain);
+  const usingCrew = () => autoOn && state.auto;
+  let crewRows = null;
+  let crewStatus = null;
+  let crewActions = null;
+  let crewHint = null;
 
   const allowed = (model) => {
     const takes = levels.get(tidy(model));
     return takes ? worker.efforts.filter((l) => takes.includes(l)) : worker.efforts;
   };
-  const effortSelect = (row, i) => {
-    const select = el("select", { "aria-label": `Effort for ${row.model || "its own model"}`, "data-key": `needs-effort-${i}` },
-      [["", "Default effort"], ...allowed(row.model).map((l) => [l, `${EFFORT_WORDS[l] || l} effort`])]
-        .map(([value, text]) => el("option", { value }, text)));
+  // "agent:model" (grok:grok-4.7) is that agent's; a bare name is this worker's. Claude and Codex lowercase models.
+  const knownAgent = (who) => {
+    const lower = who.toLowerCase();
+    if (LOWERCASE_MODELS.has(lower)) return lower;
+    const workers = (t && t.workers) || {};
+    if (workers[who]) return who;
+    if (workers[lower]) return lower;
+    return who;
+  };
+  const modelParts = (raw) => {
+    const text = (raw || "").trim();
+    const colon = text.indexOf(":");
+    if (colon > 0 && colon < text.length - 1) {
+      const who = text.slice(0, colon).trim();
+      const name = text.slice(colon + 1).trim();
+      if (who && name) {
+        const whoId = knownAgent(who);
+        const key = LOWERCASE_MODELS.has(whoId) ? name.toLowerCase() : name;
+        return { agent: whoId, key, prefixed: true };
+      }
+    }
+    return { agent, key: tidy(text), prefixed: false };
+  };
+  const tidyCrew = (raw) => {
+    const parts = modelParts(raw);
+    return parts.prefixed ? `${parts.agent}:${parts.key}` : parts.key;
+  };
+  const effortsOf = (who) => {
+    const known = t && t.workers && t.workers[who];
+    if (known && Array.isArray(known.efforts)) return known.efforts;
+    return Array.isArray(worker.efforts) ? worker.efforts : [];
+  };
+  const crewAllowed = (model) => {
+    const parts = modelParts(model);
+    const takes = levels.get(`${parts.agent}\n${parts.key}`);
+    const efforts = effortsOf(parts.agent);
+    return takes ? efforts.filter((l) => takes.includes(l)) : efforts;
+  };
+  const effortSelect = (row, i, prefix = "needs-effort") => {
+    const crew = prefix === "needs-crew-effort";
+    const choices = crew ? crewAllowed(row.model) : allowed(row.model);
+    const select = el("select", {
+      "aria-label": `Effort for ${row.model || "its own model"}`, "data-key": `${prefix}-${i}`,
+    }, [["", "Default effort"], ...choices.map((l) => [l, `${EFFORT_WORDS[l] || l} effort`])]
+      .map(([value, text]) => el("option", { value }, text)));
     if (![...select.options].some((o) => o.value === row.effort)) row.effort = "";
     select.value = row.effort;
-    select.disabled = !allowed(row.model).length;
+    select.disabled = !choices.length;
     if (select.disabled) select.title = `${row.model} has no effort setting, so it thinks at its default`;
     select.addEventListener("change", () => { row.effort = select.value; });
     return select;
   };
-  const ask = (row, i) => {  // the levels this model takes, where Ixel knows its company's
-    const model = tidy(row.model);
-    if (!model || levels.has(model) || !LOWERCASE_MODELS.has(agent)) return;  // (other workers' levels are their own)
-    if (!asking.has(model)) {
-      asking.set(model, getJSON(`/api/board/levels?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`)
-        .then((found) => { if (Array.isArray(found.levels)) levels.set(model, found.levels); })
+  const ask = (row, i, prefix = "needs-effort") => {  // the levels this model takes, where Ixel knows its company's
+    const crew = prefix === "needs-crew-effort";
+    const parts = crew ? modelParts(row.model) : { agent, key: tidy(row.model) };
+    const model = parts.key;
+    const who = parts.agent;
+    const cacheKey = crew ? `${who}\n${model}` : model;
+    if (!model || levels.has(cacheKey) || !LOWERCASE_MODELS.has(who)) return;  // (other workers' levels are their own)
+    if (!asking.has(cacheKey)) {
+      const query = `agent=${encodeURIComponent(who)}&model=${encodeURIComponent(model)}`;
+      asking.set(cacheKey, getJSON(`/api/board/levels?${query}`)
+        .then((found) => { if (Array.isArray(found.levels)) levels.set(cacheKey, found.levels); })
         .catch(() => { /* the worker's own levels stand */ })
-        .finally(() => asking.delete(model)));
+        .finally(() => asking.delete(cacheKey)));
     }
-    asking.get(model).then(() => {
-      const old = rows.querySelector(`[data-key="needs-effort-${i}"]`);
-      if (levels.has(model) && old && (state.rows[i] || {}).model === row.model) old.replaceWith(effortSelect(row, i));
+    const seen = row.model;  // a crew reply is for the name asked, not one typed since
+    const holder = crew ? crewRows : rows;
+    asking.get(cacheKey).then(() => {
+      const old = holder && holder.querySelector(`[data-key="${prefix}-${i}"]`);
+      const list = crew ? ((state.crew && state.crew.rows) || []) : state.rows;
+      const same = (list[i] || {}).model === (crew ? seen : row.model);
+      if (levels.has(cacheKey) && old && same) old.replaceWith(effortSelect(row, i, prefix));
     });
+  };
+  const modelBox = (row, i, prefix, label) => {
+    const box = el("input", { type: "text", list: listId, value: row.model, spellcheck: "false", autocomplete: "off",
+      maxlength: "80", placeholder: "a model name", "aria-label": label, "data-key": `${prefix}-${i}` });
+    box.addEventListener("input", () => { row.model = box.value; });
+    box.addEventListener("change", () => {
+      row.model = box.value;
+      const effortPrefix = prefix === "needs-crew-model" ? "needs-crew-effort" : "needs-effort";
+      ask(row, i, effortPrefix);
+      // A crew model's effort list follows its agent, even when that agent has no levels lookup
+      if (prefix === "needs-crew-model" && crewRows) {
+        const old = crewRows.querySelector(`[data-key="${effortPrefix}-${i}"]`);
+        if (old) old.replaceWith(effortSelect(row, i, effortPrefix));
+      }
+    });
+    return box;
   };
   const draw = () => {
     const changed = state.mode !== mode.value;  // (a redraw keeps what was typed, a blank model too)
@@ -1180,13 +1257,10 @@ function runPicker(asked, agent, worker) {
     rows.replaceChildren(...state.rows.map((row, i) => {
       const parts = [];
       if (state.mode !== "own") {
-        parts.push(el("span", { class: "pick-role" }, state.mode === "chain" ? (i === 0 ? "Plans" : `Step model ${i}`) : "Model"));
-        const box = el("input", { type: "text", list: listId, value: row.model, spellcheck: "false", autocomplete: "off",
-          maxlength: "80", placeholder: "a model name", "aria-label": state.mode === "chain" && i === 0 ? "Planning model" : "Model",
-          "data-key": `needs-model-${i}` });
-        box.addEventListener("input", () => { row.model = box.value; });
-        box.addEventListener("change", () => ask(row, i));
-        parts.push(box);
+        const role = state.mode === "chain" ? (i === 0 ? "Plans" : `Step model ${i}`) : "Model";
+        parts.push(el("span", { class: "pick-role" }, role));
+        const label = state.mode === "chain" && i === 0 ? "Planning model" : "Model";
+        parts.push(modelBox(row, i, "needs-model", label));
       }
       parts.push(effortSelect(row, i));
       if (state.mode === "chain" && state.rows.length > 2) {
@@ -1242,27 +1316,193 @@ function runPicker(asked, agent, worker) {
     enable.replaceChildren(el("small", {}, `${worker.label || agent} waits for your yes before it changes files here.`), button);
   };
   drawEnable();
-  const row = el("div", { class: "model-row" }, el("label", { for: "needs-run-mode" }, "Which model?"), mode, rows, hint,
-    about, enable, list);
-  const args = () => {
-    const typed = state.rows.map((r) => ({ model: tidy(r.model), effort: r.effort }));
-    if (state.mode === "own") return typed[0].effort ? { efforts: { "": typed[0].effort } } : {};
-    // A blank row, or a model named twice, would only come back refused: leave them out
-    const picked = typed.filter((r, i) => r.model && typed.findIndex((o) => o.model === r.model) === i);
+  // The crew Handoff picked, kept on asked.run so toggling Auto off and on (or a redraw) doesn't ask again
+  const clip = (value, limit) => (typeof value === "string" ? value : "").slice(0, limit);
+  const roleWord = (role, i) => {
+    const text = (role || "").trim() || (i === 0 ? "Plans" : `Step ${i}`);
+    return text.charAt(0).toLocaleUpperCase() + text.slice(1);
+  };
+  const crewNote = (crew) => {
+    const job = (crew.job || "").trim();
+    const size = (crew.size || "").trim();
+    const which = size && job ? `A ${size} ${job} task. ` : (size || job ? `A ${size || job} task. ` : "");
+    return `${which}Handoff picked these for this task. Change any model or effort; what you see is what runs.`;
+  };
+  const crewRowsFrom = (found) => {
+    const roles = Array.isArray(found.roles) ? found.roles.filter((r) => r && typeof r === "object") : [];
+    let made;
+    if (roles.length) {
+      made = roles.map((r) => ({
+        role: clip(r.role, 80), model: clip(r.model, 80), effort: clip(r.effort, 10).trim().toLowerCase(),
+        why: clip(r.why, 300),
+      }));
+    } else {
+      const chain = Array.isArray(found.chain) ? found.chain.filter((m) => typeof m === "string") : [];
+      const efforts = found.efforts && typeof found.efforts === "object" ? found.efforts : {};
+      made = chain.map((model) => ({
+        role: "", model: model.slice(0, 80), why: "",
+        effort: typeof efforts[model] === "string" ? efforts[model].slice(0, 10).trim().toLowerCase() : "",
+      }));
+    }
+    return made.slice(0, MAX_MODELS);  // approve seals at most four, and what is shown is what runs
+  };
+  const poke = () => {  // fallbacks follow the models; a crew that arrives has to say so, the toggle's change does
+    if (crewRows && crewRows.isConnected) crewRows.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const setEfforts = async (high) => {
+    const list = (state.crew && state.crew.rows) || [];
+    list.forEach((row, i) => ask(row, i, "needs-crew-effort"));  // (a model typed a moment ago may still be looked up)
+    await Promise.all([...asking.values()]);
+    list.forEach((row, i) => {
+      const choices = crewAllowed(row.model);  // lowest first; none at all stays at Default
+      row.effort = choices.length ? choices[high ? choices.length - 1 : 0] : "";
+      const old = crewRows && crewRows.querySelector(`[data-key="needs-crew-effort-${i}"]`);
+      if (old) old.replaceWith(effortSelect(row, i, "needs-crew-effort"));  // (only the selects: the buttons keep focus)
+    });
+  };
+  const drawCrew = () => {
+    if (!usingCrew() || !crewRows) return;
+    const crew = state.crew;
+    if (!crew || !crew.settled) {
+      crewStatus.textContent = "Picking a crew…";
+      crewRows.replaceChildren();
+      crewActions.replaceChildren();
+      crewHint.textContent = "";
+      return;
+    }
+    if (crew.error) {
+      crewStatus.textContent = `Couldn't pick a crew: ${crew.error}`;
+      crewRows.replaceChildren();
+      crewActions.replaceChildren();
+      crewHint.textContent = "";
+      return;
+    }
+    const list = crew.rows || [];
+    crewStatus.textContent = list.length ? "" : "Handoff didn't pick any models. Switch Auto off to pick them yourself.";
+    crewRows.replaceChildren(...list.map((row, i) => {
+      const role = roleWord(row.role, i);
+      return el("div", { class: "crew-row" },
+        el("span", { class: "crew-role" }, role),
+        modelBox(row, i, "needs-crew-model", `Model for ${role.toLowerCase()}`),
+        effortSelect(row, i, "needs-crew-effort"),
+        el("small", { class: "crew-why" }, row.why || null));
+    }));
+    list.forEach((row, i) => ask(row, i, "needs-crew-effort"));
+    const max = el("button", { type: "button", class: "btn", "data-key": "needs-crew-max" }, "All max");
+    const low = el("button", { type: "button", class: "btn", "data-key": "needs-crew-low" }, "All low");
+    max.addEventListener("click", () => setEfforts(true));
+    low.addEventListener("click", () => setEfforts(false));
+    crewActions.replaceChildren(...(list.length ? [max, low] : []));
+    crewHint.textContent = list.length ? crewNote(crew) : "";
+  };
+  const ensureCrew = () => {
+    const ref = (t && t.ref) || "";
+    const crew = state.crew;
+    if (crew && crew.ref === ref && crew.settled) { drawCrew(); return Promise.resolve(); }
+    if (crew && crew.ref === ref && crew.pending) {  // a redraw while the ask is still out
+      drawCrew();
+      return crew.pending.then(() => {
+        if (usingCrew() && crewRows && crewRows.isConnected) { drawCrew(); poke(); }
+      });
+    }
+    const mine = (state.crewAsk = (state.crewAsk || 0) + 1);  // an older reply is ignored, as fallbackRow's asking
+    state.crew = { ref, rows: [], how: "", job: "", size: "", error: "", settled: false, loading: true };
+    drawCrew();
+    const query = new URLSearchParams({ project: board.project, task: ref });
+    const pending = getJSON(`/api/board/crew?${query}`)
+      .then((found) => {
+        if (mine !== state.crewAsk || !state.crew || state.crew.ref !== ref) return;
+        const body = found && typeof found === "object" ? found : {};
+        state.crew.rows = crewRowsFrom(body);
+        state.crew.how = clip(body.how, 20);
+        state.crew.job = clip(body.job, 20);
+        state.crew.size = clip(body.size, 20);
+        state.crew.error = "";
+      })
+      .catch((e) => {
+        if (mine !== state.crewAsk || !state.crew || state.crew.ref !== ref) return;
+        state.crew.rows = [];
+        state.crew.error = (e && e.message) || "something went wrong";
+      })
+      .finally(() => {
+        if (mine !== state.crewAsk || !state.crew || state.crew.ref !== ref) return;
+        state.crew.loading = false;
+        state.crew.settled = true;
+        if (usingCrew() && crewRows && crewRows.isConnected) { drawCrew(); poke(); }
+      });
+    state.crew.pending = pending;
+    return pending;
+  };
+  const applyAuto = () => {
+    const on = usingCrew();
+    modeLabel.hidden = on;
+    mode.hidden = on;
+    rows.hidden = on;
+    hint.hidden = on;
+    for (const node of [crewStatus, crewRows, crewActions, crewHint]) node.hidden = !on;
+    if (!on) {
+      crewRows.replaceChildren();
+      crewActions.replaceChildren();
+      crewStatus.textContent = "";
+      crewHint.textContent = "";
+      return;
+    }
+    ensureCrew();
+  };
+  let autoLabel = null;
+  if (autoOn) {
+    const autoBox = el("input", { type: "checkbox", id: "needs-auto", "data-key": "needs-auto" });
+    autoBox.checked = !!state.auto;
+    autoBox.addEventListener("change", () => { state.auto = autoBox.checked; applyAuto(); });
+    autoLabel = el("label", { class: "auto-crew", for: "needs-auto" }, autoBox, "Auto: let Handoff pick the crew");
+    crewStatus = el("small", { class: "crew-status", role: "status", hidden: true });
+    crewRows = el("div", { class: "crew-rows", role: "group", "aria-label": "Crew Handoff picked", hidden: true });
+    crewActions = el("div", { class: "crew-actions", hidden: true });
+    crewHint = el("small", { class: "crew-hint", hidden: true });
+  }
+  const row = el("div", { class: "model-row" }, autoLabel, modeLabel, mode, rows, hint,
+    crewStatus, crewRows, crewActions, crewHint, about, enable, list);
+  if (autoOn) applyAuto();
+  const chainArgs = (typed, takes, limit) => {
+    // A blank row, or a model named twice, would only come back refused: leave them out. Auto also stops at
+    // MAX_MODELS, which is all approve will seal.
+    let picked = typed.filter((r, i) => r.model && typed.findIndex((o) => o.model === r.model) === i);
+    if (limit) picked = picked.slice(0, limit);
     const models = picked.map((r) => r.model);
     // Only a level the model takes: one picked for the model typed before goes, and the new one thinks at its default
-    const efforts = Object.fromEntries(picked.filter((r) => r.effort && allowed(r.model).includes(r.effort))
+    const efforts = Object.fromEntries(picked.filter((r) => r.effort && takes(r.model).includes(r.effort))
       .map((r) => [r.model, r.effort]));
     return { models, ...(Object.keys(efforts).length ? { efforts } : {}) };
   };
+  const args = () => {
+    if (usingCrew()) {
+      const list = (state.crew && state.crew.rows) || [];
+      return chainArgs(list.map((r) => ({ model: tidyCrew(r.model), effort: r.effort })), crewAllowed, MAX_MODELS);
+    }
+    const typed = state.rows.map((r) => ({ model: tidy(r.model), effort: r.effort }));
+    if (state.mode === "own") return typed[0].effort ? { efforts: { "": typed[0].effort } } : {};
+    return chainArgs(typed, allowed);
+  };
   // Before args(): the levels of every model as typed now (a model typed just before pressing the button is still
-  // being looked up), and why it can't go yet, if it can't
+  // being looked up), and the crew, if Auto is waiting on it, and why it can't go yet, if it can't
   const ready = async () => {
-    state.rows.forEach((r, i) => ask(r, i));
+    if (usingCrew()) await ensureCrew();
+    const crew = usingCrew() && state.crew && state.crew.settled && !state.crew.error;
+    const list = crew ? state.crew.rows : state.rows;
+    const prefix = crew ? "needs-crew-effort" : "needs-effort";
+    list.forEach((r, i) => ask(r, i, prefix));
     await Promise.all([...asking.values()]);
   };
   const problem = () => {
-    if (worker.needs_ok && !worker.enabled) return `Let ${worker.label || agent} change files first (the button above), or pick another agent.`;
+    if (worker.needs_ok && !worker.enabled) {
+      return `Let ${worker.label || agent} change files first (the button above), or pick another agent.`;
+    }
+    if (usingCrew()) {
+      if (!state.crew || !state.crew.settled) return "The crew is still being picked. Wait for it, then approve.";
+      if (state.crew.error) return "Couldn't pick a crew. Switch Auto off to pick the models yourself.";
+      if (!args().models.length) return "Name a model for the crew, or switch Auto off to pick the models yourself.";
+      return "";
+    }
     return state.mode !== "own" && !args().models.length ? `Name a model to run it on, or pick ${agent}'s own model.` : "";
   };
   return { row, args, ready, problem };
@@ -1426,7 +1666,7 @@ function needsForm(asked, t) {
     // workers take: the task's `workers`)
     const agent = (a.args && a.args.agent) || t.assignee;
     const worker = t.workers && t.workers[agent];
-    const picker = worker && kinds.includes("edit") ? runPicker(asked, agent, worker) : null;
+    const picker = worker && kinds.includes("edit") ? runPicker(asked, agent, worker, t) : null;
     if (picker) {
       const show = () => { picker.row.hidden = kindNow() !== "edit"; };
       form.addEventListener("change", show);
