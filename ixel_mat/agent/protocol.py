@@ -25,7 +25,8 @@ from ixel_mat.modes.review import _UNTRUSTED_NOTE, _clip, _fenced, _unfenced
 ACTIONS: dict[str, dict[str, Any]] = {
     "list_dir": {"required": {}, "optional": {"path": str},
                  "about": "list a folder (default: the workspace); names, kinds, sizes; a file line ends with "
-                          "its kind (picture, video, document, other) when it isn't plain text"},
+                          "its kind (picture, video, document, other) when it isn't plain text; skips node_modules, "
+                          ".venv, dist, build and similar folders unless you name one as path"},
     "read_file": {"required": {"path": str}, "optional": {"start": int, "end": int},
                   "about": "read a text file, or a document (PDF, Word, Excel, PowerPoint, RTF, ODF, HTML) as "
                            "text, or lines start to end (1-based); without start and end, the first 400 lines; "
@@ -36,7 +37,8 @@ ACTIONS: dict[str, dict[str, Any]] = {
                            "at most 8 pictures"},
     "search": {"required": {"pattern": str}, "optional": {"path": str, "glob": str},
                "about": "find lines containing pattern (plain text, case matters), in files under path, "
-                        "names matching glob (like *.py); at most 200 lines"},
+                        "names matching glob (like *.py); skips node_modules, .venv, dist, build and similar "
+                        "folders unless you name one as path; at most 200 lines"},
     "load_skill": {"required": {"name": str}, "optional": {},
                    "about": "read a skill's full text, by its name from the skill index"},
     "remember": {"required": {"text": str}, "optional": {},

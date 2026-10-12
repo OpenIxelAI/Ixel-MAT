@@ -89,3 +89,56 @@ def test_older_result_of_3000_characters_is_kept_whole():
 
 def test_only_the_newest_step_is_sent_in_full():
     assert RECENT_STEPS == 1
+
+
+# ── heavy folders ────────────────────────────────────────────────────────────
+
+def test_list_dir_leaves_out_heavy_folders_and_names_them(ws):
+    _write(ws, "a.txt", "hello")
+    _write(ws, "node_modules/pkg/index.js", "x")
+    _write(ws, "__pycache__/x.pyc", "x")
+    _write(ws, "src/app.py", "x")
+    lines = ws.list_dir(".").splitlines()
+    assert "d src/" in lines and "f a.txt 5" in lines
+    assert lines[-1] == "[skipped __pycache__/, node_modules/: heavy folders; list one by naming it as path]"
+    assert not any("node_modules" in line or "__pycache__" in line for line in lines[:-1])
+
+
+def test_list_dir_of_a_heavy_folder_named_as_path_lists_inside_it(ws):
+    _write(ws, "node_modules/pkg/index.js", "x")
+    assert ws.list_dir("node_modules") == "d pkg/"
+
+
+def test_a_folder_holding_only_a_heavy_folder_says_so(ws):
+    _write(ws, "web/dist/app.js", "x")
+    assert ws.list_dir("web") == "[skipped dist/: heavy folders; list one by naming it as path]"
+
+
+def test_search_skips_heavy_folders_and_names_what_it_skipped(ws):
+    _write(ws, "src/app.py", "needle\n")
+    _write(ws, "node_modules/pkg/index.js", "needle\n")
+    _write(ws, "build/out.js", "needle\n")
+    assert ws.search("needle") == ("src/app.py:1: needle\n"
+                                   "[skipped build/, node_modules/: heavy folders; search one by naming it as path]")
+
+
+def test_search_inside_a_heavy_folder_named_as_path_searches_it(ws):
+    _write(ws, "node_modules/pkg/index.js", "needle\n")
+    assert ws.search("needle", "node_modules") == "node_modules/pkg/index.js:1: needle"
+
+
+def test_search_under_a_nested_heavy_folder_named_as_path_searches_it(ws):
+    _write(ws, "web/dist/app.js", "needle\n")
+    assert ws.search("needle", "web/dist") == "web/dist/app.js:1: needle"
+
+
+def test_search_with_no_match_still_names_the_skipped_folder(ws):
+    _write(ws, "src/app.py", "hello\n")
+    _write(ws, "node_modules/pkg/index.js", "needle\n")
+    assert ws.search("needle") == ("no lines contain 'needle'\n"
+                                   "[skipped node_modules/: heavy folders; search one by naming it as path]")
+
+
+def test_a_file_named_build_is_still_searched(ws):
+    _write(ws, "build", "needle\n")
+    assert ws.search("needle") == "build:1: needle"

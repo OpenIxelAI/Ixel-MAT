@@ -56,6 +56,10 @@ BINARY_PROBE = 8 * 1024        # a NUL byte in this much of the start means the 
 # A file that isn't valid UTF-8 is still read when at most this share of its characters had to be replaced
 # (a stray Latin-1 byte in an otherwise fine file); more than that, and it's treated as not text.
 MAX_REPLACED_SHARE = 0.01
+# Folders of installed or built files that list_dir and search leave out unless the path names one. Names are
+# compared exactly (case matters).
+HEAVY_FOLDERS = frozenset({"node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".tox", ".mypy_cache",
+                           ".pytest_cache", "target", ".next"})
 
 # What view_file looks at
 VIDEOS = frozenset({".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"})
@@ -216,6 +220,19 @@ def _hit_lines(text: str | None, rel: str, pattern: str) -> list[str]:
                 line = line[:MAX_SEARCH_LINE_CHARS] + " […]"
             out.append(f"{rel}:{number}: {line}")
     return out
+
+
+def _is_folder(entry: os.DirEntry) -> bool:
+    """Whether a folder entry is a real folder: a symlink to one isn't, and an error counts as not a folder."""
+    try:
+        return entry.is_dir(follow_symlinks=False)
+    except OSError:
+        return False
+
+
+def _skipped_names(names: set[str]) -> str:
+    """The heavy folders left out, sorted and each with a trailing slash: 'build/, node_modules/'."""
+    return ", ".join(f"{name}/" for name in sorted(names))
 
 
 def _unified_diff(rel: str, old: str, new: str, is_new: bool) -> str:
@@ -482,7 +499,9 @@ class Workspace:
         'l name@' for a symlink (not followed, so one leading out tells nothing about where). .git is left out.
 
         A file line ends with the file's kind when it isn't plain text: 'f photo.jpg 1234 picture', or video,
-        document, other. path may name a fetched repo as scratch:NAME or scratch:NAME/PATH."""
+        document, other. Heavy folders in the listed folder (node_modules, .venv, dist, build and the like, see
+        HEAVY_FOLDERS) are left out and named on a last line; list one by naming it as path. path may name a
+        fetched repo as scratch:NAME or scratch:NAME/PATH."""
         target, _ = self._place(path)
         if not target.is_dir():
             raise WorkspaceError(f"{path!r} isn't a folder")
@@ -491,6 +510,14 @@ class Workspace:
                 entries = sorted((e for e in it if e.name.lower() != ".git"), key=lambda e: e.name)
         except OSError as exc:
             raise WorkspaceError(f"can't list {path!r}: {exc.strerror or type(exc).__name__}") from exc
+        skipped: set[str] = set()
+        kept = []
+        for entry in entries:
+            if entry.name in HEAVY_FOLDERS and _is_folder(entry):
+                skipped.add(entry.name)
+            else:
+                kept.append(entry)
+        entries = kept
         lines = []
         for entry in entries[:MAX_LIST_ENTRIES]:
             try:
@@ -507,6 +534,8 @@ class Workspace:
                 lines.append(f"? {entry.name}")
         if len(entries) > MAX_LIST_ENTRIES:
             lines.append(f"... {len(entries) - MAX_LIST_ENTRIES} more")
+        if skipped:
+            lines.append(f"[skipped {_skipped_names(skipped)}: heavy folders; list one by naming it as path]")
         return "\n".join(lines) if lines else "(empty folder)"
 
     def read_file(self, path: str, start: int | None = None, end: int | None = None) -> str:
@@ -719,8 +748,10 @@ class Workspace:
         """Lines containing pattern (plain text, case matters) as 'path:line: text', in files under path.
 
         glob limits it to file names that match (like *.py). Git's files, secret-looking files, symlinks
-        that lead out, files that aren't text and files over 1 MB are skipped. At most 200 lines. path may
-        name a fetched repo as scratch:NAME or scratch:NAME/PATH; its lines are shown as scratch:NAME/rel."""
+        that lead out, files that aren't text and files over 1 MB are skipped. Heavy folders (HEAVY_FOLDERS:
+        node_modules, .venv, dist, build and the like) are skipped too, unless path names one; a last line
+        says which were skipped. At most 200 lines. path may name a fetched repo as scratch:NAME or
+        scratch:NAME/PATH; its lines are shown as scratch:NAME/rel."""
         if not isinstance(pattern, str) or not pattern:
             raise WorkspaceError("give the text to search for")
         if "\n" in pattern or "\x00" in pattern:
@@ -732,10 +763,13 @@ class Workspace:
             copy, name, top = self._scratch_parts(path)
         else:
             copy, name, top = None, "", self.resolve(path)
+        # A heavy folder is searched only when the path itself names one, as the model typed it
+        named = isinstance(path, str) and any(part in HEAVY_FOLDERS for part in path.replace("\\", "/").split("/"))
+        skipped: set[str] = set()
         if top.is_file():
             files = iter([top])
         elif top.is_dir():
-            files = self._walk(top, fetched=fetched)
+            files = self._walk(top, fetched=fetched, skipped=None if named else skipped)
         else:
             raise WorkspaceError(f"there's no file or folder {path!r}")
         found: list[str] = []
@@ -757,15 +791,22 @@ class Workspace:
                 found.append(line)
             if stopped:
                 break
+        note = f"\n{stopped}" if stopped else ""
+        if skipped:
+            note += f"\n[skipped {_skipped_names(skipped)}: heavy folders; search one by naming it as path]"
         if not found:
-            return f"no lines contain {pattern!r}" + (f"\n{stopped}" if stopped else "")
-        return mask_secrets("\n".join(found)) + (f"\n{stopped}" if stopped else "")
+            return f"no lines contain {pattern!r}" + note
+        return mask_secrets("\n".join(found)) + note
 
-    def _walk(self, top: Path, fetched: bool = False):
+    def _walk(self, top: Path, fetched: bool = False, skipped: set[str] | None = None):
         """The files under top that the agent may read, in name order, without following symlinked folders.
-        fetched: top is in a fetched copy, which has no home-folder rules to apply to its folders."""
+        fetched: top is in a fetched copy, which has no home-folder rules to apply to its folders.
+        skipped: when not None, heavy folders (HEAVY_FOLDERS) are not walked, and their names are added to it."""
         for dirpath, dirnames, filenames in os.walk(top):
             dirnames[:] = sorted(d for d in dirnames if d.lower() != ".git" and not is_secret_name(d))
+            if skipped is not None:
+                skipped.update(d for d in dirnames if d in HEAVY_FOLDERS)
+                dirnames[:] = [d for d in dirnames if d not in HEAVY_FOLDERS]
             if self.computer and not fetched:
                 allowed = []
                 for name in dirnames:
