@@ -4,11 +4,16 @@ One agent run: ask for an action, do it, and show its result on the next turn.
 Reads happen at once. Writes and commands wait for the person, unless a command is on this workspace's
 allowlist. The run stays in memory while it works, and saves its full steps and approvals after each change.
 The page gets the same run with long results cut to 4 KB; the model and the saved session keep more.
+
+Pictures from view_file travel with the next model call only, and only to a model that sees pictures; the
+step's result tells any other model that it can't look at them. The files the person attached to the run are
+listed in its prompt.
 """
 from __future__ import annotations
 
 import asyncio
 import math
+import re
 import secrets
 import threading
 import time
@@ -20,18 +25,22 @@ from pathlib import Path
 from ixel_mat.agent.protocol import Action, NEEDS_APPROVAL, ProtocolError, build_prompt, parse_reply
 from ixel_mat.agent.sandbox import can_sandbox, run_command
 from ixel_mat.agent.store import AgentStore
-from ixel_mat.agent.tools import PendingWrite, Workspace, WorkspaceError
+from ixel_mat.agent.tools import (MAX_PICTURE_BYTES_PER_CALL, MAX_PICTURES_PER_CALL, PendingWrite, Workspace,
+                                  WorkspaceError)
 from ixel_mat.agents import create_agent
 from ixel_mat.agents.base import AgentConfig
 from ixel_mat.ask import AskError, is_ready
 from ixel_mat.limits import USAGE_LIMIT, UsageLimit
 from ixel_mat.material import mask_secrets
+from ixel_mat.pictures import megabytes
 from ixel_mat.runtime import CONNECT_TIMEOUT
 from ixel_mat.usage import Usage, call_usage
 
-Ask = Callable[[str], Awaitable[tuple[str, dict | None]]]
+# A stand-in for the model gets the prompt, and pictures= as well on a turn that has pictures to send
+Ask = Callable[..., Awaitable[tuple[str, dict | None]]]
 MAX_PAGE_RESULT_BYTES = 4 * 1024
 _TERMINAL = ("done", "stopped", "failed")
+_RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
 
 
 def clip_result(text: str) -> str:
@@ -39,8 +48,9 @@ def clip_result(text: str) -> str:
     return text.encode("utf-8")[:MAX_PAGE_RESULT_BYTES].decode("utf-8", errors="ignore")
 
 
-async def _ask_model(cfg: AgentConfig, prompt: str) -> tuple[str, dict | None]:
-    """Ask a model with the agent's whole prompt, using the same lifecycle and usage as ixel ask."""
+async def _ask_model(cfg: AgentConfig, prompt: str, pictures: tuple = ()) -> tuple[str, dict | None]:
+    """Ask a model with the agent's whole prompt, using the same lifecycle and usage as ixel ask. pictures go
+    along only to a model that sees them (the runner says so in the step's result for any other)."""
     if not is_ready(cfg):
         raise AskError(f"{cfg.label} has no API key yet. Run: ixel setup")
     agent = create_agent(cfg)
@@ -56,9 +66,12 @@ async def _ask_model(cfg: AgentConfig, prompt: str) -> tuple[str, dict | None]:
         except Exception as exc:  # noqa: BLE001 — the transport's words, with its key removed
             raise AskError(f"Couldn't connect to {cfg.label}: "
                            f"{mask_secrets(str(exc), [cfg.token]) or type(exc).__name__}") from exc
+        options: dict = {}
+        if pictures and cfg.sees_pictures:
+            options["pictures"] = list(pictures)
         try:
             reply = await asyncio.wait_for(agent.send_and_receive(prompt, use_full_session=True,
-                                                                  on_usage=reported.append),
+                                                                  on_usage=reported.append, **options),
                                            timeout=cfg.call_timeout)
         except asyncio.TimeoutError as exc:
             raise AskError(f"{cfg.label} didn't answer within {int(cfg.call_timeout)} seconds.") from exc
@@ -80,20 +93,27 @@ async def _ask_model(cfg: AgentConfig, prompt: str) -> tuple[str, dict | None]:
 
 
 class AgentRun:
-    """Work on one goal in one workspace. ask can be an async stand-in for the model in tests."""
+    """Work on one goal in one workspace. ask can be an async stand-in for the model in tests.
+
+    run_id lets the app name the run before it starts, so the files the person attaches can be kept under
+    that id (uploads/<run id>/); without it the run gets a fresh one."""
 
     def __init__(self, cfg: AgentConfig, workspace: Path | str | Workspace, goal: str, store: AgentStore,
-                 max_steps: int = 25, ask: Ask | None = None):
+                 max_steps: int = 25, ask: Ask | None = None, run_id: str | None = None):
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
             raise ValueError("max_steps must be a positive whole number")
         if not isinstance(goal, str) or not goal.strip():
             raise ValueError("Say what the agent should do.")
+        if run_id is not None and (not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id)):
+            raise ValueError("a run id is letters, digits, - and _ only")
         self.cfg = cfg
         self.workspace = workspace if isinstance(workspace, Workspace) else Workspace(Path(workspace))
         self.goal = goal
         self.store = store
         self.max_steps = max_steps
-        self.id = secrets.token_hex(16)
+        self.id = run_id if run_id is not None else secrets.token_hex(16)
+        if self.workspace.uploads is None:
+            self.workspace.uploads = store.uploads_dir(self.id)
         self.started = time.time()
         self.status = "running"
         self.answer = ""
@@ -110,10 +130,20 @@ class AgentRun:
         self._decision: bool | None = None
         self._decision_event = asyncio.Event()
         self._command_cancel = threading.Event()
+        self._pictures: list = []  # from view_file: they go with the next model call, and then they're gone
+        self._saw = 0              # how many pictures the last view_file kept, for its step
         self._save()
 
-    async def _default_ask(self, prompt: str) -> tuple[str, dict | None]:
-        return await _ask_model(self.cfg, prompt)
+    async def _default_ask(self, prompt: str, pictures: tuple | list = ()) -> tuple[str, dict | None]:
+        return await _ask_model(self.cfg, prompt, tuple(pictures))
+
+    def _uploads(self) -> list[dict]:
+        """The run's attached files as the page shows them: {id, name, kind}."""
+        try:
+            return [{"id": item["id"], "name": item["name"], "kind": item["kind"]}
+                    for item in self.store.list_uploads(self.id)]
+        except OSError:
+            return []
 
     def _snapshot(self, page: bool) -> dict:
         steps = deepcopy(self.steps)
@@ -124,7 +154,7 @@ class AgentRun:
                 "workspace": str(self.workspace.root), "started": self.started, "answer": self.answer,
                 "error": self.error, "steps": steps,
                 "pending": deepcopy(self.pending) if self.status == "waiting" else None,
-                "usage": dict(self.usage)}
+                "usage": dict(self.usage), "uploads": self._uploads()}
 
     def to_dict(self) -> dict:
         """The run for the app, with the shape in AGENT_BETA.md and results clipped to 4 KB."""
@@ -166,10 +196,22 @@ class AgentRun:
                     self._save()
                     break
                 history = self.steps + ([self._retry] if self._retry is not None else [])
-                prompt = build_prompt(self.goal, self.store.prompt_files(), self.store.skills(), history)
+                try:
+                    attached = self.store.list_uploads(self.id)
+                except OSError:
+                    attached = []
+                prompt = build_prompt(self.goal, self.store.prompt_files(), self.store.skills(), history,
+                                      uploads=attached)
                 self.usage["calls"] += 1
                 self._save()
-                reply, usage = await self._ask(prompt)
+                sent = list(self._pictures)
+                try:
+                    if sent:
+                        reply, usage = await self._ask(prompt, pictures=sent)
+                    else:
+                        reply, usage = await self._ask(prompt)
+                finally:
+                    self._pictures = []  # they go with one call only, whether or not it worked
                 if self.status == "stopped":
                     break
                 step_usage = self._record_usage(usage)
@@ -186,6 +228,7 @@ class AgentRun:
                                    "thought": "", "ok": False,
                                    "result": f"Parse error: {exc}\nSend one corrected JSON action.\n"
                                              f"Your bad reply was:\n{reply}"}
+                    self._pictures = sent  # the corrected reply is the next call, and it still needs to see them
                     self._save()
                     continue
                 self._retry = None
@@ -214,7 +257,15 @@ class AgentRun:
 
     async def _act(self, action: Action, step: dict) -> None:
         """Check an action, wait if needed, then record what happened for the next model turn."""
+        if action.action == "view_file" and not self.cfg.sees_pictures:
+            step.update(ok=False, pictures=0,
+                        result=f"{self.cfg.label} can't see pictures, so view_file shows nothing. Use read_file "
+                               "for a document's text, and finish by saying the picture couldn't be looked at.")
+            self.steps.append(step)
+            self._save()
+            return
         prepared = None
+        self._saw = 0
         try:
             needs_approval = action.action in NEEDS_APPROVAL
             if action.action == "write_file":
@@ -243,6 +294,8 @@ class AgentRun:
             step.update(ok=ok, result=mask_secrets(result, [self.cfg.token]))
         except (WorkspaceError, ValueError, KeyError, OSError) as exc:
             step.update(ok=False, result=mask_secrets(str(exc), [self.cfg.token]))
+        if action.action == "view_file":
+            step["pictures"] = self._saw  # what goes with the next call: 0 when it showed nothing
         if self.status != "stopped":
             self.steps.append(step)
             self._save()
@@ -257,11 +310,36 @@ class AgentRun:
                                                           else f"exit code {result.returncode}")
             sandbox = "sandboxed" if result.sandboxed else "ran without a sandbox"
             return result.returncode == 0 and not result.cancelled, f"{status}; {sandbox}\n{result.output}"
+        if action.action == "view_file":
+            return True, await self._look(action)
         if action.action in ("load_skill", "remember"):
             tool = getattr(self.store, action.action)
         else:
             tool = getattr(self.workspace, action.action)
         return True, await asyncio.to_thread(tool, **action.args)
+
+    async def _look(self, action: Action) -> str:
+        """Run view_file. Its pictures wait in self._pictures for the next model call, at most
+        MAX_PICTURES_PER_CALL of them and MAX_PICTURE_BYTES_PER_CALL in all; the rest are left out, and the
+        text says how many and why."""
+        viewed = await asyncio.to_thread(self.workspace.view_file, **action.args)
+        kept, total, why = [], 0, ""
+        for picture in viewed.pictures:
+            if len(kept) >= MAX_PICTURES_PER_CALL:
+                why = f"a model call takes at most {MAX_PICTURES_PER_CALL} pictures"
+                break
+            if total + len(picture.data) > MAX_PICTURE_BYTES_PER_CALL:
+                why = f"a model call takes at most {megabytes(MAX_PICTURE_BYTES_PER_CALL)} of pictures"
+                break
+            kept.append(picture)
+            total += len(picture.data)
+        self._pictures = kept
+        self._saw = len(kept)
+        text = viewed.text
+        left = len(viewed.pictures) - len(kept)
+        if left:
+            text += f"\n[{left} picture{'' if left == 1 else 's'} left out: {why}]"
+        return text
 
     async def decide(self, approve: bool, always: bool = False) -> dict:
         """Approve or deny the pending action and let the background loop continue."""
