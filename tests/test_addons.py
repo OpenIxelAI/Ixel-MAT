@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tarfile
 from datetime import datetime
 from pathlib import Path
@@ -1125,7 +1126,9 @@ def test_the_check_sees_no_keys_from_your_shell(skill, tmp_path, monkeypatch):
     assert result.ran and result.messages[0].startswith("names:")
     names = set(result.messages[0].split()[1:])
     assert "OPENAI_API_KEY" not in names and "SOME_TOKEN" not in names
-    assert {name.upper() for name in names} <= set(addons.CHECK_ENV)
+    # macOS itself adds __CF_USER_TEXT_ENCODING (a language setting, no secret) to every program it starts
+    added_by_macos = {"__CF_USER_TEXT_ENCODING"} if sys.platform == "darwin" else set()
+    assert {name.upper() for name in names} - added_by_macos <= set(addons.CHECK_ENV)
 
 
 # ── Making a diagram ─────────────────────────────────────────────────────────
