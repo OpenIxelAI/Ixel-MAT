@@ -225,6 +225,19 @@ function renderPanel() {
 // The Diagram button is only there while the Diagram Design add-on is on
 const diagramAvailable = () => Boolean(panel.addons && panel.addons.diagram);
 
+// Which model draws the diagram: picked beside the button, and the pick is remembered for next time
+const DIAGRAM_MODEL_KEY = "ixel.diagram.model";
+let diagramModelId = "";  // the pick made on this page, for a browser that keeps nothing
+
+function rememberedDiagramModel() {
+  try { return localStorage.getItem(DIAGRAM_MODEL_KEY) || diagramModelId; } catch (e) { return diagramModelId; }
+}
+
+function rememberDiagramModel(id) {
+  diagramModelId = id;
+  try { localStorage.setItem(DIAGRAM_MODEL_KEY, id); } catch (e) { /* storage is off: kept for this page only */ }
+}
+
 function renderDiagram() {
   const button = $("#diagram-toggle");
   if (!button) return;  // a page without the button
@@ -233,6 +246,27 @@ function renderDiagram() {
   button.hidden = !offered;
   button.classList.toggle("on", diagram);
   button.setAttribute("aria-pressed", String(diagram));
+  renderDiagramModels();
+}
+
+// The picker lists the models a diagram can be drawn by: the one remembered if it's still there, else the
+// server's default, else the first. Shown only while Diagram is pressed.
+function renderDiagramModels() {
+  const select = $("#diagram-model");
+  if (!select) return;  // a page without the picker
+  const models = panel.diagram_models || [];
+  const remembered = rememberedDiagramModel();
+  const pick = models.find((m) => m.id === remembered) || models.find((m) => m.default) || models[0];
+  select.replaceChildren(...models.map((m) => el("option", { value: m.id, selected: m === pick },
+    m.detail && m.detail !== m.label ? `${m.label} · ${m.detail}` : m.label)));
+  select.hidden = !(diagramAvailable() && diagram && models.length);
+}
+
+// The model object picked for diagrams, or null when none is offered (the server then takes its default)
+function chosenDiagramModel() {
+  const select = $("#diagram-model");
+  const models = panel.diagram_models || [];
+  return (select && models.find((m) => m.id === select.value)) || null;
 }
 
 function saverHint() {
@@ -1482,10 +1516,11 @@ async function askDiagram(question, original) {
   box.value = "";
   grow();
   setBusy(true);
-  const agent = (panel.agents.find((a) => a.ready) || {}).name || null;  // none: Ixel says why
+  const pick = chosenDiagramModel();  // none: Ixel takes its default, or says why it can't
   try {
     const res = await api("/api/diagram", {
-      method: "POST", signal: controller.signal, body: JSON.stringify({ question, agent }),
+      method: "POST", signal: controller.signal,
+      body: JSON.stringify({ question, agent: pick ? pick.agent : null, model: pick ? pick.model : null }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -2289,6 +2324,10 @@ if (diagramToggle) {  // there when the page has the button
     renderDiagram();
     renderFollowup();  // the box says what it's for
   });
+}
+const diagramModel = $("#diagram-model");
+if (diagramModel) {  // there when the page has the picker
+  diagramModel.addEventListener("change", () => rememberDiagramModel(diagramModel.value));
 }
 $("#picture-add").addEventListener("click", () => $("#picture-file").click());
 $("#picture-file").addEventListener("change", (e) => {

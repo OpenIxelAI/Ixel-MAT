@@ -1511,3 +1511,50 @@ code.set-sub { font-family: var(--mono); }
   .diagram-foot .spacer { display: none; }
   .diagram-foot .btn { flex: 1 1 auto; justify-content: center; }
 }
+
+/* Which model draws the diagram: a compact select beside the Diagram button, the height of the buttons around it */
+#diagram-model[hidden] { display: none; }
+.diagram-model {
+  box-sizing: border-box; height: 29px; min-width: 0; max-width: 220px; padding: 0 6px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); color: var(--text-2);
+  font: inherit; font-size: 12.5px; font-weight: 500; text-overflow: ellipsis; cursor: pointer;
+}
+.diagram-model:hover { color: var(--text); border-color: var(--line-strong); }
+.diagram-model:focus-visible { outline: none; box-shadow: var(--ring); }
+
+@media (max-width: 640px) {
+  .diagram-model { max-width: 150px; }
+}
+
+/* Add-ons in Settings: what kind each is, and a warning on one an agent wrote */
+.addon-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
+.addon-badge {
+  display: inline-block; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 999px;
+  font-size: 11px; font-weight: 500; line-height: 18px; color: var(--muted); white-space: nowrap;
+}
+.addon-badge.warn { color: var(--amber); border-color: var(--amber-line); background: var(--amber-wash); }
+.addon-problem { align-items: flex-start; }
+.addon-problem .icon { margin-top: 2px; color: var(--red); }
+.addon-problem .set-text small { color: var(--red); overflow-wrap: anywhere; }
+
+/* The card, in the dialog that asks before an add-on is switched on */
+.addon-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; }
+.addon-dialog p { margin: 0 0 10px; }
+.addon-dialog h3 {
+  margin: 16px 0 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--muted);
+}
+.addon-dialog code { font: 12.5px var(--mono); overflow-wrap: anywhere; }
+.addon-home { user-select: all; }
+.addon-plain { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.addon-plain li { display: flex; align-items: flex-start; gap: 8px; color: var(--text-2); overflow-wrap: anywhere; }
+.addon-plain .icon { width: 15px; height: 15px; margin-top: 3px; color: var(--green); }
+.addon-plain li.warn { color: var(--text); }
+.addon-plain li.warn .icon { color: var(--amber); }
+.addon-commands { display: flex; flex-direction: column; gap: 6px; }
+.addon-commands code {
+  display: block; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--sunken);
+  color: var(--text); white-space: pre-wrap;
+}
+.addon-terms { white-space: pre-line; font-size: 13px; }
+.addon-dialog p.addon-source { margin: 16px 0 0; font-size: 12px; color: var(--muted); }

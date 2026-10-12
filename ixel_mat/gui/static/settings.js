@@ -6,8 +6,9 @@
 // it is kept as config.toml.bak. Models on your own computers (Ollama, LM Studio…) can be added, pointed
 // at another of your computers, or taken off here, never with a key. Everything else about what runs and
 // where things are sent (a command, any other address, a key name) stays with `ixel setup` and the file
-// itself. Keys only go one way: the page can save or remove one, never read it. Add-ons (Diagram Design)
-// are switched on and off here: on downloads one from its pinned release, off removes its files.
+// itself. Keys only go one way: the page can save or remove one, never read it. Add-ons are cards that say
+// what each may do: switching one on shows its card and asks you to approve it, then downloads its files;
+// off removes them. A card's words are untrusted (an agent may have written it), so they're only ever text.
 
 import { $, $$, el, icon, api, getJSON, postJSON } from "./common.js";
 
@@ -25,6 +26,7 @@ const TRIAGE_WORDS = { typesafe: "TypeSafe's decision API", model: "One of your 
 const KEY_STATES = { file: "Saved in Ixel", system: "Set outside Ixel", none: "Not set" };
 const KINDS = { api: "API", cli: "Program", gateway: "Gateway" };
 const NOTE_ICONS = { ok: "check", warn: "info", fail: "alert" };
+const ADDON_KINDS = { skill: "Skill", mcp: "Tool server", cli: "Command-line program" };
 
 let changed = () => {};
 let data = null;          // what the server last said
@@ -44,6 +46,7 @@ let listsLoading = null;
 let listsAgain = false;   // a key changed while the lists were being read: read them once more after
 const listsAsked = new Set();  // models added since the lists were read, asked about once each
 let addons = null;        // the add-ons and whether each is on, once the server has said
+let addonProblems = [];   // cards Ixel couldn't read: { path, error }
 let addonsFailed = "";
 let addonsLoading = null;
 let addonsTaken = 0;      // counts replies, so an older read never replaces a newer one
@@ -130,7 +133,10 @@ function loadAddons() {
   const at = addonsTaken;
   addonsLoading = getJSON("/api/addons")
     .then((reply) => {
-      if (addonsTaken === at) addons = reply.addons || [];
+      if (addonsTaken === at) {
+        addons = reply.addons || [];
+        addonProblems = reply.problems || [];
+      }
       addonsFailed = "";
     })
     .catch((e) => { addonsFailed = e.message; })
@@ -158,10 +164,11 @@ async function post(path, body) {
 }
 
 // One change at a time, each sent with the file's version as it stands once the one before is in.
-// Keys don't depend on the settings file, so a refusal over the file never drops one. An add-on's switch
-// does: it edits the same file.
+// Keys don't depend on the settings file, so a refusal over the file never drops one. Neither does an add-on's
+// switch: it's kept in state.json, and sends the version only so an old [addons] line can be tidied. Its own
+// refusal (a 409: the card changed, or the page was stale) is shown and the list read again, nothing more.
 function send(group, path, body, done) {
-  const onFile = path === "/api/settings" || path === "/api/addons";
+  const onFile = path === "/api/settings";
   const at = epoch;
   pending += 1;
   note(group, "Saving…", "busy");
@@ -170,7 +177,7 @@ function send(group, path, body, done) {
       note(group, "Not saved, since the file changed. Make the change again.", "fail");
       return;
     }
-    const result = await post(path, onFile ? { ...body, version: data.version } : body);
+    const result = await post(path, onFile || path === "/api/addons" ? { ...body, version: data.version } : body);
     if (onFile && !result.ok && result.status === 409) {
       epoch += 1;
       forgetTyped = true;
@@ -872,49 +879,79 @@ function soundCard() {
         (provider) => save("sound", { section: "sound", values: { provider } }))));
 }
 
-// Add-ons: extras Ask can use once they're on. Switching one on downloads it; off removes its files.
+// Add-ons: extras Ask can use once they're on. Each has a card; switching one on shows the card and asks
+// for approval, then downloads its files, and off removes them.
 function addonsCard() {
+  const problems = addonProblems.map(problemRow);
   let rows;
-  if (addons && addons.length) rows = addons.flatMap(addonRows);
-  else if (addons) rows = [el("div", { class: "set-empty" }, "This version of Ixel has no add-ons.")];
+  if (addons && addons.length) rows = [...addons.flatMap(addonRows), ...problems];
+  else if (addons) rows = [el("div", { class: "set-empty" }, "There are no add-ons yet."), ...problems];
   else if (addonsFailed) rows = [el("div", { class: "set-empty" }, `Couldn't read the add-ons: ${addonsFailed}`)];
   else rows = [el("div", { class: "set-empty" }, "Reading the add-ons…")];
   return card("addons", "Add-ons",
-    "Extras you can switch on. One that's switched on is downloaded to this computer, and its files are " +
-    "removed when you switch it off.",
+    "Extras you can switch on. Each one has a card that says what it may do, and turning one on shows you that " +
+    "and asks you to approve it. Its files are downloaded to this computer and removed when you switch it off.",
     rows);
 }
 
-// A switch, then a line under it: why it can't be switched on yet, or where its files are
+// A card Ixel couldn't read: which file, and why
+function problemRow(p) {
+  return el("div", { class: "set-row addon-problem", role: "note" }, icon("alert"),
+    el("span", { class: "set-text" },
+      el("small", {}, "Ixel couldn't read a card: ", el("code", { class: "set-sub" }, p.path), ": ", p.error)));
+}
+
+// A switch with its badges, then the lines under it: what changed, or where its files are
 function addonRows(a) {
-  const key = `addon:${a.name}`;
-  const blocked = !a.pinned && !a.on;
-  const line = (...children) => el("div", { class: "set-row" },
-    el("span", { class: "set-text" }, el("small", {}, ...children)));
+  const key = `addon:${a.id}`;
+  const line = (warn, ...children) => el("div", { class: "set-row" },
+    el("span", { class: "set-text" }, el("small", { class: warn ? "set-warn" : null }, ...children)));
   return [
     el("label", { class: "set-row set-toggle" },
-      el("span", { class: "set-text" }, el("span", { class: "set-label" }, a.label),
-        el("small", {}, `${cap(a.about)}. By ${a.author}, ${a.license}.`)),
+      el("span", { class: "set-text" },
+        el("span", { class: "addon-title" }, el("span", { class: "set-label" }, a.name),
+          el("span", { class: "addon-badge" }, ADDON_KINDS[a.kind] || a.kind),
+          a.written_by_agent ? el("span", { class: "addon-badge warn" }, "Written by the agent, not reviewed") : null),
+        el("small", {}, `${a.summary} By ${a.by}, ${a.license}.`)),
       el("span", { class: "set-control" },
         // Disabled from the press until the reply: switching on downloads it, and a second press mustn't race that
-        checkbox(key, a.on, (on) => switchAddon(a, on), !data.editable || blocked, a.label))),
-    blocked ? line("This Ixel has no pinned release yet, so it can't be switched on.") : null,
-    a.on && a.path ? line("Its files are in ", el("code", { class: "set-sub" }, a.path), ".") : null,
+        checkbox(key, Boolean(a.on && a.approved), (on) => switchAddon(a, on), false, a.name))),
+    a.changed_since_approval
+      ? line(true, "Changed since you approved it, so it's off. Turn it on to look it over and approve it again.")
+      : null,
+    a.was_on_before
+      ? line(false, "An earlier Ixel had this on. Turn it on again to see what it may do and approve it.")
+      : null,
+    a.on && a.approved && !a.installed
+      ? line(false, "Its files are missing. Turn it off and on again to download them.")
+      : null,
+    a.enabled && a.path ? line(false, "Its files are in ", el("code", { class: "set-sub" }, a.path), ".") : null,
   ].filter(Boolean);
 }
 
-function switchAddon(a, on) {
-  const key = `addon:${a.name}`;
+// On asks first, with the card's own words: nothing is sent unless it's approved there. Off needs no question.
+async function switchAddon(a, on) {
+  const key = `addon:${a.id}`;
+  if (on && !(await approveDialog(a))) {
+    // The page may have been redrawn while the dialog was open, so the switch is found again
+    const box = findKey(key);
+    if (box) box.checked = Boolean(a.on && a.approved);  // render() waits while another change is saving
+    wantFocus = key;
+    render();
+    return;
+  }
   const box = findKey(key);
   if (box) box.disabled = true;
   wantFocus = key;  // the redraw after the reply puts focus back on its switch
-  send("addons", "/api/addons", { name: a.name, on, version: data.version }, (result) => {
+  const body = on ? { id: a.id, on: true, card_sha256: a.card_sha256 } : { id: a.id, on: false };
+  send("addons", "/api/addons", body, (result) => {
     if (result.ok) {
       // post() has taken reply.settings as the snapshot already
       const reply = result.reply;
       if (Array.isArray(reply.addons)) {
         addonsTaken += 1;
         addons = reply.addons;
+        addonProblems = reply.problems || [];
       } else {
         loadAddons();
       }
@@ -922,10 +959,47 @@ function switchAddon(a, on) {
       changed();  // Ask reads /api/panel again, for whether it offers Diagram
     } else {
       note("addons", result.error, "fail");
-      loadAddons();  // as it is now, in case the file changed under the switch
+      loadAddons();  // as it is now: the card may have changed since the dialog, or the page was stale
     }
   });
   note("addons", on ? "Downloading…" : "Removing…", "busy");
+}
+
+// What the card says it may do, before anything is downloaded or run. Resolves to whether it was approved.
+// Every word here is the card's (an agent may have written it): built from text nodes, never as markup.
+async function approveDialog(a) {
+  const dialog = $("#addon-dialog");
+  if (dialog.open) return false;
+  const plain = Array.isArray(a.plain) ? a.plain : [];
+  const commands = (a.permissions && a.permissions.commands) || [];
+  const cancel = el("button", { type: "button", class: "btn", onclick: () => dialog.close("cancel") }, "Cancel");
+  dialog.replaceChildren(el("form", { method: "dialog" },
+    el("h2", { id: "addon-dialog-title" }, `Turn on ${a.name}?`),
+    a.written_by_agent
+      ? notice("error", "Written by the agent, not reviewed. Ixel didn't make this card: read what it may do " +
+        "before you approve it.")
+      : null,
+    el("p", {}, a.summary),
+    el("p", {}, `By ${a.by} · ${a.license} · `, a.homepage ? el("code", { class: "addon-home" }, a.homepage) : null),
+    el("h3", {}, "What it may do"),
+    el("ul", { class: "addon-plain" }, plain.map((p) => el("li", { class: p.warn ? "warn" : null },
+      icon(p.warn ? "alert" : "check"), el("span", {}, p.text)))),
+    commands.length
+      ? [el("h3", {}, "Programs Ixel may run for it"),
+        el("div", { class: "addon-commands" }, commands.map((argv) =>
+          el("code", {}, Array.isArray(argv) ? argv.join(" ") : String(argv))))]
+      : null,
+    a.terms ? [el("h3", {}, "Terms"), el("p", { class: "addon-terms" }, a.terms)] : null,
+    el("p", { class: "addon-source" }, `Source: ${(a.source || {}).repo} at ${a.version}`),
+    el("div", { class: "dialog-buttons" }, cancel,
+      el("button", { type: "submit", class: "btn primary", value: "yes" }, "Approve and turn on"))));
+  dialog.returnValue = "";
+  const answer = new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "yes"), { once: true });
+  });
+  dialog.showModal();
+  cancel.focus();  // the safe choice; Escape and Cancel both mean no
+  return answer;
 }
 
 function keys() {
