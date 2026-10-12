@@ -355,6 +355,10 @@ class Workspace:
         if not real.is_file():
             raise WorkspaceError(f"there's no file {path!r} to edit; use write_file to make one")
         text, fingerprint = self._current_text(real, path)
+        # A file with Windows line endings: a model copies what read_file showed it with plain \n, so the
+        # edit is matched (and written) with the file's own \r\n
+        if "\r\n" in text and "\r\n" not in old and "\n" in old and text.count(old) == 0:
+            old, new = old.replace("\n", "\r\n"), new.replace("\r\n", "\n").replace("\n", "\r\n")
         count = text.count(old)
         if count == 0:
             raise WorkspaceError(f"old appears 0 times in {path!r}; copy it exactly from read_file")
