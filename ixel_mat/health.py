@@ -413,10 +413,10 @@ def _machine_checks(probe: bool, which=None, system: str | None = None) -> list[
     checks.append(Check("terminal", "Terminal for Connect", "ok", f"Connect opens {terminal.label(window)}")
                   if window else
                   Check("terminal", "Terminal for Connect", "warn", (
-                      "There's no desktop here to open a terminal window on" if terminal.no_screen() else
-                      "There's no terminal Ixel knows how to open (konsole, gnome-terminal, kitty, alacritty or "
-                      "xterm)") + ", so Connect gives the line to run instead: `ixel machines connect NAME` "
-                      "connects in the terminal you're in."))
+                      "There's no desktop here to open a terminal window on, so Connect" if terminal.no_screen() else
+                      f"There's no terminal Ixel knows how to open. {terminal.INSTALL_HINT} Until then, Connect") +
+                      " gives the line to run instead: `ixel machines connect NAME` connects in the terminal "
+                      "you're in."))
     if not probe or not program:
         checks.append(Check("pinned", "Pinned keys", "unchecked", "Check now counts the machines whose key is "
                             "pinned"))
