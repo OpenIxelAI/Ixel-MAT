@@ -722,3 +722,109 @@ def test_the_mac_app_says_why_it_wants_the_microphone():
 def test_linux_window_opens_only_web_links_in_the_browser(uri, opens):
     from ixel_mat.gui.linux_window import opens_in_browser
     assert opens_in_browser(uri) is opens
+
+
+@pytest.mark.parametrize("state", [None, "state"])
+def test_linux_window_keeps_its_storage_in_the_gtk_folder_of_ixels_own(state, tmp_path):
+    """linux_window.py imports nothing from Ixel, so it works out data_dir's folder again. They must agree,
+    or `ixel forget` would delete a folder the window doesn't use."""
+    from ixel_mat.gui.linux_window import storage_folders
+    home = tmp_path / "home"
+    env = {"XDG_STATE_HOME": str(tmp_path / state)} if state else {}
+    data, cache = storage_folders(env, str(home))
+    assert Path(data).parent == Path(cache).parent == window.data_dir("linux", env, home) / "gtk"
+    assert (Path(data).name, Path(cache).name) == ("data", "cache")
+
+
+@pytest.fixture
+def fake_gtk(monkeypatch):
+    """A gi module whose GTK and WebKit write down what linux_window asks of them: the versions it required
+    (calls), the data managers made, and the context and view built from them. Add to `missing` the
+    WebKit2 versions this computer doesn't have."""
+    import types
+
+    calls, managers, missing = [], [], set()
+
+    class WebsiteDataManager:
+        def __init__(self, **options):
+            self.options = options
+            managers.append(self)
+
+    class WebContext:
+        def __init__(self, manager):
+            self.manager = manager
+
+        @staticmethod
+        def new_with_website_data_manager(manager):
+            return WebContext(manager)
+
+    class WebView:
+        def __init__(self, context=None):
+            self.context = context
+
+        @staticmethod
+        def new_with_context(context):
+            return WebView(context)
+
+    def require_version(name, version):
+        calls.append((name, version))
+        if name == "WebKit2" and version in missing:
+            raise ValueError(f"Namespace {name} not available for version {version}")
+
+    gi = types.ModuleType("gi")
+    gi.require_version = require_version
+    repository = types.ModuleType("gi.repository")
+    for name in ("Gdk", "Gio", "GLib", "Gtk"):
+        setattr(repository, name, types.SimpleNamespace(name=name))
+    repository.WebKit2 = types.SimpleNamespace(WebsiteDataManager=WebsiteDataManager, WebContext=WebContext,
+                                               WebView=WebView)
+    gi.repository = repository
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", repository)
+    return types.SimpleNamespace(calls=calls, managers=managers, missing=missing, repository=repository)
+
+
+def test_linux_window_asks_for_gtk_3_and_webkit_4_1_first(fake_gtk):
+    from ixel_mat.gui import linux_window
+    repository = fake_gtk.repository
+    assert linux_window.load_gtk() == (repository.Gdk, repository.Gio, repository.GLib, repository.Gtk,
+                                       repository.WebKit2)
+    assert fake_gtk.calls == [("Gtk", "3.0"), ("Gdk", "3.0"), ("WebKit2", "4.1")]
+
+
+def test_linux_window_falls_back_to_webkit_4_0_and_gives_up_without_it(fake_gtk):
+    from ixel_mat.gui import linux_window
+    fake_gtk.missing.add("4.1")
+    linux_window.load_gtk()
+    assert fake_gtk.calls[-2:] == [("WebKit2", "4.1"), ("WebKit2", "4.0")]
+    fake_gtk.missing.add("4.0")
+    with pytest.raises(ImportError):
+        linux_window.load_gtk()
+
+
+def test_linux_window_builds_its_web_view_on_a_data_manager_with_ixels_own_folders(fake_gtk, tmp_path):
+    from ixel_mat.gui import linux_window
+    *_, WebKit2 = linux_window.load_gtk()
+    folders = linux_window.storage_folders({"XDG_STATE_HOME": str(tmp_path / "state")}, str(tmp_path / "home"))
+    view = linux_window.new_view(WebKit2, folders)
+    [manager] = fake_gtk.managers
+    assert manager.options == {"base_data_directory": folders[0], "base_cache_directory": folders[1]}
+    assert isinstance(view, WebKit2.WebView) and isinstance(view.context, WebKit2.WebContext)
+    assert view.context.manager is manager  # the view uses the manager's folders, not WebKit's own
+    assert not (tmp_path / "state").exists()  # WebKit makes the folders, when it needs them
+
+
+def test_linux_window_uses_ixels_own_folder_unless_given_others(fake_gtk, tmp_path, monkeypatch):
+    from ixel_mat.gui import linux_window
+    *_, WebKit2 = linux_window.load_gtk()
+    home = tmp_path / "home"
+    monkeypatch.setattr(os.path, "expanduser", lambda path: str(home) if path == "~" else path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    linux_window.new_view(WebKit2)
+    monkeypatch.delenv("XDG_STATE_HOME")
+    linux_window.new_view(WebKit2)
+    for manager, env in zip(fake_gtk.managers, [{"XDG_STATE_HOME": str(tmp_path / "state")}, {}]):
+        gtk = window.data_dir("linux", env, home) / "gtk"
+        assert {key: Path(path) for key, path in manager.options.items()} == {
+            "base_data_directory": gtk / "data", "base_cache_directory": gtk / "cache"}
+    assert len(fake_gtk.managers) == 2
