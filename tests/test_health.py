@@ -187,6 +187,100 @@ def test_git_missing_is_a_failure_with_the_line_that_installs_it(monkeypatch):
     assert git["state"] == "fail" and git["fix"] == "winget install --id Git.Git -e"
 
 
+def os_release_file(tmp_path, content: bytes) -> Path:
+    """A fake /etc/os-release, written as bytes so its line endings are exactly these."""
+    path = tmp_path / "os-release"
+    path.write_bytes(content)
+    return path
+
+
+# What distros put in os-release, the family it's in, and the line that installs git and ssh there
+DISTROS = [
+    pytest.param(b'NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID="24.04"\n', "debian",
+                 "sudo apt install git openssh-client", id="ubuntu"),
+    pytest.param(b"ID=debian\n", "debian", "sudo apt install git openssh-client", id="debian"),
+    pytest.param(b'ID=linuxmint\nID_LIKE="ubuntu debian"\n', "debian", "sudo apt install git openssh-client",
+                 id="linuxmint"),
+    pytest.param(b"ID=fedora\nVERSION_ID=41\n", "fedora", "sudo dnf install git openssh-clients", id="fedora"),
+    pytest.param(b'ID="rocky"\nID_LIKE="rhel centos fedora"\n', "fedora", "sudo dnf install git openssh-clients",
+                 id="rocky"),
+    pytest.param(b"ID=arch\n", "arch", "sudo pacman -S git openssh", id="arch"),
+    pytest.param(b"ID=manjaro\nID_LIKE=arch\n", "arch", "sudo pacman -S git openssh", id="manjaro"),
+    pytest.param(b'ID="opensuse-tumbleweed"\nID_LIKE="opensuse suse"\n', "suse",
+                 "sudo zypper install git openssh-clients", id="opensuse-tumbleweed"),
+    pytest.param(b'ID="opensuse-leap"\n', "suse", "sudo zypper install git openssh-clients", id="opensuse-leap"),
+    pytest.param(b"ID=alpine\n", "alpine", "sudo apk add git openssh-client", id="alpine"),
+    pytest.param(b"ID=Alpine\n", "alpine", "sudo apk add git openssh-client", id="upper-case"),
+    pytest.param(b"# A comment\r\nNAME='Linux Mint'\r\n\r\nID='linuxmint'\r\nID_LIKE='ubuntu debian'\r\n",
+                 "debian", "sudo apt install git openssh-client", id="crlf-comment-single-quotes"),
+    pytest.param(b'PRETTY_NAME="Caf\xe9 \xff"\nID=ubuntu\n', "debian", "sudo apt install git openssh-client",
+                 id="not-utf-8"),
+]
+UNKNOWN_DISTROS = [
+    pytest.param(b"ID=nixos\n", id="nixos"),
+    pytest.param(b"", id="empty"),
+    pytest.param(b'PRETTY_NAME="Debian-based"\nVERSION_ID=debian\nID=nixos\n', id="only-id-and-id-like-count"),
+    pytest.param(b"ID=debian-based\n", id="whole-words-only"),
+    pytest.param(b"#ID=ubuntu\n", id="commented-out"),
+]
+
+
+@pytest.mark.parametrize("release, family, line", DISTROS)
+def test_the_distro_is_read_from_id_and_id_like(tmp_path, release, family, line):
+    path = os_release_file(tmp_path, release)
+    assert health.linux_distro(path) == family
+    assert health.linux_install_line(path) == line
+
+
+@pytest.mark.parametrize("release", UNKNOWN_DISTROS)
+def test_a_distro_that_isnt_known_gives_no_family_and_no_line(tmp_path, release):
+    path = os_release_file(tmp_path, release)
+    assert health.linux_distro(path) == "" and health.linux_install_line(path) == ""
+
+
+def test_an_os_release_that_cant_be_read_gives_no_family(tmp_path):
+    assert health.linux_distro(tmp_path / "missing") == ""
+    assert health.linux_distro(tmp_path) == ""  # a folder
+
+
+def test_the_distro_is_read_from_os_release_unless_a_path_is_given(tmp_path, monkeypatch):
+    monkeypatch.setattr(health, "OS_RELEASE", os_release_file(tmp_path, b"ID=arch\n"))
+    assert health.linux_distro() == "arch"
+    other = tmp_path / "other"
+    other.write_bytes(b"ID=fedora\n")
+    assert health.linux_distro(other) == "fedora"
+
+
+@pytest.mark.parametrize("release, _family, line", DISTROS)
+def test_git_missing_on_linux_gives_the_line_for_the_distro(tmp_path, monkeypatch, release, _family, line):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(health, "OS_RELEASE", os_release_file(tmp_path, release))
+    git = checks_of(run_report(settings_with(CLOUD), False, Calls(), found=()))["git"]
+    assert git["state"] == "fail" and git["fix"] == line
+    assert "package manager" not in git["detail"]
+
+
+@pytest.mark.parametrize("release", [b"ID=nixos\n", b"", None], ids=["nixos", "empty", "no-file"])
+def test_git_missing_on_an_unknown_linux_says_to_use_the_package_manager(tmp_path, monkeypatch, release):
+    path = tmp_path / "os-release"
+    if release is not None:
+        path.write_bytes(release)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(health, "OS_RELEASE", path)
+    git = checks_of(run_report(settings_with(CLOUD), False, Calls(), found=()))["git"]
+    assert git["state"] == "fail" and git["fix"] == "" and "package manager" in git["detail"]
+
+
+def test_git_missing_on_a_mac_is_still_xcode_select_and_reads_no_os_release(monkeypatch):
+    def refuse(path=None):
+        raise AssertionError("os-release was read on a Mac")
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(health, "linux_distro", refuse)
+    git = checks_of(run_report(settings_with(CLOUD), False, Calls(), found=()))["git"]
+    assert git["state"] == "fail" and git["fix"] == "xcode-select --install"
+
+
 def test_triage_turned_on_without_a_key_is_flagged():
     report = run_report(settings_with(CLOUD, triage=TriageSettings(enabled=True)), False, Calls())
     assert checks_of(report)["triage"]["state"] == "warn"

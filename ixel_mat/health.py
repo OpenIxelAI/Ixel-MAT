@@ -41,6 +41,16 @@ BROWSER_NAMES = {"msedge": "Microsoft Edge", "chrome": "Google Chrome", "microso
                  "google-chrome-stable": "Google Chrome", "chromium": "Chromium", "chromium-browser": "Chromium",
                  "brave-browser": "Brave"}
 GIT_INSTALL = {"win32": "winget install --id Git.Git -e", "darwin": "xcode-select --install"}
+OS_RELEASE = Path("/etc/os-release")
+# The words of ID and ID_LIKE that put a Linux in each family, in the order install.sh tries them
+DISTRO_FAMILIES = (("debian", ("debian", "ubuntu")), ("fedora", ("fedora", "rhel", "centos")), ("arch", ("arch",)),
+                   ("suse", ("suse", "opensuse")), ("alpine", ("alpine",)))
+# Installs git and ssh together. Argv, never given to a shell: only joined with spaces to be shown
+LINUX_INSTALL = {"debian": ("sudo", "apt", "install", "git", "openssh-client"),
+                 "fedora": ("sudo", "dnf", "install", "git", "openssh-clients"),
+                 "arch": ("sudo", "pacman", "-S", "git", "openssh"),
+                 "suse": ("sudo", "zypper", "install", "git", "openssh-clients"),
+                 "alpine": ("sudo", "apk", "add", "git", "openssh-client")}
 
 
 @dataclass
@@ -99,6 +109,33 @@ async def off_the_loop(fn, *args):
     return await in_daemon_thread(fn, *args)
 
 
+def linux_distro(path: Path | None = None) -> str:
+    """Which family this Linux is in (debian, fedora, arch, suse or alpine), from the ID and ID_LIKE in
+    os-release as install.sh reads them; "" for any other, or when the file can't be read. Any check that
+    needs to know the distro can use it. path is os-release's, OS_RELEASE when None."""
+    try:
+        text = (OS_RELEASE if path is None else path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    values = {}
+    for line in text.splitlines():
+        key, equals, value = line.strip().partition("=")
+        if not equals or key.startswith("#"):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value.lower()
+    words = [("opensuse" if word.startswith("opensuse") else word)
+             for word in f"{values.get('ID', '')} {values.get('ID_LIKE', '')}".split()]
+    return next((family for family, names in DISTRO_FAMILIES if any(word in names for word in words)), "")
+
+
+def linux_install_line(path: Path | None = None) -> str:
+    """The line that installs git and ssh on this Linux, or "" when its distro isn't one Ixel knows."""
+    return " ".join(LINUX_INSTALL.get(linux_distro(path), ()))
+
+
 # ── Ixel MAT itself ───────────────────────────────────────────────────────────
 
 def ixel_checks(settings, which: Callable[[str], str | None] | None = None, keychain_wait: bool = True) -> list[Check]:
@@ -134,6 +171,8 @@ def ixel_checks(settings, which: Callable[[str], str | None] | None = None, keyc
         checks.append(Check("git", "Git", "ok", f"Found at {git}"))
     else:
         fix = GIT_INSTALL.get(sys.platform, "")
+        if not fix and sys.platform.startswith("linux"):
+            fix = linux_install_line()
         checks.append(Check("git", "Git", "fail", "Not found. Code reviews and Handoff need it"
                             + ("" if fix else ": install it with your package manager"), fix))
     return checks
@@ -454,9 +493,13 @@ def _machine_checks(probe: bool, which=None, system: str | None = None) -> list[
     if program:
         checks.append(Check("ssh", "ssh", "ok", f"Found at {program}"))
     else:
+        fix = SSH_INSTALL.get(system, "")
+        if not fix and system.startswith("linux"):
+            fix = linux_install_line()
         checks.append(Check("ssh", "ssh", "fail", "Not installed, or not on PATH, so no machine can connect. " + (
             "Run this in PowerShell as administrator" if system == "win32" else
-            "Install OpenSSH's client (openssh-client, or openssh)"), SSH_INSTALL.get(system, "")))
+            "Run this in a terminal" if fix else
+            "Install OpenSSH's client (openssh-client, or openssh)"), fix))
     window = terminal.find()
     checks.append(Check("terminal", "Terminal for Connect", "ok", f"Connect opens {terminal.label(window)}")
                   if window else
