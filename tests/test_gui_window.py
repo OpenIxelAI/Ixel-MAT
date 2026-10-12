@@ -709,6 +709,42 @@ def test_the_mac_app_shows_a_file_chooser_for_the_page():
     assert "webView.uiDelegate = self" in swift and "runOpenPanelWith parameters: WKOpenPanelParameters" in swift
 
 
+def test_the_mac_app_saves_downloads_to_the_downloads_folder():
+    """Swift can't run here: this checks that the download delegates are there and wired up."""
+    swift = (ROOT / "macos" / "Ixel" / "main.swift").read_text(encoding="utf-8")
+    for wiring in ("webView.navigationDelegate = self", "extension AppDelegate: WKNavigationDelegate",
+                   "extension AppDelegate: WKDownloadDelegate", "shouldPerformDownload", "canShowMIMEType",
+                   "decideDestinationUsing", ".downloadsDirectory", "com.apple.DownloadFileFinished",
+                   "DistributedNotificationCenter", "didFailWithError"):
+        assert wiring in swift, wiring
+    assert swift.count("download.delegate = self") >= 2  # a download that starts from a link, and from a response
+    assert "activateFileViewerSelecting" not in swift  # the Downloads stack bounces; Finder isn't brought up
+
+
+def test_the_mac_app_is_built_for_the_macos_it_needs():
+    """WKDownload came in macOS 11.3, and make-app.sh builds for the version Info.plist says the app needs."""
+    import plistlib
+    script = (ROOT / "macos" / "make-app.sh").read_text(encoding="utf-8")
+    # On the swiftc line that follows xcode-select -p, so the tools are known to be there before it runs
+    found = re.search(r'xcode-select -p [^\n]*&& \\\n\s*swiftc [^\n]*-target "\$\(uname -m\)-apple-macos(\d+)\.(\d+)"',
+                      script)
+    assert found
+    built_for = (int(found.group(1)), int(found.group(2)))
+    minimum = plistlib.loads((ROOT / "macos" / "Info.plist").read_bytes())["LSMinimumSystemVersion"]
+    assert built_for >= (11, 3)
+    assert built_for == (tuple(int(n) for n in minimum.split(".")) + (0, 0))[:2]
+
+
+def test_the_mac_app_keeps_ixels_page_inside_and_opens_web_links_in_the_browser():
+    """The same rules as the Linux window's (linux_window.is_ixel_page and opens_in_browser)."""
+    from ixel_mat.gui.linux_window import opens_in_browser
+    swift = (ROOT / "macos" / "Ixel" / "main.swift").read_text(encoding="utf-8")
+    assert 'url.host == "127.0.0.1"' in swift and "url.user == nil" in swift and "url.password == nil" in swift
+    assert '["http", "https", "mailto"]' in swift and "NSWorkspace.shared.open(url)" in swift
+    for scheme in ("http", "https", "mailto"):
+        assert opens_in_browser(f"{scheme}://x.example/") and f'"{scheme}"' in swift
+
+
 def test_the_mac_app_says_why_it_wants_the_microphone():
     import plistlib
     info = plistlib.loads((ROOT / "macos" / "Info.plist").read_bytes())
