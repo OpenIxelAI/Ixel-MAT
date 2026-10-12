@@ -3,6 +3,8 @@ One agent run: ask for an action, do it, and show its result on the next turn.
 
 Reads happen at once. Writes and commands wait for the person, unless a command is on this workspace's
 allowlist. The run stays in memory while it works, and saves its full steps and approvals after each change.
+With Computer access on for this run, every command asks, and screenshots and opening apps, files or links
+ask too. Paths can reach the home folder and commands run without the sandbox.
 The page gets the same run with long results cut to 4 KB; the model and the saved session keep more.
 
 Pictures from view_file travel with the next model call only, and only to a model that sees pictures; the
@@ -99,15 +101,22 @@ class AgentRun:
     that id (uploads/<run id>/); without it the run gets a fresh one."""
 
     def __init__(self, cfg: AgentConfig, workspace: Path | str | Workspace, goal: str, store: AgentStore,
-                 max_steps: int = 25, ask: Ask | None = None, run_id: str | None = None):
+                 max_steps: int = 25, ask: Ask | None = None, run_id: str | None = None, computer: bool = False):
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
             raise ValueError("max_steps must be a positive whole number")
         if not isinstance(goal, str) or not goal.strip():
             raise ValueError("Say what the agent should do.")
         if run_id is not None and (not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id)):
             raise ValueError("a run id is letters, digits, - and _ only")
+        if not isinstance(computer, bool):
+            raise ValueError("computer must be true or false")
         self.cfg = cfg
-        self.workspace = workspace if isinstance(workspace, Workspace) else Workspace(Path(workspace))
+        self.computer = computer
+        if isinstance(workspace, Workspace):
+            self.workspace = (workspace if workspace.computer == computer else
+                              Workspace(workspace.root, uploads=workspace.uploads, computer=computer))
+        else:
+            self.workspace = Workspace(Path(workspace), computer=computer)
         self.goal = goal
         self.store = store
         self.max_steps = max_steps
@@ -154,7 +163,7 @@ class AgentRun:
                 "workspace": str(self.workspace.root), "started": self.started, "answer": self.answer,
                 "error": self.error, "steps": steps,
                 "pending": deepcopy(self.pending) if self.status == "waiting" else None,
-                "usage": dict(self.usage), "uploads": self._uploads()}
+                "usage": dict(self.usage), "uploads": self._uploads(), "computer": self.computer}
 
     def to_dict(self) -> dict:
         """The run for the app, with the shape in AGENT_BETA.md and results clipped to 4 KB."""
@@ -201,7 +210,7 @@ class AgentRun:
                 except OSError:
                     attached = []
                 prompt = build_prompt(self.goal, self.store.prompt_files(), self.store.skills(), history,
-                                      uploads=attached)
+                                      uploads=attached, computer=self.computer)
                 self.usage["calls"] += 1
                 self._save()
                 sent = list(self._pictures)
@@ -216,7 +225,7 @@ class AgentRun:
                     break
                 step_usage = self._record_usage(usage)
                 try:
-                    action = parse_reply(reply)
+                    action = parse_reply(reply, computer=self.computer)
                 except ProtocolError as exc:
                     self._bad_replies += 1
                     if self._bad_replies > 1:
@@ -265,6 +274,7 @@ class AgentRun:
             self._save()
             return
         prepared = None
+        opened = None
         self._saw = 0
         try:
             needs_approval = action.action in NEEDS_APPROVAL
@@ -273,44 +283,60 @@ class AgentRun:
             elif action.action == "edit_file":
                 prepared = await asyncio.to_thread(self.workspace.prepare_edit, **action.args)
             elif action.action == "run_command":
-                needs_approval = not self.store.is_allowed(self.workspace.root, action.args["argv"])
+                needs_approval = self.computer or not self.store.is_allowed(self.workspace.root, action.args["argv"])
+            elif action.action == "open":
+                opened = await asyncio.to_thread(self.workspace.open_argv, **action.args)
             if needs_approval:
                 self._decision = None
                 self._decision_event.clear()
                 self.pending = {"n": step["n"], "action": action.action, "args": deepcopy(action.args),
                                 "diff": prepared.diff if prepared is not None else "",
                                 "argv": list(action.args["argv"]) if action.action == "run_command" else [],
-                                "sandboxed": can_sandbox() if action.action == "run_command" else False}
+                                "sandboxed": (not self.computer and can_sandbox()
+                                              if action.action == "run_command" else False)}
+                if action.action == "screenshot":
+                    self.pending["diff"] = "Take a picture of the screen (macOS only) and send it to the model."
+                elif opened is not None:
+                    self.pending.update(argv=opened, diff=f"Open {action.args['target']!r} using {opened!r}.")
                 self.status = "waiting"
                 self._save()
                 await self._decision_event.wait()
                 if not self._decision:
                     step["ok"] = False
                     step["result"] = "The person denied this action. It was not run."
+                    if action.action == "screenshot":
+                        step["pictures"] = 0
                     self.steps.append(step)
                     self._save()
                     return
-            ok, result = await self._execute(action, prepared)
+            ok, result = await self._execute(action, prepared, opened)
             step.update(ok=ok, result=mask_secrets(result, [self.cfg.token]))
         except (WorkspaceError, ValueError, KeyError, OSError) as exc:
             step.update(ok=False, result=mask_secrets(str(exc), [self.cfg.token]))
-        if action.action == "view_file":
+        if action.action in ("view_file", "screenshot"):
             step["pictures"] = self._saw  # what goes with the next call: 0 when it showed nothing
         if self.status != "stopped":
             self.steps.append(step)
             self._save()
 
-    async def _execute(self, action: Action, prepared: PendingWrite | None) -> tuple[bool, str]:
+    async def _execute(self, action: Action, prepared: PendingWrite | None,
+                       opened: list[str] | None = None) -> tuple[bool, str]:
         if prepared is not None:
             return True, await asyncio.to_thread(self.workspace.apply, prepared)
-        if action.action == "run_command":
-            result = await asyncio.to_thread(run_command, action.args["argv"], self.workspace.root,
-                                             cancel=self._command_cancel)
+        if action.action in ("run_command", "open"):
+            if action.action == "run_command":
+                result = await asyncio.to_thread(run_command, action.args["argv"], self.workspace.root,
+                                                 cancel=self._command_cancel, computer=self.computer)
+            else:
+                result = await asyncio.to_thread(self.workspace.open, **action.args, expected_argv=opened,
+                                                 cancel=self._command_cancel)
             status = "stopped" if result.cancelled else ("timed out" if result.timed_out
                                                           else f"exit code {result.returncode}")
             sandbox = "sandboxed" if result.sandboxed else "ran without a sandbox"
             return result.returncode == 0 and not result.cancelled, f"{status}; {sandbox}\n{result.output}"
-        if action.action == "view_file":
+        if action.action in ("view_file", "screenshot"):
+            if action.action == "screenshot" and not self.cfg.sees_pictures:
+                return False, f"{self.cfg.label} can't see pictures, so screenshot shows nothing."
             return True, await self._look(action)
         if action.action in ("load_skill", "remember"):
             tool = getattr(self.store, action.action)
@@ -319,10 +345,12 @@ class AgentRun:
         return True, await asyncio.to_thread(tool, **action.args)
 
     async def _look(self, action: Action) -> str:
-        """Run view_file. Its pictures wait in self._pictures for the next model call, at most
+        """Run view_file or an approved screenshot. Its pictures wait for the next model call, at most
         MAX_PICTURES_PER_CALL of them and MAX_PICTURE_BYTES_PER_CALL in all; the rest are left out, and the
         text says how many and why."""
-        viewed = await asyncio.to_thread(self.workspace.view_file, **action.args)
+        tool = getattr(self.workspace, action.action)
+        options = {"cancel": self._command_cancel} if action.action == "screenshot" else {}
+        viewed = await asyncio.to_thread(tool, **action.args, **options)
         kept, total, why = [], 0, ""
         for picture in viewed.pictures:
             if len(kept) >= MAX_PICTURES_PER_CALL:
@@ -348,6 +376,8 @@ class AgentRun:
         if self.status != "waiting" or self.pending is None:
             raise ValueError("This run isn't waiting for an approval.")
         if always:
+            if self.computer:
+                raise ValueError("Computer access requires approval every time; Always allow isn't available.")
             if not approve or self.pending["action"] != "run_command":
                 raise ValueError("Always allow needs an approved command.")
             self.store.allow(self.workspace.root, self.pending["argv"])

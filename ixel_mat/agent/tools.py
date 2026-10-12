@@ -4,7 +4,8 @@ The agent's workspace: the one folder it works in, and the actions that read and
 The model never gets a file handle. It names a path relative to the workspace, and every path goes through
 Workspace.resolve first, which refuses anything outside the folder (`..`, absolute paths, symlinks that lead
 out), Git's own files, files that look like secrets (.env, keys, .netrc) and Ixel's own config folder, for
-reading and writing alike.
+reading and writing alike. With Computer access on, paths may reach the home folder instead; keys and
+browser profiles still can't be used.
 
 Reads happen at once. A write or an edit happens in two halves: prepare_write / prepare_edit checks
 everything and returns the diff the person approves, and apply writes it later, only if the file is still
@@ -24,11 +25,15 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import urlsplit
 
 from ixel_mat import documents, pictures
+from ixel_mat.agent.sandbox import CommandResult, run_command
 from ixel_mat.config import secrets as _secrets
 from ixel_mat.material import mask_secrets
 from ixel_mat.pictures import Picture
@@ -61,6 +66,24 @@ _DURATION = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
 _SECRET_PREFIXES = (".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 _SECRET_SUFFIXES = (".pem", ".key")
 _SECRET_NAMES = frozenset({".netrc", ".npmrc", ".pypirc"})
+# Home folders that hold keys or browser sessions, on macOS, Linux and Windows. Refuse the whole browser
+# folder, including cookies and login databases outside its Profiles subfolder.
+_COMPUTER_SECRET_FOLDERS = (
+    ".ssh", ".aws", ".gnupg", "Library/Keychains", "Library/Safari", "Library/Cookies",
+    "Library/WebKit", "Library/Containers/com.apple.Safari",
+    "Library/Group Containers/group.com.apple.Safari",
+    "Library/Application Support/Google/Chrome", "Library/Application Support/Chromium",
+    "Library/Application Support/Firefox", "Library/Application Support/BraveSoftware",
+    "Library/Application Support/Microsoft Edge", "Library/Application Support/Arc",
+    "Library/Application Support/Vivaldi", "Library/Application Support/com.operasoftware.Opera",
+    ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
+    ".config/microsoft-edge", ".config/vivaldi", ".config/opera", ".config/mozilla",
+    ".var/app/org.mozilla.firefox", ".var/app/com.google.Chrome", ".var/app/org.chromium.Chromium",
+    ".var/app/com.brave.Browser", "snap/firefox", "snap/chromium",
+    "AppData/Local/Google/Chrome", "AppData/Local/Chromium", "AppData/Local/BraveSoftware",
+    "AppData/Local/Microsoft/Edge", "AppData/Local/Vivaldi", "AppData/Local/Mozilla/Firefox",
+    "AppData/Roaming/Mozilla/Firefox", "AppData/Roaming/Opera Software",
+)
 
 
 class WorkspaceError(Exception):
@@ -179,14 +202,18 @@ def _unified_diff(rel: str, old: str, new: str, is_new: bool) -> str:
 
 
 class Workspace:
-    """The folder the agent works in. Every action takes a path relative to it.
+    """The folder the agent works in. With computer=True, paths can also reach anywhere in the home folder
+    except secrets, Git's files and browser profiles. It is off unless the person opts in for this run.
 
     uploads is the folder holding the files the person attached to this run (uploads/<run id>/ in the
     agent's folder; the runner sets it), or None. read_file and view_file name those as upload:NAME."""
 
-    def __init__(self, root: Path, uploads: Path | None = None):
+    def __init__(self, root: Path, uploads: Path | None = None, computer: bool = False):
+        if not isinstance(computer, bool):
+            raise ValueError("computer must be true or false")
         self.root = Path(root).resolve()
         self.uploads = Path(uploads) if uploads is not None else None
+        self.computer = computer
 
     # ── Paths ────────────────────────────────────────────────────────────────
 
@@ -199,6 +226,8 @@ class Workspace:
             raise WorkspaceError("give a path relative to the workspace, like src/app.py")
         if "\x00" in path:
             raise WorkspaceError("a path can't contain a NUL character")
+        if self.computer:
+            return self._resolve_computer(path)
         win = PureWindowsPath(path)
         if (PurePosixPath(path).is_absolute() or win.is_absolute() or win.drive or win.root
                 or path.startswith("~")):
@@ -229,6 +258,60 @@ class Workspace:
                 continue
         return real
 
+    def _resolve_computer(self, path: str) -> Path:
+        """A path anywhere under the person's home folder, with both its spelling and symlink destination
+        checked for secrets. A ~ names only this person's home, never another account's."""
+        home = Path.home()
+        if path == "~":
+            target = home
+        elif path.startswith(("~/", "~\\")):
+            target = home / path[2:]
+        elif path.startswith("~"):
+            raise WorkspaceError("~ can only name your own home folder, like ~/Documents/notes.txt")
+        else:
+            win = PureWindowsPath(path)
+            if os.name != "nt" and (win.drive or win.root) and not PurePosixPath(path).is_absolute():
+                raise WorkspaceError(f"{path!r} isn't a path under your home folder")
+            target = self.root / path
+        self._check_parts(path, target.parts)
+        self._check_parts(path, path.replace("\\", "/").split("/"))
+        self._check_computer_folders(path, target, home)
+        try:
+            real = target.resolve(strict=False)
+            real_home = home.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise WorkspaceError(f"{path!r} can't be followed (a symlink loop?)") from exc
+        if not real.is_relative_to(real_home):
+            raise WorkspaceError(f"{path!r} leads outside your home folder")
+        self._check_parts(path, real.parts)
+        self._check_computer_folders(path, real, real_home)
+        config = _config_folder()
+        if str(real).casefold() == config.casefold() or str(real).casefold().startswith(
+                config.rstrip(os.sep).casefold() + os.sep):
+            raise WorkspaceError(f"{path!r} is in Ixel's own config folder, which the agent can't use")
+        for parent in (real, *real.parents):
+            try:
+                if parent.samefile(config):
+                    raise WorkspaceError(f"{path!r} is in Ixel's own config folder, which the agent can't use")
+            except OSError:
+                continue
+        return real
+
+    def _check_computer_folders(self, path: str, target: Path, home: Path) -> None:
+        """Refuse keys and browser profiles, including a symlink to one or a different case spelling."""
+        shown = str(target).casefold()
+        for folder in _COMPUTER_SECRET_FOLDERS:
+            secret = home / folder
+            try:
+                candidates = (secret, secret.resolve(strict=False))
+            except (OSError, RuntimeError):
+                candidates = (secret,)
+            for candidate in candidates:
+                low = str(candidate).casefold()
+                if shown == low or shown.startswith(low.rstrip(os.sep) + os.sep):
+                    raise WorkspaceError(f"{path!r} is in a secret or browser profile folder, which the agent "
+                                         "can't use")
+
     def _check_parts(self, path: str, parts: list[str] | tuple[str, ...]) -> None:
         for part in parts:
             if part.split(":", 1)[0].lower() == ".git":
@@ -238,6 +321,8 @@ class Workspace:
                                      "write it")
 
     def _rel(self, real: Path) -> str:
+        if self.computer and not real.is_relative_to(self.root):
+            return str(real)
         rel = real.relative_to(self.root).as_posix()
         return rel if rel else "."
 
@@ -557,8 +642,81 @@ class Workspace:
         """The files under top that the agent may read, in name order, without following symlinked folders."""
         for dirpath, dirnames, filenames in os.walk(top):
             dirnames[:] = sorted(d for d in dirnames if d.lower() != ".git" and not is_secret_name(d))
+            if self.computer:
+                allowed = []
+                for name in dirnames:
+                    try:
+                        self.resolve(str(Path(dirpath) / name))
+                    except WorkspaceError:
+                        continue
+                    allowed.append(name)
+                dirnames[:] = allowed
             for name in sorted(filenames):
                 yield Path(dirpath) / name
+
+    # ── Computer access ──────────────────────────────────────────────────────
+
+    def screenshot(self, cancel: threading.Event | None = None) -> Viewed:
+        """Take an approved screenshot on a Mac into a private temp file, then clean it like view_file.
+        The image lives only in memory once this returns; the temporary file and folder are removed."""
+        if not self.computer:
+            raise WorkspaceError("unknown action 'screenshot'; Computer access is off")
+        if sys.platform != "darwin":
+            return Viewed("screenshot isn't supported on this computer; it is macOS only")
+        with tempfile.TemporaryDirectory(prefix="ixel-agent-screen-") as tmp:
+            with tempfile.NamedTemporaryFile(dir=tmp, suffix=".png") as capture:
+                result = run_command(["screencapture", "-x", capture.name], self.root, computer=True, cancel=cancel)
+                if result.returncode != 0 or result.timed_out or result.cancelled:
+                    raise WorkspaceError(f"screenshot failed: {result.output}")
+                return self._picture(Path(capture.name), "screenshot")
+
+    def open_argv(self, target: str) -> list[str]:
+        """Check what an open would do and return the exact words to approve. A bare app name uses open -a
+        on macOS; paths are resolved with the same home and secret checks as any file action."""
+        if not self.computer:
+            raise WorkspaceError("unknown action 'open'; Computer access is off")
+        if not isinstance(target, str) or not target.strip() or "\x00" in target:
+            raise WorkspaceError("give a path, an https:// link or an app name to open")
+        if target.startswith("https://"):
+            try:
+                link = urlsplit(target)
+                valid = bool(link.hostname)
+            except ValueError:
+                valid = False
+            if not valid or any(c.isspace() for c in target):
+                raise WorkspaceError("give a complete https:// link to open")
+            opened = target
+        elif ":" in target and not PureWindowsPath(target).drive:
+            raise WorkspaceError("only https:// links can be opened")
+        elif (target.startswith(("~", ".")) or "/" in target or "\\" in target
+              or PureWindowsPath(target).drive or (self.root / target).exists()
+              or (Path(target).suffix and Path(target).suffix.lower() != ".app")):
+            opened = str(self.resolve(target))
+        elif sys.platform == "darwin":
+            if target.startswith("-"):
+                raise WorkspaceError("an app name can't start with '-'")
+            return ["open", "-a", target]
+        else:
+            raise WorkspaceError("opening an app by name is supported only on macOS; give a path or https:// link")
+        if sys.platform == "darwin":
+            return ["open", "--", opened]
+        if sys.platform == "win32":
+            return ["start", opened]
+        return ["xdg-open", opened]
+
+    def open(self, target: str, expected_argv: list[str] | None = None,
+             cancel: threading.Event | None = None) -> CommandResult:
+        """Open an approved path, link or app, with an argv list and never a command shell. Windows' start is
+        a cmd.exe built-in, so its direct equivalent, os.startfile, opens the target without that shell."""
+        argv = self.open_argv(target)
+        if expected_argv is not None and argv != expected_argv:
+            raise WorkspaceError("the open target changed since it was shown; propose the action again")
+        if sys.platform == "win32":
+            if cancel is not None and cancel.is_set():
+                return CommandResult(argv, None, "[stopped by the person]", False, False, cancelled=True)
+            os.startfile(argv[1])
+            return CommandResult(argv, 0, "", False, False)
+        return run_command(argv, self.root, computer=True, cancel=cancel)
 
     def _matches(self, file: Path, pattern: str) -> list[str]:
         try:
