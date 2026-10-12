@@ -25,17 +25,20 @@ from ixel_mat.modes.review import _UNTRUSTED_NOTE, _clip, _fenced, _unfenced
 ACTIONS: dict[str, dict[str, Any]] = {
     "list_dir": {"required": {}, "optional": {"path": str},
                  "about": "list a folder (default: the workspace); names, kinds, sizes; a file line ends with "
-                          "its kind (picture, video, document, other) when it isn't plain text"},
+                          "its kind (picture, video, document, other) when it isn't plain text; skips node_modules, "
+                          ".venv, dist, build and similar folders unless you name one as path"},
     "read_file": {"required": {"path": str}, "optional": {"start": int, "end": int},
                   "about": "read a text file, or a document (PDF, Word, Excel, PowerPoint, RTF, ODF, HTML) as "
-                           "text, or lines start to end (1-based); at most 200 KB of text, secrets masked"},
+                           "text, or lines start to end (1-based); without start and end, the first 400 lines; "
+                           "at most 200 KB of text, secrets masked"},
     "view_file": {"required": {"path": str}, "optional": {},
                   "about": "look at a picture (PNG or JPEG), up to 6 frames of a video (when ffmpeg is "
                            "installed), or a document's first pictures: they reach you with your next turn; "
                            "at most 8 pictures"},
     "search": {"required": {"pattern": str}, "optional": {"path": str, "glob": str},
                "about": "find lines containing pattern (plain text, case matters), in files under path, "
-                        "names matching glob (like *.py); at most 200 lines"},
+                        "names matching glob (like *.py); skips node_modules, .venv, dist, build and similar "
+                        "folders unless you name one as path; at most 200 lines"},
     "load_skill": {"required": {"name": str}, "optional": {},
                    "about": "read a skill's full text, by its name from the skill index"},
     "remember": {"required": {"text": str}, "optional": {},
@@ -43,7 +46,8 @@ ACTIONS: dict[str, dict[str, Any]] = {
     "write_file": {"required": {"path": str, "content": str}, "optional": {},
                    "about": "write a whole text file (new or replaced); waits for the person's approval"},
     "edit_file": {"required": {"path": str, "old": str, "new": str}, "optional": {},
-                  "about": "replace old with new in a file, where old appears exactly once; waits for approval"},
+                  "about": "replace old with new in a file, where old appears exactly once (a miss shows the "
+                           "closest lines with their numbers); waits for approval"},
     "run_command": {"required": {"argv": list}, "optional": {"cwd": str},
                     "about": "run a command, as a list like [\"pytest\", \"-q\"] (no shell), in the workspace, or "
                              "in a repo you fetched with cwd \"scratch:NAME\" (always waits for approval); "
@@ -82,9 +86,9 @@ MAX_GOAL_CHARS = 20_000
 MAX_ARGS_CHARS = 2_000          # a step's arguments as shown in its header (a write's content can be long)
 MAX_THOUGHT_CHARS = 1_000
 MAX_UPLOAD_NAME_SHOWN = 200     # an attached file's name as listed in the prompt
-MAX_RECENT_RESULT_CHARS = 210_000  # the newest steps' results, enough for a whole 200 KB read
-MAX_OLDER_RESULT_CHARS = 4_000     # older steps' results are cut to this, so a long run's prompt stays sane
-RECENT_STEPS = 3
+MAX_RECENT_RESULT_CHARS = 32 * 1024  # the newest step's result, sent in full up to this
+MAX_OLDER_RESULT_CHARS = 2_000     # an older result is sent as its head and its tail, this long each
+RECENT_STEPS = 1                   # only the newest step's result is sent in full; the rest are cut
 MAX_EARLIER_ANSWER_CHARS = 8_000  # the answer of the run a follow-up continues
 EARLIER_STEPS = 3                 # and its last steps, shown the way older steps are
 MAX_JSON_TRIES = 500            # '{' positions tried when looking for the reply's JSON object
@@ -262,13 +266,23 @@ def _step_header(step: dict, fence: str) -> str:
     return header
 
 
+def _head_and_tail(result: str, label: str) -> str:
+    """A result as its first and last MAX_OLDER_RESULT_CHARS characters, with the count of what was cut between."""
+    if len(result) <= 2 * MAX_OLDER_RESULT_CHARS:
+        return result
+    cut = len(result) - 2 * MAX_OLDER_RESULT_CHARS
+    return (result[:MAX_OLDER_RESULT_CHARS]
+            + f"\n[… {cut} characters cut from the middle of {label}; do the action again if you need it …]\n"
+            + result[-MAX_OLDER_RESULT_CHARS:])
+
+
 def _step_block(step: dict, fence: str, recent: bool) -> str:
     n = step.get("n", "?")
     result = _unfenced(str(step.get("result") or ""), fence)
     if recent:
         result = _clip(result, MAX_RECENT_RESULT_CHARS)
-    elif len(result) > MAX_OLDER_RESULT_CHARS:
-        result = result[:MAX_OLDER_RESULT_CHARS] + "\n[… an older result, cut; do the action again if you need it]"
+    else:
+        result = _head_and_tail(result, "an older result")
     return f"{_step_header(step, fence)}\n{_fenced(fence, f'result of step {n}', result)}"
 
 
@@ -284,9 +298,7 @@ def _earlier_run(earlier: dict, fence: str) -> str:
     if steps:
         lines += ["", f"Its last {len(steps)} step{'' if len(steps) == 1 else 's'}:"]
         for step in steps:
-            result = _unfenced(str(step.get("result") or ""), fence)
-            if len(result) > MAX_OLDER_RESULT_CHARS:
-                result = result[:MAX_OLDER_RESULT_CHARS] + "\n[… cut]"
+            result = _head_and_tail(_unfenced(str(step.get("result") or ""), fence), "an earlier result")
             lines += [_step_header(step, fence), result, ""]
     return _fenced(fence, "data: the earlier run", "\n".join(lines).rstrip())
 
