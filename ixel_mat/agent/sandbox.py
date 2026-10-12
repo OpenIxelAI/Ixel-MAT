@@ -5,9 +5,11 @@ The model never gets a shell: a command is a list of words, run as it is, with t
 a time limit, at most 64 KB of its output kept, and the environment without any keys saved in Ixel
 (child_env). On a Mac it runs under sandbox-exec and on Linux under bubblewrap (bwrap), with the network
 denied and writes allowed only in the workspace and the temp folder; on Linux the secret and browser folders
-(secret_folders) are hidden too. Where neither is there to use (no bwrap, a system that won't let it start,
-or another system), the result says it ran unsandboxed, and the approval card says so before it runs;
-sandbox_unavailable_reason says why.
+(secret_folders) are hidden too, and so are the system and session sockets (/run, the session's runtime
+folder, the X11 and ICE socket folders) and /dev/shm is private, because denying the network doesn't cover
+Unix sockets reachable by path (the session D-Bus, systemd, ssh-agent, the X server, docker.sock).
+Where neither is there to use (no bwrap, a system that won't let it start, or another system), the result
+says it ran unsandboxed, and the approval card says so before it runs; sandbox_unavailable_reason says why.
 With Computer access on, it runs without the sandbox and with the network, keeping the same environment,
 time limit, output limit and way of stopping its children.
 
@@ -45,6 +47,18 @@ _READ_CHUNK = 8 * 1024
 # After the command itself ended, how long the output is still read while programs it left running in the
 # background hold it open, before they're stopped too
 _DRAIN_WAIT = 2.0
+
+# Where the system's and the session's Unix sockets live on Linux (/var/run is normally a link to /run)
+_RUNTIME_FOLDERS = ("/run", "/var/run")
+# Inside those, kept readable: NixOS keeps the programs on the PATH in /run/current-system
+_RUNTIME_KEEP = ("/run/current-system",)
+# Often a link into /run (systemd-resolved), and add-ons that have the network need it for DNS
+_RESOLV_CONF = "/etc/resolv.conf"
+# Folders of the X server's and the session manager's sockets, in the temp folder
+_SOCKET_FOLDERS = (".X11-unix", ".ICE-unix")
+# Variables that point a program at those sockets; a sandboxed command on Linux runs without them
+SESSION_ENV = ("DBUS_SESSION_BUS_ADDRESS", "DBUS_SYSTEM_BUS_ADDRESS", "SSH_AUTH_SOCK", "GPG_AGENT_INFO",
+               "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY", "SESSION_MANAGER")
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "ash", "csh", "tcsh", "yash", "nu",
                      "xonsh", "elvish", "busybox", "cmd", "powershell", "pwsh"})
@@ -169,32 +183,62 @@ def _bwrap_hide(paths: list[str]) -> list[str]:
     return words
 
 
+def _socket_folders(temps: list[str], runtime: list[str], temporary: bool) -> list[str]:
+    """The real paths of the folders that hold session sockets, those there: the X11 and ICE ones in the temp
+    folders (only when the command is given the real temp folders), and the session's runtime folder
+    (XDG_RUNTIME_DIR) when it isn't already under one of the hidden runtime folders."""
+    found: list[str] = []
+    if temporary:
+        found += [os.path.realpath(os.path.join(temp, name)) for temp in temps for name in _SOCKET_FOLDERS]
+    session = os.environ.get("XDG_RUNTIME_DIR")
+    if session:
+        session = os.path.realpath(session)
+        if not any(_inside(session, folder) for folder in runtime):
+            found.append(session)
+    return [path for path in dict.fromkeys(found) if os.path.isdir(path)]
+
+
 def bwrap_argv(workspace: Path, argv: list[str], *, network: bool = False, files: str = "chosen-folder",
                temporary: bool = True) -> list[str]:
     """argv under bubblewrap, with the same rules as sandbox_profile: no network unless network, writes only
     in the workspace (none when files is "none") and the temp folders (temporary=False gives the command a
     private empty /tmp instead), everything else read-only. Reads aren't blocked, except that the secret
-    and browser folders (secret_folders) are hidden. Paths are real paths. It only builds the command;
+    and browser folders (secret_folders) are hidden, and so are the folders of Unix sockets, which the
+    network rule doesn't cover when they're reachable by path: /run (the system and session D-Bus, systemd,
+    Wayland), the session's runtime folder when it's elsewhere, and the X11 and ICE socket folders in the
+    temp folders. /dev/shm is a private empty one. Paths are real paths. It only builds the command;
     can_sandbox says whether bwrap works here."""
     if files not in ("none", "output-folder", "chosen-folder"):
         raise ValueError("unknown files permission")
     ws = os.path.realpath(workspace)
     temps = [path for path in dict.fromkeys([os.path.realpath(tempfile.gettempdir()), os.path.realpath("/tmp")])
              if os.path.exists(path)]
+    runtime = list(dict.fromkeys(os.path.realpath(path) for path in _RUNTIME_FOLDERS if os.path.isdir(path)))
+    keep = [path for path in (*_RUNTIME_KEEP, os.path.realpath(_RESOLV_CONF))
+            if os.path.exists(path) and any(_inside(path, folder) for folder in runtime)]
     # Always bound, read-only when it can't be written, so --chdir works when a --tmpfs or a hidden folder
-    # covers it. A later mount covers an earlier one, so the order matters: the system, the temp folders,
-    # the workspace, then the hidden folders on top
+    # covers it. A later mount covers an earlier one, so the order matters: the system, the runtime folders,
+    # the temp folders, the socket folders, the workspace, then the hidden folders on top
     bind = ["--bind" if files != "none" else "--ro-bind", ws, ws]
-    command = [shutil.which("bwrap") or "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
+    command = [shutil.which("bwrap") or "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", "/dev/shm",
+               "--proc", "/proc"]
+    command += _bwrap_hide(runtime)
+    for path in keep:
+        command += ["--ro-bind", path, path]
     for path in temps:
         command += ["--bind", path, path] if temporary else ["--tmpfs", path]
-    command += bind
+    sockets = _socket_folders(temps, runtime, temporary)
+    command += _bwrap_hide(sockets)
+    # Binding the workspace shows again what's under it (a workspace of /tmp shows /tmp/.X11-unix)
+    masked_inside = [path for path in runtime + sockets if path != ws and _inside(path, ws)]
+    command += bind + _bwrap_hide(masked_inside)
     hidden = [path for path in secret_folders() if os.path.exists(path)]
     command += _bwrap_hide(hidden)
     if any(_inside(ws, path) for path in hidden):
         # The workspace is in a hidden folder, or is one (a fetched repo under Ixel's config folder): bind it
         # back so it stays usable, and hide again what's hidden inside it
-        command += bind + _bwrap_hide([path for path in hidden if path != ws and _inside(path, ws)])
+        command += (bind + _bwrap_hide([path for path in hidden if path != ws and _inside(path, ws)])
+                    + _bwrap_hide(masked_inside))
     command += ["--unshare-pid", "--unshare-ipc", "--unshare-uts"]
     if not network:
         command.append("--unshare-net")
@@ -270,6 +314,16 @@ def sandboxed_argv(argv: list[str], workspace: Path, *, network: bool = False, f
     return bwrap_argv(workspace, argv, network=network, files=files, temporary=temporary)
 
 
+def sandboxed_env(env: dict[str, str]) -> dict[str, str]:
+    """env for a command that runs under the sandbox of this system. On Linux, where sandboxed_argv wraps the
+    command in bubblewrap, it's a copy without the SESSION_ENV names: the sandbox hides the sockets they
+    point at (the session bus, ssh-agent, the X server), so the command isn't pointed at them. Otherwise it's
+    a copy of env as it is."""
+    if sys.platform.startswith("linux") and can_sandbox():
+        return {name: value for name, value in env.items() if name not in SESSION_ENV}
+    return dict(env)
+
+
 def _kill_tree(proc: subprocess.Popen) -> None:
     """Stop a command and everything it started."""
     if os.name == "posix":
@@ -337,12 +391,15 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
     if cancel is not None and cancel.is_set():
         return CommandResult(argv, None, "[stopped by the person]", False, sandboxed, cancelled=True)
     command = sandboxed_argv(argv, folder) if sandboxed else argv
+    env = child_env(nested=False)
+    if sandboxed:
+        env = sandboxed_env(env)
     options: dict = {"start_new_session": True} if os.name == "posix" else {}
     if os.name == "nt":
         from ixel_mat.agents.launch import NO_WINDOW_FLAGS
         options["creationflags"] = NO_WINDOW_FLAGS
     try:
-        proc = subprocess.Popen(command, cwd=folder, env=child_env(nested=False), stdin=subprocess.DEVNULL,
+        proc = subprocess.Popen(command, cwd=folder, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options)
     except FileNotFoundError:
         return CommandResult(argv, 127, f"there's no program {argv[0]!r} (check the name, or give its full path)",

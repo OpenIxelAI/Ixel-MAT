@@ -295,7 +295,13 @@ your computer waits for you.
   and allowed to start), with network access denied and writes allowed only in the workspace and the
   temp folder. The sandbox doesn't limit reads: a sandboxed command can still read any file your user
   can, and print it into the run, except that on Linux your SSH, cloud and browser folders and Ixel's
-  own config folder are hidden from it. On other systems, or on Linux without a working `bwrap`, the
+  own config folder are hidden from it. On Linux the sandbox also hides `/run`, the session's runtime
+  folder, the X11 and ICE socket folders and `/dev/shm`, and drops the environment variables that point
+  at them, because denying the network doesn't stop a program reaching a Unix socket by its path: without
+  this, a command could ask systemd over D-Bus to run something outside the sandbox, or use ssh-agent, the
+  keyring, the X server or `docker.sock`. One known limit: when the network is allowed (add-ons that have
+  it), abstract Unix sockets such as X11's `@/tmp/.X11-unix/X0` stay reachable, since only the network
+  namespace separates those. On other systems, or on Linux without a working `bwrap`, the
   approval card says it is not sandboxed. Computer access (below) is the exception.
 - **None of your keys.** A command runs with the environment Ixel gives it, without any key saved
   in Ixel.

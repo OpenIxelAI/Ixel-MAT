@@ -58,6 +58,10 @@ machine), cron jobs and sub-agents.
   network access denied and writes allowed only in the workspace and the temp folder. Reads aren't limited:
   a sandboxed command can still read any file your user can, except that on Linux the secret and browser
   folders (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser profiles, and Ixel's own config folder) are hidden from it.
+  Linux also hides the host's Unix sockets from it (`/run`, the session's runtime folder, the X11 and ICE
+  socket folders, a private `/dev/shm`) and drops `DBUS_SESSION_BUS_ADDRESS`, `DBUS_SYSTEM_BUS_ADDRESS`,
+  `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `XAUTHORITY` and
+  `SESSION_MANAGER` from its environment, so it can't reach the session bus, systemd, ssh-agent or the X server.
   Where there is no sandbox (Windows for now, or Linux without a working `bwrap`) the approval card says it is
   not sandboxed.
 - On Linux the sandbox needs `bwrap` on the PATH and permission for it to start. If it's missing, install it
@@ -244,6 +248,8 @@ New actions (they work with or without Computer access):
   `{output}` with the run's workspace; with the key-free environment; under `sandbox-exec` on macOS or `bwrap`
   on Linux with the network allowed only when the card says `network = true`, and writes only in the
   workspace (`files = "output-folder"` or `"chosen-folder"`) or nowhere (`"none"`); reads aren't limited (on
-  Linux the secret folders are hidden). Where there's no sandbox, the approval card says so. The first call to each add-on in a run asks
+  Linux the secret folders and the host's Unix sockets are hidden, and the variables that point at them,
+  like `DBUS_SESSION_BUS_ADDRESS` and `SSH_AUTH_SOCK`, are dropped from the environment). Where there's no
+  sandbox, the approval card says so. The first call to each add-on in a run asks
   for approval (showing the add-on, the tool and its arguments); "Always allow" covers that add-on for the
   rest of the run. Servers are stopped when the run ends.
