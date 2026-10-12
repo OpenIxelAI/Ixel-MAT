@@ -1170,6 +1170,8 @@ details.original > summary:hover { color: var(--text-2); }
 .needs .pick-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; width: 100%; }
 .needs .pick-row input { flex: 1 1 180px; min-width: 0; height: 34px; }
 .needs .pick-row select { flex: 0 1 auto; width: auto; }
+.needs .worker-enable { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.needs .worker-enable:empty { display: none; }
 .needs .pick-role { flex: 0 0 92px; color: var(--text-2); font-size: 12px; }
 .needs .pick-row .icon-only { padding: 4px 10px; line-height: 1; }
 .usage { width: 100%; border-collapse: collapse; font-size: 13px; }
