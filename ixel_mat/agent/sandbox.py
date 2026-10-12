@@ -2,11 +2,11 @@
 Running a command the person approved (or always allows), for the agent's run_command.
 
 The model never gets a shell: a command is a list of words, run as it is, with the workspace as its folder,
-a time limit, at most 64 KB of its output kept, and the environment without any keys saved in Ixel
-(child_env). On a Mac it runs under sandbox-exec, with the network denied, writes allowed only in the
-workspace and the temp folder, and the secret folders under the home folder and Ixel's config folder
-unreadable (other reads work, so programs run). Elsewhere nothing like that is there to use, so the result
-says it ran unsandboxed, and the approval card says so before it runs.
+a time limit, its first and last 32 KB of output kept (a line says how much was left out between), and the
+environment without any keys saved in Ixel (child_env). On a Mac it runs under sandbox-exec, with the network
+denied, writes allowed only in the workspace and the temp folder, and the secret folders under the home folder
+and Ixel's config folder unreadable (other reads work, so programs run). Elsewhere nothing like that is there to
+use, so the result says it ran unsandboxed, and the approval card says so before it runs.
 With Computer access on, it runs without sandbox-exec and with the network, keeping the same environment,
 time limit, output limit and way of stopping its children.
 
@@ -33,6 +33,9 @@ from ixel_mat.material import mask_secrets
 
 DEFAULT_TIMEOUT = 120.0
 MAX_OUTPUT_BYTES = 64 * 1024
+# The output kept is its first and last parts, half of MAX_OUTPUT_BYTES each
+_HEAD_BYTES = MAX_OUTPUT_BYTES // 2
+_TAIL_BYTES = MAX_OUTPUT_BYTES - _HEAD_BYTES
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 _READ_CHUNK = 8 * 1024
 # After the command itself ended, how long the output is still read while programs it left running in the
@@ -220,11 +223,12 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 class _Output:
-    """Reads a command's output as it comes, keeping the first MAX_OUTPUT_BYTES and counting the rest (it's
-    still read, so the command never stops on a full pipe)."""
+    """Reads a command's output as it comes, keeping the first and last part of the output and counting the
+    rest (it's still all read, so the command never stops on a full pipe)."""
 
     def __init__(self, stream):
-        self.kept = bytearray()
+        self.head = bytearray()
+        self.tail = bytearray()
         self.total = 0
         self._stream = stream
         self.thread = threading.Thread(target=self._read, name="ixel-agent-output", daemon=True)
@@ -234,15 +238,23 @@ class _Output:
         with suppress(OSError, ValueError):
             while chunk := self._stream.read1(_READ_CHUNK):  # what's there now, up to a chunk
                 self.total += len(chunk)
-                room = MAX_OUTPUT_BYTES - len(self.kept)
+                room = _HEAD_BYTES - len(self.head)
                 if room > 0:
-                    self.kept += chunk[:room]
+                    self.head += chunk[:room]
+                    chunk = chunk[room:]
+                if chunk:
+                    self.tail += chunk
+                    if len(self.tail) > _TAIL_BYTES:
+                        del self.tail[:len(self.tail) - _TAIL_BYTES]
 
     def text(self) -> str:
-        text = bytes(self.kept).decode("utf-8", errors="replace")
-        if self.total > len(self.kept):
-            text += f"\n[output cut at {MAX_OUTPUT_BYTES // 1024} KB; it was {self.total} bytes in all]"
-        return text
+        head, tail, total = bytes(self.head), bytes(self.tail), self.total
+        if total <= len(head) + len(tail):
+            return (head + tail).decode("utf-8", errors="replace")
+        left_out = total - len(head) - len(tail)
+        marker = (f"\n[output cut at {MAX_OUTPUT_BYTES // 1024} KB: {left_out} bytes left out here, "
+                  f"of {total} in all]\n")
+        return head.decode("utf-8", errors="replace") + marker + tail.decode("utf-8", errors="replace")
 
 
 def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEOUT,
