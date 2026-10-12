@@ -6,7 +6,8 @@
 // it is kept as config.toml.bak. Models on your own computers (Ollama, LM Studio…) can be added, pointed
 // at another of your computers, or taken off here, never with a key. Everything else about what runs and
 // where things are sent (a command, any other address, a key name) stays with `ixel setup` and the file
-// itself. Keys only go one way: the page can save or remove one, never read it.
+// itself. Keys only go one way: the page can save or remove one, never read it. Add-ons (Diagram Design)
+// are switched on and off here: on downloads one from its pinned release, off removes its files.
 
 import { $, $$, el, icon, api, getJSON, postJSON } from "./common.js";
 
@@ -42,6 +43,10 @@ let listsFailed = "";
 let listsLoading = null;
 let listsAgain = false;   // a key changed while the lists were being read: read them once more after
 const listsAsked = new Set();  // models added since the lists were read, asked about once each
+let addons = null;        // the add-ons and whether each is on, once the server has said
+let addonsFailed = "";
+let addonsLoading = null;
+let addonsTaken = 0;      // counts replies, so an older read never replaces a newer one
 const naming = new Set(); // models whose Other… box is open, for a name that isn't in the list
 const OTHER = "\u0000other";  // Other…'s value: no model name can hold it
 let found = null;         // the model servers the looks so far found, newest first
@@ -80,6 +85,7 @@ export function shown() {
     load();
   }
   loadLists();
+  loadAddons();
   render();
 }
 
@@ -118,6 +124,23 @@ function loadLists() {
   return listsLoading;
 }
 
+// Which add-ons there are and which are on: the page doesn't wait for it
+function loadAddons() {
+  if (addonsLoading) return addonsLoading;
+  const at = addonsTaken;
+  addonsLoading = getJSON("/api/addons")
+    .then((reply) => {
+      if (addonsTaken === at) addons = reply.addons || [];
+      addonsFailed = "";
+    })
+    .catch((e) => { addonsFailed = e.message; })
+    .finally(() => {
+      addonsLoading = null;
+      render();
+    });
+  return addonsLoading;
+}
+
 // ── Saving ──────────────────────────────────────────────────────────────────
 
 async function post(path, body) {
@@ -135,9 +158,10 @@ async function post(path, body) {
 }
 
 // One change at a time, each sent with the file's version as it stands once the one before is in.
-// Keys don't depend on the settings file, so a refusal over the file never drops one.
+// Keys don't depend on the settings file, so a refusal over the file never drops one. An add-on's switch
+// does: it edits the same file.
 function send(group, path, body, done) {
-  const onFile = path === "/api/settings";
+  const onFile = path === "/api/settings" || path === "/api/addons";
   const at = epoch;
   pending += 1;
   note(group, "Saving…", "busy");
@@ -270,6 +294,7 @@ function build() {
     triage(),
     pictures(),
     soundCard(),
+    addonsCard(),
     keys(),
     kept(),
   ];
@@ -845,6 +870,62 @@ function soundCard() {
       select("sound:provider", data.sound.provider,
         [["", "The first one with a key"], ...data.choices.sound_providers.map((p) => [p.name, p.label])],
         (provider) => save("sound", { section: "sound", values: { provider } }))));
+}
+
+// Add-ons: extras Ask can use once they're on. Switching one on downloads it; off removes its files.
+function addonsCard() {
+  let rows;
+  if (addons && addons.length) rows = addons.flatMap(addonRows);
+  else if (addons) rows = [el("div", { class: "set-empty" }, "This version of Ixel has no add-ons.")];
+  else if (addonsFailed) rows = [el("div", { class: "set-empty" }, `Couldn't read the add-ons: ${addonsFailed}`)];
+  else rows = [el("div", { class: "set-empty" }, "Reading the add-ons…")];
+  return card("addons", "Add-ons",
+    "Extras you can switch on. One that's switched on is downloaded to this computer, and its files are " +
+    "removed when you switch it off.",
+    rows);
+}
+
+// A switch, then a line under it: why it can't be switched on yet, or where its files are
+function addonRows(a) {
+  const key = `addon:${a.name}`;
+  const blocked = !a.pinned && !a.on;
+  const line = (...children) => el("div", { class: "set-row" },
+    el("span", { class: "set-text" }, el("small", {}, ...children)));
+  return [
+    el("label", { class: "set-row set-toggle" },
+      el("span", { class: "set-text" }, el("span", { class: "set-label" }, a.label),
+        el("small", {}, `${cap(a.about)}. By ${a.author}, ${a.license}.`)),
+      el("span", { class: "set-control" },
+        // Disabled from the press until the reply: switching on downloads it, and a second press mustn't race that
+        checkbox(key, a.on, (on) => switchAddon(a, on), !data.editable || blocked, a.label))),
+    blocked ? line("This Ixel has no pinned release yet, so it can't be switched on.") : null,
+    a.on && a.path ? line("Its files are in ", el("code", { class: "set-sub" }, a.path), ".") : null,
+  ].filter(Boolean);
+}
+
+function switchAddon(a, on) {
+  const key = `addon:${a.name}`;
+  const box = findKey(key);
+  if (box) box.disabled = true;
+  wantFocus = key;  // the redraw after the reply puts focus back on its switch
+  send("addons", "/api/addons", { name: a.name, on, version: data.version }, (result) => {
+    if (result.ok) {
+      // post() has taken reply.settings as the snapshot already
+      const reply = result.reply;
+      if (Array.isArray(reply.addons)) {
+        addonsTaken += 1;
+        addons = reply.addons;
+      } else {
+        loadAddons();
+      }
+      note("addons", reply.message || "Saved", "ok");
+      changed();  // Ask reads /api/panel again, for whether it offers Diagram
+    } else {
+      note("addons", result.error, "fail");
+      loadAddons();  // as it is now, in case the file changed under the switch
+    }
+  });
+  note("addons", on ? "Downloading…" : "Removing…", "busy");
 }
 
 function keys() {
