@@ -1455,3 +1455,57 @@ code.set-sub { font-family: var(--mono); }
   .run-preview { grid-column: 2 / -1; }
   #machines-run-open span { display: none; }
 }
+
+/* ── Diagram ───────────────────────────────────────────────────────────── */
+
+/* The composer's Diagram button: there only while the Diagram Design add-on is on; accent while it's pressed */
+#diagram-toggle[hidden] { display: none; }
+#diagram-toggle.on, #diagram-toggle[aria-pressed="true"] {
+  color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft);
+}
+
+/* The reply: which model drew it, what the check said, then the file in its own frame */
+.diagram-turn, .diagram-turn .reply { min-width: 0; }
+.diagram-calls, .diagram-checks, .diagram-result { min-width: 0; margin: 0; }
+.diagram-calls:empty, .diagram-checks:empty, .diagram-result:empty { display: none; }
+.diagram-calls {
+  display: flex; flex-direction: column; gap: 4px; padding: 0; list-style: none; font-size: 12.5px; color: var(--muted);
+}
+.diagram-calls li { display: flex; align-items: flex-start; gap: 7px; overflow-wrap: anywhere; }
+.diagram-calls .icon { width: 14px; height: 14px; margin-top: 2px; flex: none; }
+.diagram-checks { display: flex; flex-direction: column; gap: 8px; }
+.diagram-check {
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); font-size: 13px;
+}
+.diagram-check-head { display: flex; align-items: center; gap: 7px; font-weight: 600; color: var(--text-2); }
+.diagram-check-head .icon { width: 15px; height: 15px; flex: none; }
+.diagram-check ul {
+  max-height: 220px; margin: 6px 0 0; padding: 0; overflow-x: hidden; overflow-y: auto; list-style: none;
+  font: 12px/1.5 var(--mono); color: var(--text-2);
+}
+.diagram-check li { overflow-wrap: anywhere; }
+.diagram-check.ok { border-color: var(--green-line); }
+.diagram-check.ok .diagram-check-head { color: var(--green); }
+.diagram-check.bad { border-color: var(--red-line); background: var(--red-wash); }
+.diagram-check.bad .diagram-check-head { color: var(--red); }
+.diagram-check.skipped .diagram-check-head { color: var(--muted); }
+.diagram-result .notice { margin: 0; }
+.diagram-frame {
+  display: block; width: 100%; max-width: 100%; height: min(70vh, 640px);
+  border: 1px solid var(--line); border-radius: 8px; background: #fff;
+}
+.diagram-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 10px; font-size: 13px; }
+.diagram-file {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; font: 12.5px var(--mono); color: var(--text);
+  overflow-wrap: anywhere;
+}
+.diagram-file .icon { width: 14px; height: 14px; flex: none; color: var(--muted); }
+.diagram-verdict { color: var(--muted); }
+.diagram-verdict.ok { color: var(--green); }
+.diagram-verdict.bad { color: var(--red); }
+
+@media (max-width: 640px) {
+  .diagram-frame { height: min(60vh, 480px); }
+  .diagram-foot .spacer { display: none; }
+  .diagram-foot .btn { flex: 1 1 auto; justify-content: center; }
+}
