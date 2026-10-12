@@ -60,6 +60,10 @@ ACTIONS: dict[str, dict[str, Any]] = {
                          "about": "write an add-on card (its TOML text) as add-on id; Ixel checks it, and that "
                                   "its [source] is what you fetched and hashed, then waits for the person's "
                                   "approval"},
+    "use_tool": {"required": {"addon": str, "tool": str, "arguments": dict}, "optional": {},
+                 "about": "call a listed MCP add-on tool with a JSON object of arguments; waits for "
+                          "approval unless Always allow covers that add-on for this run; pictures reach "
+                          "you with your next turn"},
     "screenshot": {"required": {}, "optional": {},
                    "about": "take a picture of the screen on macOS, after approval; it reaches you with your "
                             "next turn; Computer access only"},
@@ -71,7 +75,7 @@ ACTIONS: dict[str, dict[str, Any]] = {
 }
 # Changes, commands and looking at the screen or opening something wait for the person
 NEEDS_APPROVAL = ("write_file", "edit_file", "run_command", "fetch_repo", "write_addon_card", "screenshot",
-                  "open")
+                  "open", "use_tool")
 COMPUTER_ACTIONS = ("screenshot", "open")
 
 MAX_GOAL_CHARS = 20_000
@@ -85,7 +89,7 @@ MAX_EARLIER_ANSWER_CHARS = 8_000  # the answer of the run a follow-up continues
 EARLIER_STEPS = 3                 # and its last steps, shown the way older steps are
 MAX_JSON_TRIES = 500            # '{' positions tried when looking for the reply's JSON object
 
-_TYPE_NAMES = {str: "text", int: "whole number", list: "list of text"}
+_TYPE_NAMES = {str: "text", int: "whole number", list: "list of text", dict: "JSON object"}
 
 
 class ProtocolError(Exception):
@@ -297,7 +301,8 @@ def _upload_line(upload: Any, fence: str) -> str:
 
 
 def build_prompt(goal: str, files: dict, skills: list, steps: list[dict], fence: str | None = None,
-                 uploads: list[dict] | None = None, computer: bool = False, follows: dict | None = None) -> str:
+                 uploads: list[dict] | None = None, computer: bool = False, follows: dict | None = None,
+                 addon_tools: list[dict] | None = None) -> str:
     """The whole prompt for one turn.
 
     files: {"soul", "user", "memory"} texts (already clipped by the store); skills: (name, description) pairs;
@@ -342,6 +347,13 @@ def build_prompt(goal: str, files: dict, skills: list, steps: list[dict], fence:
         index = "(no skills yet)"
     parts.append("Skills you can load with load_skill (names and descriptions only):\n"
                  + _fenced(fence, "data: skill index", index))
+
+    if addon_tools:
+        listing = _unfenced(json.dumps(addon_tools, ensure_ascii=False), fence)
+        parts.append("MCP add-ons and their tools (use_tool takes addon, tool and arguments). Each call "
+                     "asks for approval unless the person chooses Always allow for that add-on, for this "
+                     "run only. Their card permissions apply even with Computer access on:\n"
+                     + _fenced(fence, "data: MCP tools", listing))
 
     if uploads:
         listing = "\n".join(_upload_line(upload, fence) for upload in uploads)

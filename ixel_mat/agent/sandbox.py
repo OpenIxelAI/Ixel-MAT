@@ -129,13 +129,21 @@ def _quoted(path: str) -> str:
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def sandbox_profile(workspace: Path) -> str:
-    """The sandbox-exec profile: everything allowed except the network, and writes outside the workspace and
-    the temp folders. Paths are real paths, because the sandbox sees /var as /private/var."""
-    allowed = [os.path.realpath(workspace), os.path.realpath(tempfile.gettempdir()), "/private/tmp"]
+def sandbox_profile(workspace: Path, *, network: bool = False, files: str = "chosen-folder",
+                    temporary: bool = True) -> str:
+    """The shared sandbox profile. Commands default to no network and workspace/temp writes; MCP cards
+    pass their network/files permissions and temporary=False to allow only workspace writes, or none.
+    Paths are real paths, because the sandbox sees /var as /private/var."""
+    if files not in ("none", "output-folder", "chosen-folder"):
+        raise ValueError("unknown files permission")
+    allowed = [os.path.realpath(workspace)] if files != "none" else []
+    if temporary:
+        allowed += [os.path.realpath(tempfile.gettempdir()), "/private/tmp"]
     subpaths = " ".join(f"(subpath {_quoted(path)})" for path in dict.fromkeys(allowed))
-    return ("(version 1) (allow default) (deny network*) (deny file-write*) "
-            f'(allow file-write* {subpaths} (literal "/dev/null") (regex #"^/dev/tty"))')
+    devices = ' (literal "/dev/null") (regex #"^/dev/tty")' if temporary else ""
+    writes = f" (allow file-write* {subpaths}{devices})" if subpaths or devices else ""
+    return ("(version 1) (allow default) " + ("" if network else "(deny network*) ")
+            + "(deny file-write*)" + writes)
 
 
 def can_sandbox() -> bool:

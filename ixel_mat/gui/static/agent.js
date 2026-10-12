@@ -869,6 +869,7 @@ function activity(run, live) {
 const ROW_ICONS = {
   read_file: "file", list_dir: "folder", search: "code", view_file: "image", edit_file: "code", write_file: "file",
   run_command: "terminal", screenshot: "image", open: "play", remember: "book", load_skill: "book",
+  use_tool: "play",
 };
 
 // The step as a short past-tense line: "Read greet.py", "Searched for 'TODO'", "Ran npm test"
@@ -883,6 +884,7 @@ function rowWords(step) {
     case "edit_file": return `Edited ${path || "a file"}`;
     case "write_file": return `Wrote ${path || "a file"}`;
     case "run_command": return `Ran ${Array.isArray(args.argv) ? clip(commandLine(args.argv), ROW_SHOWN) : "a command"}`;
+    case "use_tool": return `Used ${clip(args.addon || "add-on", ROW_SHOWN)}: ${clip(args.tool || "tool", ROW_SHOWN)}`;
     case "screenshot": return "Took a screenshot";
     case "open": return `Opened ${clip(args.target || "", ROW_SHOWN)}`;
     case "remember": return "Remembered";
@@ -922,6 +924,7 @@ function stepRow(run, step) {
 // What the run waits for: the change or the exact command, and your answer
 function approvalCard(pending, computerOn) {
   const command = pending.action === "run_command";
+  const addon = pending.action === "use_tool";
   const args = pending.args || {};
   const card = el("section", { class: "agent-approval", "aria-label": "Waiting for your approval" });
   const body = [];
@@ -934,6 +937,11 @@ function approvalCard(pending, computerOn) {
           el("span", {}, "Runs in a sandbox: no network, and it can write only in the workspace and the temp folder."))
         : el("p", { class: "agent-sandbox no" }, icon("alert"),
           el("span", {}, "Not sandboxed: it runs with your account's access (without the keys saved in Ixel).")));
+  } else if (addon) {
+    body.push(el("p", { class: "agent-approval-what" }, pending.diff || "Use this add-on tool:"),
+      el("pre", { class: "agent-command" }, JSON.stringify(args, null, 2)),
+      el("p", { class: `agent-sandbox ${pending.sandboxed ? "ok" : "no"}` },
+        pending.sandboxed ? "Runs in a sandbox with the card's permissions." : "Runs without a sandbox."));
   } else if (WRITES.has(pending.action)) {
     body.push(el("p", { class: "agent-approval-what" },
       pending.action === "write_file" ? "It wants to write " : "It wants to edit ",
@@ -947,9 +955,10 @@ function approvalCard(pending, computerOn) {
     el("button", { type: "button", class: "btn primary", onclick: () => decide(true, false, card) }, icon("check"), el("span", {}, "Approve")),
     el("button", { type: "button", class: "btn danger", onclick: () => decide(false, false, card) }, icon("x"), el("span", {}, "Deny")),
   ];
-  if (command && !computerOn) {
+  if ((command && !computerOn) || addon) {
     buttons.push(el("button", { type: "button", class: "btn", onclick: () => decide(true, true, card),
-      title: "Run it, and from now on run commands that start this way in this workspace without asking" },
+      title: addon ? "Allow this add-on's tools for the rest of this run" :
+        "Run it, and from now on run commands that start this way in this workspace without asking" },
     el("span", {}, "Always allow")));
   }
   card.append(

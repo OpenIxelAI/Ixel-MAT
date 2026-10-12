@@ -8,14 +8,13 @@ by file, into the agent's scratch/ folder, where the agent reads it as scratch:<
   parse_repo_url, resolve_commit, fetch_repo   a link to a full commit, and a private copy of its files
   tree_hash                                    the hash a card's [source] carries, worked out here and never
                                                by the model
-  validate_card, check_source, prepare_card    every rule a card has to meet, and that its [source] is what
-                                               this run fetched and hashed
-  write_card                                   <addons>/<id>/addon.toml, private, after the person approved
-                                               the whole card
+  prepare_agent_card, write_card               validate and write through ixel_mat.addons, after approval
+  check_source                                 require this run's fetched commit and computed tree hash
+  validate_card, prepare_card                  validation-only helpers for the earlier card format when
+                                               the optional add-ons API is absent
 
-The card's rules and the tree hash follow docs/addon-cards.md (on the open-source add-ons branch) and are all
-kept in this one module. That file wasn't in the folder this was written in, so the rules below are the
-task's own description of it: compare them with the file, and change them here if they differ.
+The canonical card format belongs to ixel_mat.addons: the action imports it lazily and uses its validator
+and writer. Without that API, the action reports that add-ons aren't available yet and writes nothing.
 
 A card never turns itself on: the keys that would (enabled, approved) are refused, and the only file written
 is addon.toml. The person reviews and approves it in Settings › Add-ons.
@@ -45,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -59,12 +59,12 @@ import zlib
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import aiohttp
 
 from ixel_mat.agent.sandbox import is_shell_or_interpreter
-from ixel_mat.config.secrets import write_private_file
 
 # Use tomllib (3.11+) or fall back to tomli, the way the config loader does
 try:
@@ -833,9 +833,20 @@ def prepare_card(card_id: str, text: str, fetched: dict[str, dict[str, Any]], ad
     against this run's fetched) and return it ready for approval; nothing is written. CardError otherwise.
     addons_dir defaults to ~/.ixel/addons and builtin_dir to ixel_mat/addons (None, or a missing folder,
     means no built-in cards)."""
-    card = validate_card(text, card_id)
+    module = _addon_api(required=False)
+    if module is None:
+        card = validate_card(text, card_id)  # validation-only helper for the earlier card format
+    else:
+        checked = module.validate_card_text(text)
+        if checked.id != card_id:
+            raise CardError("id", "must match the id given to write_addon_card")
+        source = checked.source
+        card = {"id": checked.id, "name": checked.name, "kind": checked.kind,
+                "source": {key: getattr(source, key) for key in
+                           ("repo", "commit", "subdir", "tree_sha256", "files")}}
     builtin = Path(builtin_dir) if builtin_dir is not None else builtin_addons_dir()
-    if _is_builtin(card_id, builtin):
+    builtin_card = module is not None and any(item.id == card_id and item.builtin for item in module.all_cards())
+    if _is_builtin(card_id, builtin) or builtin_card:
         raise CardError("id", f"{card_id!r} is a built-in add-on's id; pick another id")
     check_source(card, fetched)
     folder = Path(addons_dir) if addons_dir is not None else default_addons_dir()
@@ -854,11 +865,13 @@ def prepare_card(card_id: str, text: str, fetched: dict[str, dict[str, Any]], ad
 
 
 def write_card(pending: PendingCard) -> str:
-    """Write an approved card to <addons>/<id>/addon.toml (private, atomically) and return what to tell the
-    model. The card is checked again first, and nothing is written if an add-on with this id appeared
-    since it was prepared. The only file made is addon.toml; the card stays off until the person approves
-    it in Settings › Add-ons."""
-    validate_card(pending.text, pending.id)
+    """Hand the approved text to the canonical add-ons writer. Never write its files or state ourselves.
+    Recheck the id, built-in protection and whether a card appeared while approval was pending."""
+    module = _addon_api()
+    assert module is not None
+    checked = module.validate_card_text(pending.text)
+    if checked.id != pending.id:
+        raise CardError("id", "must match the approved card's id")
     if _is_builtin(pending.id, pending.builtin_dir):
         raise CardError("id", f"{pending.id!r} is a built-in add-on's id; pick another id")
     folder = pending.path.parent
@@ -867,7 +880,27 @@ def write_card(pending: PendingCard) -> str:
     exists = os.path.lexists(pending.path)
     if exists and not pending.overwrites:
         raise ValueError(f"a card with the id {pending.id!r} appeared while this waited; ask again")
-    _make_private(folder.parent)
-    write_private_file(pending.path, pending.text.encode("utf-8"))
+    module.write_agent_card(pending.text)
     return (f"Wrote {_shown(pending.path)}" + (" (replacing the old card)" if exists else "") + ". It is not "
             "turned on: tell the person to open Settings › Add-ons to review and approve it.")
+
+
+def prepare_agent_card(card_id: str, text: str, fetched: dict[str, dict[str, Any]],
+                       addons_dir: Path | None = None, builtin_dir: Path | None = None) -> PendingCard:
+    """The action requires the canonical API before showing an approval or attempting a write."""
+    _addon_api()
+    return prepare_card(card_id, text, fetched, addons_dir, builtin_dir)
+
+
+def _addon_api(required: bool = True) -> ModuleType | None:
+    """Only the optional add-ons API writes cards; never fall back to writing its files ourselves."""
+    try:
+        module = importlib.import_module("ixel_mat.addons")
+    except ImportError:
+        module = None
+    if not all(callable(getattr(module, name, None)) for name in
+               ("validate_card_text", "write_agent_card", "all_cards")):
+        if required:
+            raise CardError("", "Add-ons aren't available yet in this Ixel.")
+        return None
+    return module

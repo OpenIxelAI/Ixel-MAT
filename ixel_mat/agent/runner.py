@@ -30,12 +30,12 @@ from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 
-from ixel_mat.agent import cards
+from ixel_mat.agent import addons, cards
 from ixel_mat.agent.protocol import Action, NEEDS_APPROVAL, ProtocolError, build_prompt, parse_reply
 from ixel_mat.agent.sandbox import can_sandbox, run_command
 from ixel_mat.agent.store import AgentStore
 from ixel_mat.agent.tools import (MAX_PICTURE_BYTES_PER_CALL, MAX_PICTURES_PER_CALL, PendingWrite, Workspace,
-                                  WorkspaceError)
+                                  Viewed, WorkspaceError)
 from ixel_mat.agents import create_agent
 from ixel_mat.agents.base import AgentConfig
 from ixel_mat.ask import AskError, is_ready
@@ -196,6 +196,8 @@ class AgentRun:
         # What this run fetched and hashed, by scratch name, in the shape cards.check_source takes:
         # {"repo_url", "commit", "hashes": {subdir: (tree_sha256, files)}}. A card's [source] must match it.
         self._fetched: dict[str, dict] = {}
+        self._addon_servers = addons.AddonServers(self.workspace.root)
+        self._allowed_addons: set[str] = set()
         self._save()
 
     async def _default_ask(self, prompt: str, pictures: tuple | list = (),
@@ -256,6 +258,7 @@ class AgentRun:
             return await asyncio.shield(self.task)
         self.task = current
         try:
+            await self._addon_servers.start()
             while self.status not in _TERMINAL:
                 if len(self.steps) >= self.max_steps:
                     self.status = "failed"
@@ -268,7 +271,8 @@ class AgentRun:
                 except OSError:
                     attached = []
                 prompt = build_prompt(self.goal, self.store.prompt_files(), self.store.skills(), history,
-                                      uploads=attached, computer=self.computer, follows=self.follows)
+                                      uploads=attached, computer=self.computer, follows=self.follows,
+                                      addon_tools=self._addon_servers.tools)
                 self.usage["calls"] += 1
                 self._save()
                 sent = list(self._pictures)
@@ -323,6 +327,8 @@ class AgentRun:
             self.error = mask_secrets(str(exc), [self.cfg.token]) or type(exc).__name__
             with suppress(OSError):
                 self._save()
+        finally:
+            await self._addon_servers.close()
         return self.to_dict()
 
     async def _act(self, action: Action, step: dict) -> None:
@@ -356,8 +362,14 @@ class AgentRun:
                     self.workspace.root, action.args["argv"])
             elif action.action == "fetch_repo":
                 note = _fetch_note(action.args)  # a bad link or commit fails here, without asking
+            elif action.action == "use_tool":
+                addon = self._addon_servers.card_for_tool(action.args["addon"], action.args["tool"])
+                needs_approval = addon.id not in self._allowed_addons
+                note = (f"Use {addon.name} ({addon.id}), tool {action.args['tool']}. "
+                        f"Files: {addon.permissions.files}; network: {addon.permissions.network}. "
+                        "Always allow covers this add-on for this run only.")
             elif action.action == "write_addon_card":
-                card = await asyncio.to_thread(cards.prepare_card, action.args["id"], action.args["card"],
+                card = await asyncio.to_thread(cards.prepare_agent_card, action.args["id"], action.args["card"],
                                                self._fetched, self.addons_dir, self.builtin_dir)
                 note = card.summary  # the whole card
             elif action.action == "open":
@@ -374,6 +386,8 @@ class AgentRun:
                     self.pending["diff"] = "Take a picture of the screen (macOS only) and send it to the model."
                 elif opened is not None:
                     self.pending.update(argv=opened, diff=f"Open {action.args['target']!r} using {opened!r}.")
+                elif action.action == "use_tool":
+                    self.pending["sandboxed"] = can_sandbox()
                 self.status = "waiting"
                 self._save()
                 await self._decision_event.wait()
@@ -389,7 +403,7 @@ class AgentRun:
             step.update(ok=ok, result=mask_secrets(result, [self.cfg.token]))
         except (WorkspaceError, ValueError, KeyError, OSError) as exc:
             step.update(ok=False, result=mask_secrets(str(exc), [self.cfg.token]))
-        if action.action in ("view_file", "screenshot"):
+        if action.action in ("view_file", "screenshot", "use_tool"):
             step["pictures"] = self._saw  # what goes with the next call: 0 when it showed nothing
         if self.status != "stopped":
             self.steps.append(step)
@@ -403,6 +417,9 @@ class AgentRun:
             return True, await self._fetch(action.args)
         if action.action == "tree_hash":
             return True, await self._tree_hash(**action.args)
+        if action.action == "use_tool":
+            ok, viewed = await self._addon_servers.call(**action.args)
+            return ok, self._keep_pictures(viewed)
         if action.action == "write_addon_card":
             if card is None:
                 raise ValueError("the card wasn't checked; propose write_addon_card again")
@@ -485,6 +502,12 @@ class AgentRun:
         tool = getattr(self.workspace, action.action)
         options = {"cancel": self._command_cancel} if action.action == "screenshot" else {}
         viewed = await asyncio.to_thread(tool, **action.args, **options)
+        return self._keep_pictures(viewed)
+
+    def _keep_pictures(self, viewed: Viewed) -> str:
+        """Pictures from files or MCP tools go with one model call, within the same limits."""
+        if viewed.pictures and not self.cfg.sees_pictures:
+            return viewed.text + f"\n[{self.cfg.label} can't see pictures; none were sent.]"
         kept, total, why = [], 0, ""
         for picture in viewed.pictures:
             if len(kept) >= MAX_PICTURES_PER_CALL:
@@ -510,14 +533,17 @@ class AgentRun:
         if self.status != "waiting" or self.pending is None:
             raise ValueError("This run isn't waiting for an approval.")
         if always:
-            if self.computer:
+            if approve and self.pending["action"] == "use_tool":
+                self._allowed_addons.add(self.pending["args"]["addon"])
+            elif self.computer:
                 raise ValueError("Computer access requires approval every time; Always allow isn't available.")
-            if not approve or self.pending["action"] != "run_command":
+            elif not approve or self.pending["action"] != "run_command":
                 raise ValueError("Always allow needs an approved command.")
-            if not _in_workspace(self.pending["args"].get("cwd")):
+            elif not _in_workspace(self.pending["args"].get("cwd")):
                 raise ValueError("A command in a fetched repo asks every time; Always allow isn't available "
                                  "for it.")
-            self.store.allow(self.workspace.root, self.pending["argv"])
+            else:
+                self.store.allow(self.workspace.root, self.pending["argv"])
         self._approvals.append({"n": self.pending["n"], "action": self.pending["action"],
                                 "args": deepcopy(self.pending["args"]), "approve": approve,
                                 "always": always, "decided": time.time()})

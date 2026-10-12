@@ -395,7 +395,35 @@ async def _fetch_then_wait_for_the_card(run: AgentRun) -> dict:
     return await _until_waiting(run)
 
 
-def test_a_valid_card_waits_for_approval_and_is_written_only_then(tmp_path, store, monkeypatch):
+@pytest.fixture
+def canonical(tmp_path, monkeypatch):
+    """A stand-in for ixel_mat.addons, the one writer of cards: it checks a card with the agent's own rules and
+    writes it privately under tmp_path/addons, the way the real module writes ~/.ixel/addons."""
+    import sys
+    from types import ModuleType, SimpleNamespace
+    from ixel_mat.config.secrets import write_private_file
+    module = ModuleType("ixel_mat.addons")
+
+    def validate(text):
+        card = cards.validate_card(text, cards.tomllib.loads(text).get("id", ""))
+        return SimpleNamespace(id=card["id"], name=card["name"], kind=card["kind"], builtin=False,
+                               source=SimpleNamespace(**card["source"]))
+
+    def write(text):
+        checked = validate(text)
+        folder = tmp_path / "addons" / checked.id
+        folder.mkdir(parents=True, exist_ok=True)
+        write_private_file(folder / "addon.toml", text.encode("utf-8"))
+        return checked
+
+    module.validate_card_text = validate
+    module.write_agent_card = write
+    module.all_cards = lambda: []
+    monkeypatch.setitem(sys.modules, "ixel_mat.addons", module)
+    return module
+
+
+def test_a_valid_card_waits_for_approval_and_is_written_only_then(tmp_path, store, monkeypatch, canonical):
     addons = tmp_path / "addons"
 
     async def scenario() -> dict:
@@ -431,7 +459,7 @@ def test_a_valid_card_waits_for_approval_and_is_written_only_then(tmp_path, stor
     assert found == ["example-tool", "example-tool/addon.toml"]
 
 
-def test_an_overwritten_card_needs_approval_again_before_it_is_replaced(tmp_path, store, monkeypatch):
+def test_an_overwritten_card_needs_approval_again_before_it_is_replaced(tmp_path, store, monkeypatch, canonical):
     addons = tmp_path / "addons"
     (addons / "example-tool").mkdir(parents=True)
     (addons / "example-tool" / "addon.toml").write_bytes(b"old card\n")
