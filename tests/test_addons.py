@@ -970,7 +970,7 @@ def directives(policy: str) -> dict:
 
 def test_a_diagram_is_served_with_a_sandbox_of_its_own(tmp_path):
     page = tmp_path / "made.html"
-    page.write_text(GOOD, encoding="utf-8")
+    page.write_text(GOOD, encoding="utf-8", newline="")
     server = gui()
     key = server.diagrams.add(page)
 
