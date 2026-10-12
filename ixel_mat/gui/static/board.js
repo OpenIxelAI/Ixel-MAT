@@ -1288,7 +1288,8 @@ function askEffortRow(asked, worker) {
 // ones unticked; an entry "codex:gpt-6-astra" is agent "codex"); approve sends exactly the list shown (Handoff seals
 // it), so a run goes on with the next model, and says so, instead of stopping with nothing done. Nothing is shown by
 // a Handoff that can't say, and nothing is sent then. The toggles sit beside the line, not in it (its label is the
-// sentence alone).
+// sentence alone). Unticking the last agent switches the line off (the run stops at its limit, and says so);
+// switching it on again brings every agent back.
 function fallbackRow(asked, t, agent, kindNow, modelsNow) {
   const state = asked.fallback
     || (asked.fallback = { on: true, list: [], words: "", key: "", listKey: "", off: [] });
@@ -1313,8 +1314,15 @@ function fallbackRow(asked, t, agent, kindNow, modelsNow) {
     input.addEventListener("change", () => {
       state.off = state.off.filter((n) => n !== name);
       if (!input.checked) state.off.push(name);
+      if (!kept().length) state.on = false;  // (the last agent unticked: the switch goes off, and the chips with it)
     });
     return [name, input];
+  };
+  // A new pick starts the choice over: every agent ticked again, and the switch back on if unticking the last agent
+  // was what switched it off (the chips are disabled while it's off). Run it before state.list is replaced.
+  const startOver = () => {
+    if (state.list.length && !kept().length) state.on = true;
+    state.off = [];
   };
   // (the line stays as it is while the list for a new pick comes, so the form doesn't jump under the pointer)
   const draw = () => {
@@ -1322,10 +1330,12 @@ function fallbackRow(asked, t, agent, kindNow, modelsNow) {
     const gone = !state.list.length || kindNow() === "image";
     row.hidden = gone;
     agents.hidden = gone;
-    const trimmed = left.length > 0 && left.length < state.list.length;  // (something unticked, something left)
-    const shown = trimmed ? left.join(", then ") : state.words || state.list.join(", then ");
-    words.textContent = `If a model hits its usage limit, go on with ${shown}`;
-    box.checked = state.on && left.length > 0;  // (every agent unticked reads as the switch off)
+    const unticked = left.length < state.list.length;  // (something unticked: the line is what's left, not the list)
+    const shown = unticked ? left.join(", then ") : state.words || state.list.join(", then ");
+    words.textContent = state.list.length && !left.length
+      ? "If a model hits its usage limit, the run stops there"  // (every agent unticked: nothing to go on with)
+      : `If a model hits its usage limit, go on with ${shown}`;
+    box.checked = state.on && left.length > 0;  // (unticking the last agent already switched it off)
     const names = [...new Set(state.list.map(agentOf))];
     if (names.join("\n") !== drawn) {
       drawn = names.join("\n");
@@ -1346,7 +1356,7 @@ function fallbackRow(asked, t, agent, kindNow, modelsNow) {
     if (key === state.key) { draw(); return pending; }
     state.key = key;
     if (kind === "image" || !agent) {
-      if (key !== state.listKey) state.off = [];  // (a new pick: the choice starts over)
+      if (key !== state.listKey) startOver();  // (a new pick: the choice starts over)
       state.list = [];
       state.listKey = key;
       draw();
@@ -1357,13 +1367,13 @@ function fallbackRow(asked, t, agent, kindNow, modelsNow) {
     pending = getJSON(`/api/board/fallbacks?${query}`)
       .then((found) => {
         if (mine !== asking) return;  // (something newer was picked meanwhile)
-        if (key !== state.listKey) state.off = [];  // (a new pick starts over; a redraw, the same key, keeps it)
+        if (key !== state.listKey) startOver();  // (a new pick starts over; a redraw, the same key, keeps it)
         state.list = Array.isArray(found.fallbacks) ? found.fallbacks.filter((f) => typeof f === "string").slice(0, 5) : [];
         state.words = typeof found.words === "string" ? found.words : "";
       })
       .catch(() => {  // (a run without fallbacks stops at a limit, as before)
         if (mine !== asking) return;
-        if (key !== state.listKey) state.off = [];
+        if (key !== state.listKey) startOver();
         state.list = [];
       })
       .finally(() => { if (mine === asking) { state.listKey = key; draw(); } });
