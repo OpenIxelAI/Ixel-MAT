@@ -80,3 +80,39 @@ The agent reads the repository, decides the kind, writes a card in this format t
 scratch folder, and tells the person to open Settings › Add-ons to review and approve it. It never
 turns a card on, never edits a built-in card, and never widens permissions on a card the person
 already approved; changed permissions need a fresh approval.
+
+## State and approval
+
+Ixel keeps the on/off and approval state in `~/.ixel/addons/state.json`, one entry per card id:
+
+```json
+{"diagram-design": {"on": true, "approved_card_sha256": "<sha256 of the card file's bytes>",
+                    "approved_tree_sha256": "<the card's tree_sha256 when approved>",
+                    "approved_at": "2026-10-12T03:40:00Z"}}
+```
+
+Only the Settings approval route writes it. A card counts as **enabled** only when it is switched on,
+its current file's sha256 equals `approved_card_sha256`, its `tree_sha256` equals
+`approved_tree_sha256`, and its files are installed. Any edit to a card file, even a single byte, means
+it needs approving again: it shows as "changed since you approved it" and stays off until approved.
+The installed files' tree hash is checked when installing and when the switch is turned on.
+
+## Python API (for the agent and the rest of the app)
+
+`ixel_mat.addons`:
+- `validate_card_text(text: str) -> Card`: parse and check a card; `ValueError` with the loader's own
+  message on any problem.
+- `all_cards() -> list[Card]`: every card, built-in and agent-written, with its state.
+- `enabled_cards(kind: str | None = None) -> list[Card]`: only enabled cards (rules above), optionally
+  of one kind.
+- `write_agent_card(text: str) -> Card`: validate, refuse a built-in id, and write
+  `~/.ixel/addons/<id>/addon.toml`. This is the agent's only way to add or change a card; it never
+  writes `state.json`. Overwriting a card changes its sha256, so it needs approving again.
+- `fill_command(card: Card, argv: list[str], *, input: str | None = None, output: str | None = None) -> list[str]`:
+  fill `{addon}`, `{input}` and `{output}`. Refuses a placeholder the call didn't supply.
+
+`Card` fields: `id`, `name`, `summary`, `by`, `license`, `homepage`, `kind`, `builtin` (bool),
+`card_path` (the toml), `dir` (`~/.ixel/addons/<id>/`, for built-in cards too), `files_dir`
+(`dir / "files"`), `source` (`repo`, `commit`, `subdir`, `tree_sha256`, `files`), `permissions`
+(`files`, `network`, `commands`: a list of argv lists with placeholders unfilled), `use` (`where`,
+`trigger`, `output`), and state: `on`, `approved`, `changed_since_approval`, `installed`, `enabled`.
