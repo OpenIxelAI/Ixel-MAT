@@ -14,8 +14,9 @@ from ixel_mat.agent.runner import AgentRun
 from ixel_mat.agent.store import AgentStore
 from ixel_mat.agent.tools import Workspace
 from ixel_mat.agents.base import AgentConfig
+from ixel_mat.gui.agent_api import page_run
 
-FENCE = "IXEL-abcdef123456"
+FENCE ="IXEL-abcdef123456"
 GOAL = "Check the project"
 USAGE = {"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 0, "cache_write_tokens": 0,
          "cost_usd": 0.0}
@@ -333,6 +334,16 @@ def test_in_a_batch_only_the_first_read_step_carries_the_calls_tokens(tmp_path):
         assert page["usage"]["input_tokens"] == 200 and page["usage"]["output_tokens"] == 40
 
     asyncio.run(scenario())
+
+
+def test_a_saved_run_shows_each_steps_time_tokens_and_batch_as_a_live_one_does():
+    saved = {"id": "run-1", "status": "done", "steps": [
+        {"n": 1, "thought": "", "action": "read_file", "args": {}, "ok": True, "result": "x", "usage": {},
+         "ms": 120, "tokens": {"input": 5, "output": 2}, "batch": 1},
+        {"n": 2, "thought": "", "action": "finish", "args": {}, "ok": True, "result": "y", "usage": {}}]}
+    first, second = page_run(saved)["steps"]
+    assert first["ms"] == 120 and first["tokens"] == {"input": 5, "output": 2} and first["batch"] == 1
+    assert not {"ms", "tokens", "batch"} & set(second)  # a run saved before they existed has none
 
 
 def test_each_save_happens_off_the_main_thread_and_the_saved_run_is_complete(tmp_path, monkeypatch):
