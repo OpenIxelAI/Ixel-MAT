@@ -133,6 +133,7 @@ def test_without_flock_a_folder_is_the_lock(tmp_path, no_flock_env):
     folder = tmp_path / "install.lock.d"
     with _holding(lock, no_flock_env) as holder:
         assert folder.is_dir()
+        assert (folder / "owner").read_text(encoding="utf-8").strip() == str(holder.pid)  # the shell, not a child
         refused = _take(lock, no_flock_env)
         assert refused.returncode == 1 and refused.stdout == ""
         assert "already being installed" in refused.stderr
@@ -155,7 +156,8 @@ def test_a_terminated_install_leaves_no_folder_behind(tmp_path, no_flock_env):
 
 
 @pytest.mark.parametrize("minutes, taken", [(31, True), (24 * 60, True), (5, False), (0, False)])
-def test_a_folder_lock_is_taken_over_only_when_it_is_over_half_an_hour_old(tmp_path, no_flock_env, minutes, taken):
+def test_a_folder_lock_with_no_owner_is_taken_over_only_when_it_is_over_half_an_hour_old(
+        tmp_path, no_flock_env, minutes, taken):
     lock = tmp_path / "install.lock"
     folder = tmp_path / "install.lock.d"
     folder.mkdir()
@@ -168,6 +170,71 @@ def test_a_folder_lock_is_taken_over_only_when_it_is_over_half_an_hour_old(tmp_p
     else:
         assert run.returncode == 1 and "already being installed" in run.stderr
         assert "stale" not in run.stderr and folder.is_dir()
+
+
+def test_a_folder_lock_whose_owner_has_died_is_taken_over_at_once(tmp_path, no_flock_env):
+    lock = tmp_path / "install.lock"
+    folder = tmp_path / "install.lock.d"
+    gone = subprocess.Popen([SH, "-c", "exit 0"])
+    gone.wait(timeout=10)
+    folder.mkdir()
+    (folder / "owner").write_bytes(f"{gone.pid}\n".encode())  # fresh, but nobody is running it
+    run = _take(lock, no_flock_env)
+    assert run.returncode == 0 and "stale install lock" in run.stderr
+    assert not folder.exists()  # taken, and removed again when that install ended
+
+
+def test_a_folder_lock_whose_owner_is_running_is_never_taken_over(tmp_path, no_flock_env):
+    lock = tmp_path / "install.lock"
+    folder = tmp_path / "install.lock.d"
+    folder.mkdir()
+    (folder / "owner").write_bytes(f"{os.getpid()}\n".encode())  # this test's own process: alive
+    then = time.time() - 24 * 60 * 60
+    os.utime(folder, (then, then))
+    run = _take(lock, no_flock_env)
+    assert run.returncode == 1 and "already being installed" in run.stderr
+    assert "stale" not in run.stderr
+    assert folder.is_dir() and (folder / "owner").read_bytes() == f"{os.getpid()}\n".encode()
+
+
+@pytest.mark.parametrize("minutes", [0, 24 * 60])
+def test_a_folder_lock_whose_owner_is_not_a_pid_is_left_alone(tmp_path, no_flock_env, minutes):
+    lock = tmp_path / "install.lock"
+    folder = tmp_path / "install.lock.d"
+    folder.mkdir()
+    (folder / "owner").write_bytes(b"abc\n")
+    then = time.time() - minutes * 60
+    os.utime(folder, (then, then))
+    run = _take(lock, no_flock_env)
+    assert run.returncode == 1 and "already being installed" in run.stderr
+    assert "stale" not in run.stderr and folder.is_dir()
+
+
+def test_the_exit_trap_leaves_a_lock_another_process_now_owns(tmp_path, no_flock_env):
+    folder = tmp_path / "install.lock.d"
+    with _holding(tmp_path / "install.lock", no_flock_env) as holder:
+        (folder / "owner").write_bytes(f"{os.getpid()}\n".encode())  # taken over while it ran
+        holder.stdin.write("\n")
+        holder.stdin.flush()
+        assert holder.wait(timeout=10) == 0
+    assert folder.is_dir()
+    assert (folder / "owner").read_bytes() == f"{os.getpid()}\n".encode()
+
+
+def test_ixel_updates_lock_keeps_install_sh_out_without_flock(tmp_path, no_flock_env, monkeypatch):
+    """With no flock command install.sh can't see `ixel update`'s flock on install.lock: it sees the folder."""
+    from ixel_mat import update
+    monkeypatch.setattr(update, "INSTALL_INFO", tmp_path / "install.json")
+    lock = tmp_path / "install.lock"
+    folder = tmp_path / "install.lock.d"
+    with update._install_lock() as free:
+        assert free is True
+        assert (folder / "owner").read_text(encoding="utf-8").strip() == str(os.getpid())
+        refused = _take(lock, no_flock_env)
+        assert refused.returncode == 1 and "already being installed" in refused.stderr
+        assert folder.is_dir()  # the refused install left it alone
+    assert not folder.exists()
+    assert _take(lock, no_flock_env).returncode == 0
 
 
 def test_ixel_update_tells_the_installer_it_already_holds_the_lock(tmp_path, no_flock_env):

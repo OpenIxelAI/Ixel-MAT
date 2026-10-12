@@ -212,18 +212,92 @@ def test_a_file_system_without_locks_doesnt_block_updates(checkout, monkeypatch)
     assert not update._still_installing()
 
 
+def _dead_pid() -> int:
+    """The PID of a process that has finished."""
+    done = subprocess.Popen([sys.executable, "-c", "pass"])
+    done.wait(timeout=60)
+    return done.pid
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows locks through install.ps1")
 def test_an_install_sh_without_flock_holds_a_folder_that_counts_as_installing(tmp_path, monkeypatch):
-    """macOS has no flock command: install.sh makes install.lock.d beside install.lock and removes it when it's
-    done, so a fresh one is an install running now, and one over half an hour old was left by an install that died."""
+    """macOS has no flock command: install.sh makes install.lock.d beside install.lock, with its PID in an owner
+    file, and removes it when it's done. One whose owner is running is an install running now, however old; one
+    whose owner has died, or with no owner file that's over half an hour old, was left by an install that died."""
     monkeypatch.setattr(update, "INSTALL_INFO", tmp_path / "install.json")
     folder = tmp_path / "install.lock.d"
+    owner = folder / "owner"
+    old = time.time() - 31 * 60
     assert not update._still_installing()
     folder.mkdir()
-    assert update._still_installing()
-    old = time.time() - 31 * 60
+    assert update._still_installing()  # no owner file yet, and fresh
     os.utime(folder, (old, old))
+    assert not update._still_installing()  # no owner file, over half an hour
+    assert not folder.exists()  # taken over, and let go again
+
+    folder.mkdir()
+    ours = f"{os.getpid()}\n".encode()
+    owner.write_bytes(ours)
+    os.utime(folder, (old, old))
+    assert update._still_installing()  # its owner is running, however old
+    assert owner.read_bytes() == ours
+
+    owner.write_bytes(b"abc\n")
+    os.utime(folder, (old, old))
+    assert update._still_installing()  # not a PID: left alone
+
+    owner.write_bytes(f"{_dead_pid()}\n".encode())
+    assert not update._still_installing()  # fresh, but its owner has died
+    assert not folder.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows locks through install.ps1")
+def test_an_update_names_itself_in_the_folder_and_removes_it_when_done(tmp_path, monkeypatch):
+    """install.sh without flock reads the owner file the way this writes it, and refuses while it's there."""
+    monkeypatch.setattr(update, "INSTALL_INFO", tmp_path / "install.json")
+    folder = tmp_path / "install.lock.d"
+    with update._install_lock() as free:
+        assert free is True
+        assert (folder / "owner").read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert not folder.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows locks through install.ps1")
+def test_the_folder_alone_holds_the_lock_where_files_cant_be_locked(tmp_path, monkeypatch):
+    import errno
+    import fcntl
+
+    def no_locks(handle, how):
+        raise OSError(errno.ENOLCK, "No locks available")
+    monkeypatch.setattr(fcntl, "flock", no_locks)
+    monkeypatch.setattr(update, "INSTALL_INFO", tmp_path / "install.json")
+    with update._install_lock() as free:
+        assert free is True
+        assert update._still_installing()  # a second update sees this one's folder
     assert not update._still_installing()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows locks through install.ps1")
+def test_an_update_leaves_a_folder_another_process_now_owns(tmp_path, monkeypatch):
+    monkeypatch.setattr(update, "INSTALL_INFO", tmp_path / "install.json")
+    folder = tmp_path / "install.lock.d"
+    with update._install_lock() as free:
+        assert free is True
+        (folder / "owner").write_bytes(b"1\n")  # taken over while this one ran
+    assert folder.is_dir() and (folder / "owner").read_bytes() == b"1\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows locks through install.ps1")
+def test_a_folder_that_cant_be_made_doesnt_block_updates(tmp_path, monkeypatch):
+    monkeypatch.setattr(update, "INSTALL_INFO", tmp_path / "install.json")
+
+    def refuse(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "mkdir", refuse)
+        assert not update._still_installing()
+    assert not (tmp_path / "install.lock.d").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows locks through install.ps1")
