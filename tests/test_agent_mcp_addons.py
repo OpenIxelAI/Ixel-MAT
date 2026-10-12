@@ -277,6 +277,37 @@ def test_card_permissions_reach_bwrap_command(fake_addons, monkeypatch, network,
     assert str(Path("/home/x/addon") / "files") + "/server.py" in params.args
 
 
+def test_addon_under_bwrap_is_not_given_the_names_that_point_at_the_hidden_sockets(fake_addons, monkeypatch):
+    fake_addons.card.dir = Path("/home/x/addon")
+    which = shutil.which
+    monkeypatch.setattr(shutil, "which",
+                        lambda name, *args, **kwargs: "/usr/bin/bwrap" if name == "bwrap"
+                        else which(name, *args, **kwargs))
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sandbox, "can_sandbox", lambda: True)
+    for name in sandbox.SESSION_ENV:
+        monkeypatch.setenv(name, "ixel-fake-value")
+    monkeypatch.setenv("IXEL_KEEP_ME", "1")
+    params = addons.server_parameters(fake_addons.card, Path("/home/x/workspace"))
+    assert params.command == "/usr/bin/bwrap"
+    assert not set(sandbox.SESSION_ENV) & set(params.env)
+    assert params.env["IXEL_KEEP_ME"] == "1"
+
+
+def test_addon_under_sandbox_exec_keeps_the_session_names(fake_addons, monkeypatch):
+    fake_addons.card.dir = Path("/home/x/addon")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sandbox, "can_sandbox", lambda: True)
+    for name in sandbox.SESSION_ENV:
+        monkeypatch.setenv(name, "ixel-fake-value")
+    monkeypatch.setenv("IXEL_KEEP_ME", "1")
+    params = addons.server_parameters(fake_addons.card, Path("/home/x/workspace"))
+    assert params.command == sandbox.SANDBOX_EXEC
+    for name in sandbox.SESSION_ENV:
+        assert params.env[name] == "ixel-fake-value"
+    assert params.env["IXEL_KEEP_ME"] == "1"
+
+
 @pytest.mark.parametrize("command", ["python fake.py", ["sh", "-c", "fake"], ["python", "-c", "fake"],
                                      ["python", "{input}"], ["python", "{unknown}"]])
 def test_commands_are_argv_without_shell_or_other_placeholders(fake_addons, command):
