@@ -31,6 +31,7 @@ let polling = null;
 let reading = false;   // a poll is still waiting for its reply
 const openSteps = new Set();  // steps whose result is expanded
 const boxes = {};      // the Memory panel's text boxes, by name
+const drafts = {};     // what you've typed in them and not saved yet, kept while you switch tabs
 
 // The form's pieces, built once in start()
 let modelPick = null;
@@ -41,12 +42,38 @@ let startButton = null;
 export function start() {
   buildForm();
   $("#agent-stop").addEventListener("click", (e) => stopRun(e.currentTarget));
+  $("#agent-memory-button").addEventListener("click", () => showMemory($("#agent-memory").hidden));
+}
+
+// Memory and skills take the place of the run while they're open, so each file gets the room to edit it
+function showMemory(on) {
+  $("#agent-memory").hidden = !on;
+  $("#agent-work").hidden = on;
+  const button = $("#agent-memory-button");
+  button.setAttribute("aria-expanded", on ? "true" : "false");
+  button.classList.toggle("on", on);
+  if (on && files) renderMemory();
+}
+
+// A fresh form: the run on screen goes back to the list
+function newRun() {
+  stopPolling();
+  run = null;
+  runId = "";
+  shownSig = "";
+  openSteps.clear();
+  showMemory(false);
+  renderRun();
+  renderRuns();
+  updateButtons();
+  goalBox.focus();
 }
 
 export function shown() {
   if (!models) loadModels();
   if (!files) loadFiles();
   loadRuns();
+  if (!runId) renderRun();
   if (runId && (!run || LIVE.has(run.status))) refresh().then(() => { if (isLive()) poll(); });
 }
 
@@ -210,6 +237,7 @@ function updateButtons() {
 // Puts a run on screen (a new one, or one picked from the list) and follows it while it's live
 async function show(id) {
   stopPolling();
+  showMemory(false);
   runId = id;
   run = null;
   shownSig = "";
@@ -286,7 +314,7 @@ function renderRun() {
   if (sig === shownSig) return;
   shownSig = sig;
   const box = $("#agent-run");
-  if (!run) { box.replaceChildren(); return; }
+  if (!run) { box.replaceChildren(emptyState()); return; }
 
   const parts = [el("header", { class: "agent-run-head" },
     el("h2", {}, run.goal),
@@ -320,9 +348,22 @@ function renderRun() {
   box.replaceChildren(...parts);
 }
 
+// What a run does, before there is one on screen
+function emptyState() {
+  const point = (name, title, text) => el("li", {}, icon(name), el("div", {}, el("strong", {}, title), el("span", {}, text)));
+  return el("div", { class: "agent-empty" },
+    el("h2", {}, "How the agent works"),
+    el("ul", {},
+      point("file", "It reads on its own", "It lists, reads and searches files in the folder you pick, and nothing outside it."),
+      point("lock", "It asks before it changes anything", "Every edit shows you a diff, and every command shows the exact line, before you approve it."),
+      point("book", "It remembers", "SOUL, USER and MEMORY files and its skills live under Memory and skills, on this computer.")),
+    el("p", { class: "fine" }, "Pick an earlier run on the right to see what it did."));
+}
+
 function stepItem(step) {
   const failed = step.ok === false;
-  const hasResult = step.result !== undefined && step.result !== null && step.result !== "";
+  const finish = step.action === "finish";  // its answer has a card of its own below the steps
+  const hasResult = !finish && step.result !== undefined && step.result !== null && step.result !== "";
   const result = hasResult
     ? el("details", { class: "agent-result", open: openSteps.has(step.n),
       ontoggle: (e) => { if (e.currentTarget.open) openSteps.add(step.n); else openSteps.delete(step.n); } },
@@ -333,7 +374,7 @@ function stepItem(step) {
     el("div", { class: "agent-step-head" },
       el("span", { class: "agent-step-n" }, String(step.n)),
       el("span", { class: "agent-step-action mono" }, step.action),
-      el("span", { class: "agent-step-args mono" }, argsSummary(step.args)),
+      el("span", { class: "agent-step-args mono" }, finish ? "" : argsSummary(step.args)),
       failed ? el("span", { class: "agent-step-flag", title: "This action failed" }, icon("x")) : null),
     step.thought ? el("p", { class: "agent-step-thought" }, step.thought) : null,
     result);
@@ -408,7 +449,8 @@ async function loadRuns() {
 
 function renderRuns() {
   const box = $("#agent-runs");
-  const head = el("h2", { class: "agent-side-title" }, "Earlier runs");
+  const head = el("div", { class: "agent-side-head" }, el("h2", { class: "agent-side-title" }, "Runs"),
+    el("button", { type: "button", class: "btn small", onclick: newRun }, icon("plus"), el("span", {}, "New run")));
   if (!runs) { box.replaceChildren(head, el("div", { class: "set-loading" }, el("span", { class: "spin" }), "Looking…")); return; }
   if (!runs.length) { box.replaceChildren(head, el("p", { class: "fine" }, "None yet. Each run you start is kept here.")); return; }
   box.replaceChildren(head, el("ul", { class: "agent-run-list" }, runs.map((r) => el("li", {},
@@ -434,22 +476,44 @@ async function loadFiles() {
   renderMemory();
 }
 
+let memoryTab = "soul";  // the file open in Memory and skills
+
 function renderMemory() {
-  const parts = [el("h2", { class: "agent-side-title" }, "Memory"),
-    el("p", { class: "fine" }, "Plain files the agent reads at the start of every run.")];
-  for (const [name, file, hint] of FILES) {
-    const id = `agent-file-${name}`;
-    const box = el("textarea", { id, rows: "6", class: "mono", ...PRIVATE_TYPING });
-    box.value = files[name] || "";
+  const tabs = [...FILES.map(([name, file]) => [name, file]), ["skills", "Skills"]];
+  const bar = el("div", { class: "tabs", role: "tablist", "aria-label": "Memory and skills" }, tabs.map(([key, title]) =>
+    el("button", { type: "button", role: "tab", class: "tab", id: `agent-tab-${key}`, "aria-controls": "agent-tabpanel",
+      "aria-selected": key === memoryTab ? "true" : "false", tabIndex: key === memoryTab ? 0 : -1,
+      onclick: () => { memoryTab = key; renderMemory(); $(`#agent-tab-${key}`).focus(); } }, title)));
+  bar.addEventListener("keydown", (e) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const at = tabs.findIndex(([key]) => key === memoryTab);
+    memoryTab = tabs[(at + step + tabs.length) % tabs.length][0];
+    renderMemory();
+    $(`#agent-tab-${memoryTab}`).focus();
+  });
+  const panel = el("div", { class: "tabpanel agent-memory-panel", role: "tabpanel", id: "agent-tabpanel",
+    "aria-labelledby": `agent-tab-${memoryTab}` });
+  const file = FILES.find(([name]) => name === memoryTab);
+  if (file) {
+    const [name, , hint] = file;
+    const box = el("textarea", { id: `agent-file-${name}`, rows: "18", class: "mono", "aria-label": file[1], ...PRIVATE_TYPING });
+    box.value = name in drafts ? drafts[name] : (files[name] || "");
+    box.addEventListener("input", () => { drafts[name] = box.value; });
     boxes[name] = box;
     const note = el("span", { class: "agent-saved", role: "status" });
-    const save = el("button", { type: "button", class: "btn", onclick: () => saveFile(name, save, note) }, "Save");
-    parts.push(el("div", { class: "field agent-file" },
-      el("label", { for: id }, file), el("small", {}, hint), box,
-      el("div", { class: "agent-file-buttons" }, note, el("span", { class: "spacer" }), save)));
+    const save = el("button", { type: "button", class: "btn primary", onclick: () => saveFile(name, save, note) }, "Save");
+    panel.append(el("p", { class: "fine" }, hint), box,
+      el("div", { class: "agent-file-buttons" }, note, el("span", { class: "spacer" }), save));
+  } else {
+    panel.append(el("p", { class: "fine" }, "Skills the agent can load when a goal needs one. Only each one's name and "
+      + "description go into its prompt."), el("div", { id: "agent-skills" }, skillsList()));
   }
-  parts.push(el("h3", { class: "agent-side-title" }, "Skills"), el("div", { id: "agent-skills" }, skillsList()));
-  $("#agent-memory").replaceChildren(...parts);
+  $("#agent-memory").replaceChildren(el("div", { class: "agent-memory-card" },
+    el("header", {}, el("h2", {}, "Memory and skills"),
+      el("p", { class: "fine" }, "Plain files the agent reads at the start of every run. They stay on this computer.")),
+    bar, panel));
 }
 
 function skillsList() {
@@ -468,7 +532,7 @@ async function saveFile(name, button, note) {
   try {
     files = await putJSON("/api/agent/files", { name, text: boxes[name].value });
     boxes[name].value = files[name] || "";
-    $("#agent-skills").replaceChildren(skillsList());
+    delete drafts[name];
     note.textContent = "Saved";
     setStatus("");
   } catch (e) {
