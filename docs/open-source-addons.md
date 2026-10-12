@@ -129,6 +129,9 @@ from a reply, self-check pass/fail/retry with a fake model, toggle on/off throug
   and would block the diagram's own scripts.
 - **Open** shows the diagram from that same route in your browser, under the same sandbox and CSP, rather than as a
   `file:` URL, where its inline code would run unrestricted. Show in folder gives you the file itself.
+- Show in folder selects the file in Finder on macOS (`open -R`) and in Explorer on Windows (`/select,`). On Linux
+  it goes through the file manager's `org.freedesktop.FileManager1` D-Bus API (`gdbus`, else `dbus-send`), and falls
+  back to opening the folder with `xdg-open` when that isn't available or fails.
 - Before each diagram, the installed files are checked against the card's tree hash, and the self-check runs with a
   bare environment (no keys from your shell).
 - The release is pinned in the card, `ixel_mat/addons/diagram-design.toml` (`[source]` `commit`,
