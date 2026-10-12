@@ -68,6 +68,16 @@ Effects are estimates until the benchmark (number 9) measures them.
 15. **Edit formats per model.** Keep exact search-and-replace with one match required (what we have); return
     the nearest lines when "old appears 0 times" so the model doesn't re-read the file.
 
+16. **Allowed / Ask first / Off per action and per add-on** (from the Paperclip research): the user sets, once,
+    which actions run at once, which ask, and which never run, instead of the fixed split today. Reads stay
+    Allowed by default; writes and commands stay Ask first.
+17. **A checker before "done"** (Paperclip): a second, cheaper model checks the final answer against the goal and
+    the diff before the run says it's finished; overlaps 13.
+18. **Wake triggers** (Paperclip): start a run on a schedule, when a Board task is assigned to the agent, or when
+    an approval comes back, so the agent can work while you're away (still approval-first).
+19. **Low-trust presets** (Paperclip): one switch for "read-only", "no network", "this folder only", for runs on
+    models or tools you don't fully trust.
+
 ## Suggested order
 
 Quick wins 1–8 as one Board batch (planned by Opus at xhigh, built by Sonnet and Haiku, tests by OpenCode's
