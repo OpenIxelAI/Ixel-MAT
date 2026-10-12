@@ -23,6 +23,26 @@ Build), with no API key.
 **[ixelai.com/ixel-mat](https://ixelai.com/ixel-mat/)** · [Docs](https://ixelai.com/docs/) ·
 [Privacy](https://ixelai.com/docs/privacy/)
 
+## What it is, and what it isn't
+
+- Ixel has no account and no telemetry. Your questions go only to the AI services you set up, and each key stays
+  on your computer. Once a day it checks the repository you installed it from for updates, and installs nothing;
+  you can turn that off.
+- It is not a model and not a hosted service. It uses your own API keys, subscription sign-ins and local models,
+  so calls are billed to you or count against your plan.
+- The panel agreeing doesn't make an answer right. Models can share the same mistake, so check what matters.
+- It acts only when you ask. The panel and reviews only answer; an agent you set up yourself keeps whatever tools
+  it has. The Agent (beta) asks before it edits a file, runs a command or downloads a repository, and, with
+  Computer access on, before a screenshot or opening a file, link or app. A command you approved with "Always
+  allow" runs again without asking, while Computer access is off.
+- It is not an unattended agent. A run starts when you start it, pauses whenever it needs your approval, and ends
+  at a step limit (25 by default). The beta has no cron jobs and no messaging channels. The Board's Merge pushes
+  nothing.
+- The Agent's sandbox has limits. A command it runs has no network and can write only in the workspace and the
+  temp folder, but only on macOS and only while Computer access is off; it can still read your files. Elsewhere,
+  or with Computer access on, an approved command runs as you and can do anything you can. The approval card says
+  which.
+
 ## Install
 
 Windows, in a normal PowerShell window (not "Run as administrator"):
@@ -47,9 +67,19 @@ with pipx or uv, see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Use it
 
 - **App:** **Ixel** in the Start Menu, Applications or your app menu, or `ixel app`.
-- **Agent (beta):** an **Agent** page in the app: a personal agent that works in a folder you pick, one
-  step at a time, and asks you before it writes a file or runs a command. It can take photos, video and any
-  file, and a Computer access switch (off until you turn it on) lets it work outside that folder.
+- **Ask:** the panel. Several models answer, grade each other blind, and one verdict comes back.
+- **Board:** [Handoff's](https://ixelai.com/handoff/) board for a project; it needs Handoff. For a task that changes
+  files, pick a model or a chain of models, and the effort for each. Each task shows what it cost, and the run
+  form says who takes over if a model hits its usage limit. **Merge** puts a task's branch into the branch checked
+  out on this computer, which may not be `main`. Nothing is pushed.
+- **Agent (beta):** a personal agent that works in a folder you pick, one step at a time. It asks you before it
+  edits a file or runs a command, and, with Computer access on, before it takes a screenshot or opens a file, link
+  or app. A command you approved with "Always allow" runs again without asking, but only while Computer access is
+  off. You can give it a photo, a video or any file. **Computer access** is off by default. On macOS its commands
+  run in a sandbox with no network, unless Computer access is on. See [AGENT_BETA.md](AGENT_BETA.md).
+- **Machines:** your servers over SSH: connect to one, or run one command on several.
+- **Health:** whether each part of Ixel is ready, and the one line that fixes what isn't.
+- **Settings:** which models are on the panel and how each one thinks, the default mode, and your keys.
 - **Terminal:** `ixel`, then type a question. `/review`, `/saver` and the rest are in [the terminal guide](https://ixelai.com/docs/terminal/).
 - **Plugin** for Claude Desktop, Claude Code, Codex and Cursor: `ixel mcp --setup`, then ask your app for "a
   second opinion from the Ixel panel".
