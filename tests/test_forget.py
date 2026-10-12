@@ -133,7 +133,7 @@ def test_a_link_inside_the_window_folder_is_never_followed(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("system, env, expected", [
-    ("win32", {"LOCALAPPDATA": "C:/Users/angel/AppData/Local"}, ["C:/Users/angel/AppData/Local/IxelMAT/window"]),
+    ("win32", {"LOCALAPPDATA": "C:/Users/someone/AppData/Local"}, ["C:/Users/someone/AppData/Local/IxelMAT/window"]),
     ("darwin", {}, ["HOME/Library/Application Support/IxelMAT/window", "HOME/Library/WebKit/com.ixelai.ixel"]),
     ("linux", {}, ["HOME/.local/state/ixel-mat/window"]),
     ("linux", {"XDG_STATE_HOME": "/state"}, ["/state/ixel-mat/window"]),

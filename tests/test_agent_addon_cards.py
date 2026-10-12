@@ -491,7 +491,7 @@ def test_an_overwritten_card_needs_approval_again_before_it_is_replaced(tmp_path
 def test_a_fetched_repo_can_be_read_but_never_written(tmp_path, store):
     copy = store.scratch_dir() / SCRATCH
     copy.mkdir(parents=True)
-    (copy / "README.md").write_text("# Example tool\n", encoding="utf-8")
+    (copy / "README.md").write_bytes(b"# Example tool\n")
     root = tmp_path / "workspace"
     root.mkdir()
     workspace = Workspace(root, scratch=store.scratch_dir())
@@ -506,7 +506,7 @@ def test_a_fetched_repo_can_be_read_but_never_written(tmp_path, store):
 def test_a_command_in_a_fetched_repo_always_asks_even_when_allowed(tmp_path, store):
     copy = store.scratch_dir() / SCRATCH
     copy.mkdir(parents=True)
-    (copy / "README.md").write_text("# Example tool\n", encoding="utf-8")
+    (copy / "README.md").write_bytes(b"# Example tool\n")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store.allow(workspace, ["ls"])

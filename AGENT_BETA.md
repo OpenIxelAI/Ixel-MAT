@@ -116,7 +116,7 @@ Each model call is recorded the way `ixel ask` records one (`call_usage`), and t
 
 # Beta 2: files and pictures, computer access, a chat-style page
 
-What changes after the first beta, from Angel's notes: the page should feel like other agent apps (simple,
+What changes after the first beta, from the owner's notes: the page should feel like other agent apps (simple,
 one conversation, the work happening quietly), the agent must take photos, video and any other file, it gets
 an opt-in **Computer access** switch with a warning, and the composer gets a `/` menu like other agents'.
 
@@ -192,7 +192,7 @@ and on a step whose action showed pictures, `"pictures": n`.
 
 # Beta 3: open-source tools as add-on cards
 
-Angel's idea: rather than Ixel writing code for every outside tool (REA, Diagram Design…), the agent fills in a
+The idea: rather than Ixel writing code for every outside tool (REA, Diagram Design…), the agent fills in a
 short **add-on card** (`addon.toml`, the format in `docs/addon-cards.md` on the open-source add-ons branch) and
 the person decides in Settings › Add-ons whether to turn it on. The agent never turns a card on.
 
