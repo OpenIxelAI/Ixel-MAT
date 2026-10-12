@@ -237,19 +237,30 @@ def test_files_none_reads_the_addon_folder_and_system_folders_only(
 
 # ── Masking before the output cut ────────────────────────────────────────────
 
-def test_a_secret_across_the_head_cut_is_masked_whole() -> None:
+# A key is only masked after a separator, so each one here has a space before it. _Output keeps 2 * (32 KB + a 4 KB
+# margin) in all: 66_000 bytes is within that (its head and tail overlap), 140_000 is over it.
+@pytest.mark.parametrize("total", [66_000, 140_000])
+def test_a_secret_across_the_head_cut_is_masked_whole(total: int) -> None:
     half = sandbox.MAX_OUTPUT_BYTES // 2
-    data = b"a" * (half - 10) + FAKE_KEY.encode() + b"b" * 100_000
+    # The key starts 20 bytes before the head's cut, so without masking first its start would be kept
+    data = b"a" * (half - 21) + b" " + FAKE_KEY.encode() + b" " + b"b" * (total - half - 12)
+    assert len(data) == total
     text = _kept(data)
     assert FAKE_KEY[:12] not in text and FAKE_KEY[-12:] not in text
+    assert "[API key hidden]" in text
+    assert MARKER.search(text) is not None
 
 
-def test_a_secret_across_the_tail_cut_is_masked_whole() -> None:
-    half = sandbox.MAX_OUTPUT_BYTES // 2
-    tail = sandbox.MAX_OUTPUT_BYTES - half
-    data = b"a" * 100_000 + FAKE_KEY.encode() + b"b" * (tail - len(FAKE_KEY) + 10)
+@pytest.mark.parametrize("total", [66_000, 140_000])
+def test_a_secret_across_the_tail_cut_is_masked_whole(total: int) -> None:
+    tail = sandbox.MAX_OUTPUT_BYTES - sandbox.MAX_OUTPUT_BYTES // 2
+    # The key starts 15 bytes before the tail's cut, so without masking first its end would be kept
+    data = b"a" * (total - tail - 16) + b" " + FAKE_KEY.encode() + b" " + b"b" * (tail - 17)
+    assert len(data) == total
     text = _kept(data)
     assert FAKE_KEY[:12] not in text and FAKE_KEY[-12:] not in text
+    assert "[API key hidden]" in text
+    assert MARKER.search(text) is not None
 
 
 def test_a_short_output_with_a_whole_secret_comes_back_masked() -> None:
