@@ -345,7 +345,7 @@ def status(config: dict) -> list[dict]:
         here = installed(addon)
         rows.append({"name": addon.name, "label": addon.label, "about": addon.about, "author": addon.author,
                      "license": addon.license, "on": is_on(config, addon), "installed": here,
-                     "pinned": bool(addon.commit and addon.sha256), "version": addon.commit[:12] or "",
+                     "pinned": bool(addon.commit and addon.tree_sha256), "version": addon.commit[:12] or "",
                      "path": str(folder(addon)) if here else ""})
     return rows
 
