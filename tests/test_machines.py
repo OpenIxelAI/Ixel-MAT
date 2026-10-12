@@ -5,6 +5,7 @@ import asyncio
 import io
 import json
 import os
+import shlex
 import stat
 import sys
 import time
@@ -522,13 +523,33 @@ def test_through_a_jump_host_a_key_problem_names_the_jump_host_too():
 # ── terminals ───────────────────────────────────────────────────────────────
 
 LINE = ["/usr/bin/ssh", "-t", "--", "robin@web", "echo 'a b'; ls > out.txt & %PATH% ^"]
+HELD = [sys.executable, "-c", terminal._HOLD_OPEN, *LINE]
+
+# The Linux terminals in the order they're tried, and what each takes before the command (Tilix: one string)
+LINUX_ORDER = ["x-terminal-emulator", "xdg-terminal-exec", "ptyxis", "kgx", "gnome-terminal", "konsole",
+               "xfce4-terminal", "tilix", "foot", "wezterm", "alacritty", "kitty", "xterm"]
+LINUX_FORMS = {"x-terminal-emulator": ["-e"], "xdg-terminal-exec": [], "ptyxis": ["--new-window", "--"],
+               "kgx": ["--"], "gnome-terminal": ["--"], "konsole": ["-e"], "xfce4-terminal": ["-x"],
+               "foot": ["--"], "wezterm": ["start", "--"], "alacritty": ["-e"], "kitty": ["--"], "xterm": ["-e"]}
 
 
-@pytest.mark.parametrize("program, flag", [("/usr/bin/konsole", "-e"), ("/usr/bin/xterm", "-e"),
-                                           ("/usr/bin/alacritty", "-e"), ("/usr/bin/gnome-terminal", "--"),
-                                           ("/usr/bin/kitty", "--")])
-def test_each_terminal_gets_the_ssh_line_as_separate_arguments_and_stays_open(program, flag):
-    assert terminal.argv_for(program, LINE) == [program, flag, sys.executable, "-c", terminal._HOLD_OPEN, *LINE]
+def test_the_table_holds_every_linux_terminal_in_the_order_they_are_tried():
+    assert list(terminal.LINUX_TERMINALS) == LINUX_ORDER
+    assert {*LINUX_FORMS, "tilix"} == set(LINUX_ORDER)
+
+
+PROGRAMS = [(f"/usr/bin/{name}", before) for name, before in LINUX_FORMS.items()]
+
+
+@pytest.mark.parametrize("program, before", [*PROGRAMS, ("/opt/bin/myterm", ["-e"])])
+def test_each_terminal_gets_the_ssh_line_as_separate_arguments_and_stays_open(program, before):
+    assert terminal.argv_for(program, LINE) == [program, *before, *HELD]
+
+
+def test_tilix_gets_one_quoted_string_that_splits_back_to_the_exact_line():
+    line = terminal.argv_for("/usr/bin/tilix", LINE)
+    assert line == ["/usr/bin/tilix", "-e", shlex.join(HELD)]
+    assert shlex.split(line[2]) == HELD
 
 
 def test_windows_terminal_only_gets_python_and_a_script_that_runs_the_exact_line(tmp_path):
@@ -580,6 +601,7 @@ def test_with_no_desktop_on_linux_no_window_is_opened(monkeypatch):
     monkeypatch.setattr(terminal, "WINDOWS", False)
     monkeypatch.setattr(terminal, "MAC", False)
     monkeypatch.setattr(terminal, "find_on_path", lambda name: f"/usr/bin/{name}")
+    monkeypatch.delenv("TERMINAL", raising=False)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     assert terminal.find() is None
@@ -587,7 +609,107 @@ def test_with_no_desktop_on_linux_no_window_is_opened(monkeypatch):
         terminal.open_window(["ssh", "web"])
     assert caught.value.code == "no_terminal"
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    assert terminal.find() == "/usr/bin/x-terminal-emulator"
+
+
+def on_linux_with(monkeypatch, present, chosen=None):
+    """A Linux desktop where only the programs in present are installed (found by name, or by the path
+    they're given as), and $TERMINAL is chosen (not set when None)."""
+    monkeypatch.setattr(terminal, "WINDOWS", False)
+    monkeypatch.setattr(terminal, "MAC", False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    if chosen is None:
+        monkeypatch.delenv("TERMINAL", raising=False)
+    else:
+        monkeypatch.setenv("TERMINAL", chosen)
+    monkeypatch.setattr(terminal, "find_on_path", lambda name: (
+        (name if "/" in name else f"/usr/bin/{name}") if name in present else None))
+
+
+def test_the_first_terminal_of_the_table_that_is_installed_is_the_one_opened(monkeypatch):
+    names = list(terminal.LINUX_TERMINALS)
+    for at, name in enumerate(names):
+        on_linux_with(monkeypatch, names[at:])
+        assert terminal.find() == f"/usr/bin/{name}"
+    on_linux_with(monkeypatch, [])
+    assert terminal.find() is None
+
+
+def test_terminal_names_the_one_opened_before_any_of_the_table(monkeypatch):
+    on_linux_with(monkeypatch, {"gnome-terminal", "foot"}, chosen="foot --server")
+    found = terminal.find()
+    assert found == "/usr/bin/foot"
+    assert terminal.argv_for(found, LINE) == [found, "--", *HELD]
+    on_linux_with(monkeypatch, {"/opt/wez/wezterm", "xterm"}, chosen="/opt/wez/wezterm start")
+    found = terminal.find()
+    assert found == "/opt/wez/wezterm"
+    assert terminal.argv_for(found, LINE) == [found, "start", "--", *HELD]
+
+
+@pytest.mark.parametrize("chosen", ["", "   ", "'unclosed", "nosuchterm --flag", "/opt/nowhere/term"])
+def test_a_terminal_that_is_empty_unparsable_or_not_there_falls_back_to_the_table(monkeypatch, chosen):
+    on_linux_with(monkeypatch, {"konsole", "xterm"}, chosen=chosen)
     assert terminal.find() == "/usr/bin/konsole"
+
+
+def test_terminal_does_not_open_a_window_where_there_is_no_desktop(monkeypatch):
+    on_linux_with(monkeypatch, {"foot"}, chosen="foot")
+    monkeypatch.delenv("DISPLAY")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    assert terminal.find() is None
+
+
+@pytest.mark.parametrize("present, found", [({"foot", "kitty", "alacritty"}, "/usr/bin/kitty"),
+                                            ({"foot", "alacritty"}, "/usr/bin/alacritty"),
+                                            ({"foot"}, terminal.MACOS_TERMINAL)])
+def test_terminal_is_ignored_on_a_mac(monkeypatch, present, found):
+    on_linux_with(monkeypatch, present, chosen="foot")
+    monkeypatch.setattr(terminal, "MAC", True)
+    assert terminal.find() == found
+
+
+def test_terminal_is_ignored_on_windows(monkeypatch):
+    on_linux_with(monkeypatch, {"foot", "cmd.exe"}, chosen="foot")
+    monkeypatch.setattr(terminal, "WINDOWS", True)
+    assert terminal.find() == "/usr/bin/cmd.exe"
+
+
+def test_with_no_terminal_installed_the_error_says_what_to_install(monkeypatch):
+    on_linux_with(monkeypatch, [])
+    assert terminal.find() is None
+    with pytest.raises(SSHError) as caught:
+        terminal.open_window(["ssh", "web"])
+    assert caught.value.code == "no_terminal"
+    assert terminal.INSTALL_HINT in str(caught.value) and "run the line below" in str(caught.value)
+
+
+def test_connect_starts_the_chosen_terminal_with_its_argv_and_no_shell(monkeypatch):
+    on_linux_with(monkeypatch, {"foot", "gnome-terminal"}, chosen="foot --server")
+    started = []
+
+    class Started:
+        def __init__(self, line, **options):
+            started.append((line, options))
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(terminal.subprocess, "Popen", Started)
+    assert terminal.open_window(["ssh", "web"]) == "foot"
+    [(line, options)] = started
+    assert line == ["/usr/bin/foot", "--", sys.executable, "-c", terminal._HOLD_OPEN, "ssh", "web"]
+    assert not options.get("shell")
+
+
+@pytest.mark.parametrize("program, shown", [
+    ("/usr/bin/x-terminal-emulator", "your default terminal"),
+    ("/usr/bin/xdg-terminal-exec", "your default terminal"),
+    ("/usr/bin/ptyxis", "Ptyxis"), ("/usr/bin/kgx", "GNOME Console"), ("/usr/bin/gnome-terminal", "GNOME Terminal"),
+    ("/usr/bin/konsole", "Konsole"), ("/usr/bin/xfce4-terminal", "Xfce Terminal"), ("/usr/bin/tilix", "Tilix"),
+    ("/usr/bin/foot", "foot"), ("/usr/bin/wezterm", "WezTerm"), ("/usr/bin/alacritty", "Alacritty"),
+    ("/usr/bin/kitty", "kitty"), ("/usr/bin/xterm", "xterm"), ("/opt/bin/myterm", "myterm")])
+def test_each_terminal_is_named_as_the_person_knows_it(program, shown):
+    assert terminal.label(program) == shown
 
 
 # ── the log ───────────────────────────────────────────────────────────────
@@ -938,6 +1060,21 @@ def test_health_checks_ssh_and_the_terminal_then_counts_pinned_keys(fake_ssh, mo
     missing = {c.id: c for c in health.machine_checks(False, which=lambda name: None, system="win32")}
     assert missing["ssh"].state == "fail" and "OpenSSH.Client" in missing["ssh"].fix
     assert missing["terminal"].state == "warn"
+
+
+def test_health_names_what_to_install_when_connect_has_no_terminal(fake_ssh, monkeypatch):
+    store.Store().save({"host": "web"})
+    on_linux_with(monkeypatch, [])
+    checks = {c.id: c for c in health.machine_checks(False, which=lambda name: f"/usr/bin/{name}")}
+    assert checks["terminal"].state == "warn" and terminal.INSTALL_HINT in checks["terminal"].detail
+    assert "`ixel machines connect NAME`" in checks["terminal"].detail
+    monkeypatch.delenv("DISPLAY")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    checks = {c.id: c for c in health.machine_checks(False, which=lambda name: f"/usr/bin/{name}")}
+    assert "no desktop" in checks["terminal"].detail and terminal.INSTALL_HINT not in checks["terminal"].detail
+    on_linux_with(monkeypatch, {"kgx"})
+    checks = {c.id: c for c in health.machine_checks(False, which=lambda name: f"/usr/bin/{name}")}
+    assert checks["terminal"].state == "ok" and checks["terminal"].detail == "Connect opens GNOME Console"
 
 
 # ── ixel machines ─────────────────────────────────────────────────────────────
