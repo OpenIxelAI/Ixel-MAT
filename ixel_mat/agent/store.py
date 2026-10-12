@@ -8,6 +8,8 @@ Under ~/.config/ixel-mat/agent/ (the folder Ixel's config uses, on Windows too):
   skills/<name>/SKILL.md        skills: front matter with name: and description:, and the text, which the
                                 agent reads only when it loads the skill
   sessions/<id>.json            each run: its goal, model, workspace, steps, approvals and usage
+  uploads/<run id>/<name>       files the person attached to a run (never in the workspace; at most 10 a
+                                run, 50 MB each; the agent reaches them as upload:NAME)
   allow.json                    the commands you always allow, by workspace
 
 Every file is written the way Ixel writes its config (private to you, and atomically). The allowlist never
@@ -19,14 +21,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import stat
 import threading
+import unicodedata
 from contextlib import suppress
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ixel_mat.agent.sandbox import is_shell_or_interpreter
-from ixel_mat.agent.tools import is_secret_name
+from ixel_mat.agent.tools import is_secret_name, kind_of
 from ixel_mat.config import secrets as _secrets
 from ixel_mat.config.secrets import write_private_file
 
@@ -36,6 +41,11 @@ MAX_MEMORY_LINE_CHARS = 2000
 MAX_SKILL_CHARS = 64 * 1024
 MAX_SKILL_DESCRIPTION_CHARS = 500
 MAX_SESSIONS_LISTED = 50
+# Files attached to a run (the messages that refuse them say 50 MB and 10 files; change them together)
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOADS_PER_RUN = 10
+MAX_UPLOAD_NAME_CHARS = 120
+MAX_UPLOAD_SUFFIX_CHARS = 16     # a longer "suffix" is part of the name, not an extension to keep
 
 # The starter files a new agent folder begins with (ixel_mat/agent/starter/, written by a small local model
 # and checked by hand): SOUL.md, USER.md, MEMORY.md, and the example skills under skills/
@@ -113,9 +123,40 @@ def _front_matter(text: str) -> dict[str, str]:
     return found
 
 
+def _split_suffix(name: str) -> tuple[str, str]:
+    """A file name as (stem, extension): 'photo.png' is ('photo', '.png'); no extension is ''."""
+    suffix = PurePosixPath(name).suffix
+    if len(suffix) > MAX_UPLOAD_SUFFIX_CHARS:
+        suffix = ""
+    return (name[:-len(suffix)] if suffix else name), suffix
+
+
+def safe_upload_name(name: object) -> str:
+    """The name an attached file is kept under: its base name only (what's after the last / or \\, and a
+    Windows drive like C: dropped), without control characters, with ':' made '-', no leading dots or
+    spaces (so it can't be hidden or '..'), and at most 120 characters with its extension kept. 'file' when
+    nothing is left. ValueError when name isn't text or looks like a secret (.env, a key)."""
+    if not isinstance(name, str):
+        raise ValueError("a file name is text")
+    base = re.split(r"[/\\]", name)[-1].strip()
+    base = re.sub(r"^[A-Za-z]:", "", base)  # 'C:photo.png' is the file photo.png on drive C
+    base = "".join(char for char in base if unicodedata.category(char) != "Cc")
+    if is_secret_name(base.strip()):
+        raise ValueError("that file looks like a secret (.env, a key…); the agent can't take it")
+    base = base.replace(":", "-").lstrip(". ").rstrip()
+    if len(base) > MAX_UPLOAD_NAME_CHARS:
+        stem, suffix = _split_suffix(base)
+        base = stem[:MAX_UPLOAD_NAME_CHARS - len(suffix)].rstrip() + suffix
+    if not base:
+        return "file"
+    if is_secret_name(base):  # ':' made '-' can show a suffix ('x:.pem'), so the finished name is checked too
+        raise ValueError("that file looks like a secret (.env, a key…); the agent can't take it")
+    return base
+
+
 class AgentStore:
-    """The agent's files: persona, user and memory, skills, sessions and the allowlist. root defaults to
-    ~/.config/ixel-mat/agent; tests give a folder of their own."""
+    """The agent's files: persona, user and memory, skills, sessions, uploads and the allowlist. root
+    defaults to ~/.config/ixel-mat/agent; tests give a folder of their own."""
 
     def __init__(self, root: Path | None = None):
         self.root = Path(root) if root is not None else default_root()
@@ -123,9 +164,9 @@ class AgentStore:
     # ── Folders ──────────────────────────────────────────────────────────────
 
     def _ensure(self) -> None:
-        """The agent's folder and its skills/ and sessions/, made on first use, private where the system
-        allows (0700)."""
-        for folder in (self.root, self.root / "skills", self.root / "sessions"):
+        """The agent's folder and its skills/, sessions/ and uploads/, made on first use, private where the
+        system allows (0700)."""
+        for folder in (self.root, self.root / "skills", self.root / "sessions", self.root / "uploads"):
             if not folder.is_dir():
                 folder.mkdir(parents=True, exist_ok=True, mode=0o700)
                 if os.name == "posix":
@@ -308,6 +349,85 @@ class AgentStore:
                          "status": str(data.get("status") or ""), "started": started})
         runs.sort(key=lambda run: run["started"], reverse=True)
         return runs[:MAX_SESSIONS_LISTED]
+
+    # ── Uploads ──────────────────────────────────────────────────────────────
+
+    def uploads_dir(self, run_id: str) -> Path:
+        """The folder holding a run's attached files, uploads/<run id>/. It isn't made here; ValueError when
+        run_id isn't letters, digits, - and _ only."""
+        if not isinstance(run_id, str) or not _SESSION_ID.fullmatch(run_id):
+            raise ValueError("a run id is letters, digits, - and _ only")
+        return self.root / "uploads" / run_id
+
+    @staticmethod
+    def _upload_files(folder: Path) -> list[Path]:
+        """The attached files in a run's folder, by name: plain files only (no symlinks, nothing hidden,
+        so the half-written temporary files are left out)."""
+        try:
+            entries = list(folder.iterdir())
+        except OSError:  # no folder yet
+            return []
+        files = []
+        for path in entries:
+            if path.name.startswith("."):
+                continue
+            try:
+                if stat.S_ISREG(path.lstat().st_mode):
+                    files.append(path)
+            except OSError:
+                continue
+        return sorted(files, key=lambda path: path.name)
+
+    @staticmethod
+    def _upload_info(path: Path, size: int) -> dict:
+        return {"id": path.name, "name": path.name, "kind": kind_of(path), "size": size}
+
+    def save_upload(self, run_id: str, name: str, data: bytes) -> dict:
+        """Keep a file the person attached to a run, as uploads/<run id>/<name>, and return its
+        {id, name, kind, size}. The name is cleaned (safe_upload_name), and a name already taken in the run
+        gets ' (2)', ' (3)' … before its extension. The id is the stored name, which is what the agent writes
+        as upload:NAME. ValueError for a bad run id or name, a file that's empty, over 50 MB, or an 11th."""
+        folder = self.uploads_dir(run_id)
+        clean = safe_upload_name(name)
+        if not isinstance(data, (bytes, bytearray)):
+            raise ValueError("a file's content is bytes")
+        if not data:
+            raise ValueError("that file is empty")
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise ValueError("a file can be at most 50 MB")
+        with _LOCK:
+            if len(self._upload_files(folder)) >= MAX_UPLOADS_PER_RUN:
+                raise ValueError("a run takes at most 10 files")
+            stem, suffix = _split_suffix(clean)
+            stored, count = clean, 1
+            while os.path.lexists(folder / stored):
+                count += 1
+                tail = f" ({count}){suffix}"
+                stored = stem[:MAX_UPLOAD_NAME_CHARS - len(tail)] + tail
+            self._ensure()
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if os.name == "posix":
+                with suppress(OSError):
+                    os.chmod(folder, 0o700)
+            path = folder / stored
+            write_private_file(path, bytes(data))
+        return self._upload_info(path, len(data))
+
+    def list_uploads(self, run_id: str) -> list[dict]:
+        """A run's attached files as {id, name, kind, size}, sorted by name; [] when it has none."""
+        files = []
+        for path in self._upload_files(self.uploads_dir(run_id)):
+            try:
+                files.append(self._upload_info(path, path.lstat().st_size))
+            except OSError:
+                continue
+        return files
+
+    def delete_uploads(self, run_id: str) -> None:
+        """Remove a run's attached files and their folder (for a run that never started)."""
+        folder = self.uploads_dir(run_id)
+        with _LOCK:
+            shutil.rmtree(folder, ignore_errors=True)
 
     # ── The allowlist ────────────────────────────────────────────────────────
 
