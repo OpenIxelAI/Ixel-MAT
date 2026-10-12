@@ -925,7 +925,10 @@ function stepRow(run, step) {
 function approvalCard(pending, computerOn) {
   const command = pending.action === "run_command";
   const addon = pending.action === "use_tool";
+  const addonCard = pending.action === "write_addon_card";
   const args = pending.args || {};
+  // "scratch:" paths are Ixel's own copy of a downloaded repo, not the workspace, and the server always asks for them
+  const scratch = command && typeof args.cwd === "string" && args.cwd.startsWith("scratch:");
   const card = el("section", { class: "agent-approval", "aria-label": "Waiting for your approval" });
   const body = [];
   if (command) {
@@ -934,14 +937,24 @@ function approvalCard(pending, computerOn) {
       el("pre", { class: "agent-command" }, commandLine(argv)),
       pending.sandboxed
         ? el("p", { class: "agent-sandbox ok" }, icon("lock"),
-          el("span", {}, "Runs in a sandbox: no network, and it can write only in the workspace and the temp folder."))
+          el("span", {}, scratch
+            ? "Runs in a sandbox in Ixel's copy of the downloaded repo, not the workspace: no network, and it can write only there and in the temp folder."
+            : "Runs in a sandbox: no network, and it can write only in the workspace and the temp folder."))
         : el("p", { class: "agent-sandbox no" }, icon("alert"),
-          el("span", {}, "Not sandboxed: it runs with your account's access (without the keys saved in Ixel).")));
+          el("span", {}, scratch
+            ? "Not sandboxed: it runs in Ixel's copy of the downloaded repo, not the workspace, with your account's access (without the keys saved in Ixel)."
+            : "Not sandboxed: it runs with your account's access (without the keys saved in Ixel).")));
   } else if (addon) {
     body.push(el("p", { class: "agent-approval-what" }, pending.diff || "Use this add-on tool:"),
       el("pre", { class: "agent-command" }, JSON.stringify(args, null, 2)),
       el("p", { class: `agent-sandbox ${pending.sandboxed ? "ok" : "no"}` },
         pending.sandboxed ? "Runs in a sandbox with the card's permissions." : "Runs without a sandbox."));
+  } else if (addonCard) {
+    const id = args.id ? String(args.id) : "<id>";
+    body.push(el("p", { class: "agent-approval-what" }, "It wants to add this add-on card:"),
+      el("pre", { class: "agent-command" }, pending.diff || "No card text to show."),
+      el("p", { class: "fine" },
+        `It will be written to ~/.ixel/addons/${id}/addon.toml. It stays off until you approve it in Settings > Add-ons.`));
   } else if (WRITES.has(pending.action)) {
     body.push(el("p", { class: "agent-approval-what" },
       pending.action === "write_file" ? "It wants to write " : "It wants to edit ",
@@ -955,7 +968,7 @@ function approvalCard(pending, computerOn) {
     el("button", { type: "button", class: "btn primary", onclick: () => decide(true, false, card) }, icon("check"), el("span", {}, "Approve")),
     el("button", { type: "button", class: "btn danger", onclick: () => decide(false, false, card) }, icon("x"), el("span", {}, "Deny")),
   ];
-  if ((command && !computerOn) || addon) {
+  if ((command && !computerOn && !scratch) || addon) {
     buttons.push(el("button", { type: "button", class: "btn", onclick: () => decide(true, true, card),
       title: addon ? "Allow this add-on's tools for the rest of this run" :
         "Run it, and from now on run commands that start this way in this workspace without asking" },
