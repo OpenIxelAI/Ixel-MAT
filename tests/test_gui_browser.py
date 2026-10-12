@@ -709,6 +709,10 @@ class FakeBoard:
             return reply({"levels": {"gpt-5.1": ["low", "medium", "high"],
                                      "gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"]}.get(
                 query.get("model"), ["low", "medium", "high", "xhigh"])})
+        if url.path == "/api/board/models":  # (what a worker lists: a local server's models, OpenCode's)
+            return reply({"ollama": {"models": ["qwen3:4b", "llama3.2:3b"], "default": "qwen3:4b"},
+                          "opencode": {"models": ["anthropic/claude-haiku-5-5", "opencode/step-5-preview-free"],
+                                       "default": None}}.get(query.get("agent"), {"models": [], "default": None}))
         if url.path == "/api/board/agents":
             return reply({"agents": [{"name": "claude"}, {"name": "codex"}, {"name": "grok", "label": "Grok"}],
                           "problems": []})
@@ -863,6 +867,86 @@ def test_board_actions_ask_first_and_go_to_handoff(gui_url, browser):
 
 WORKERS = {"claude": {"efforts": ["low", "medium", "high", "xhigh", "max"], "chain": True},
                   "codex": {"efforts": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"], "chain": False}}
+
+
+ANY_WORKERS = {
+    **WORKERS,
+    "ollama": {"efforts": ["none", "low", "medium", "high"], "chain": False, "label": "Ollama", "access": "edit-only",
+               "local": True, "needs_ok": False, "enabled": True, "default_model": None},
+    "opencode": {"efforts": ["minimal", "low", "medium", "high", "xhigh", "max"], "chain": False, "label": "OpenCode",
+                 "access": "edit-only", "local": False, "needs_ok": False, "enabled": True, "default_model": None},
+    "kimi": {"efforts": [], "chain": False, "label": "Kimi Code", "access": "full", "local": False, "needs_ok": True,
+             "enabled": False, "default_model": None},
+}
+
+
+def test_board_runs_an_edit_on_any_agent_or_local_model(gui_url, browser):
+    fake = FakeBoard()
+    for n, (title, agent) in enumerate((("Rename a helper", "ollama"), ("Write the docs", "opencode"),
+                                        ("Fix the build", "kimi")), 6):
+        fake.tasks[f"T-{n}"] = fake.task(n, title, "open", agent)
+    base = fake.detail
+
+    def detail(ref):
+        data = base(ref)
+        if ref in ("T-6", "T-7", "T-8"):
+            agent = fake.tasks[ref]["assignee"]
+            data["actions"][0] = {**data["actions"][0], "args": {"agent": agent, "kind": "edit"},
+                                  "kinds": ["edit", "answer", "review"]}
+            data["task"]["workers"] = json.loads(json.dumps(ANY_WORKERS))
+        return data
+    fake.detail = detail
+    page, errors, _ = open_board(browser, fake)
+    page.goto(gui_url)
+    page.click(".rail-item[data-view=board]")
+
+    # A model on this computer: free, edits only, offered the server's models, with its own levels; names keep case
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    assert "Free: it runs on your computer." in page.inner_text(".worker-access")
+    assert "no commands" in page.inner_text(".worker-access")
+    assert page.locator("#needs-run-mode option[value=chain]").count() == 0
+    page.select_option("#needs-run-mode", "one")
+    wait_until(page, "document.querySelectorAll('#needs-models-ollama option').length === 2")
+    efforts = page.locator("[data-key=needs-effort-0] option").all_inner_texts()
+    assert efforts == ["Default effort", "No thinking effort", "Low effort", "Medium effort", "High effort"]
+    page.fill("[data-key=needs-model-0]", "qwen3:4b")
+    page.select_option("[data-key=needs-effort-0]", "none")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["agent"] == "ollama" and approve["models"] == ["qwen3:4b"] and approve["efforts"] == {"qwen3:4b": "none"}
+
+    # OpenCode: its free models first
+    page.click(".task-card[data-ref=T-7]")
+    page.click("#task-panel .actions .btn.primary")
+    page.select_option("#needs-run-mode", "one")
+    wait_until(page, "document.querySelectorAll('#needs-models-opencode option').length === 2")
+    first = page.locator("#needs-models-opencode option").first
+    assert first.get_attribute("value") == "opencode/step-5-preview-free" and "(free)" in first.inner_text()
+    page.fill("[data-key=needs-model-0]", "opencode/step-5-preview-free")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["models"] == ["opencode/step-5-preview-free"]
+
+    # An agent with its own permissions waits for your yes: nothing goes until you give it, here
+    page.click(".task-card[data-ref=T-8]")
+    page.click("#task-panel .actions .btn.primary")
+    assert "run commands as you" in page.inner_text(".worker-access")
+    sent = len(fake.actions)
+    page.click(".needs button[type=submit]")
+    page.wait_for_selector(".board-notice.error")
+    assert "Let Kimi Code change files first" in page.inner_text(".board-notice.error")
+    assert len(fake.actions) == sent
+    page.click("[data-key=needs-enable]")
+    wait_until(page, "!document.querySelector('[data-key=needs-enable]')")
+    assert fake.actions[-1] == ("agents.enable", {"agent": "kimi", "on": True})
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["agent"] == "kimi" and "models" not in approve
+    assert not errors, errors
 
 
 def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_used(gui_url, browser):
