@@ -117,6 +117,15 @@ Tests in `tests/test_addons.py`.
 Safe extraction (rejects `..`, absolute, links), sha mismatch refused, type matching, HTML extraction
 from a reply, self-check pass/fail/retry with a fake model, toggle on/off through the settings route.
 
+### Build notes
+- The diagram is shown from `GET /diagram/<id>` in a sandboxed iframe (`sandbox="allow-scripts"`, its
+  own CSP, no same-origin) rather than via `srcdoc`, because a `srcdoc` frame inherits the page's CSP
+  and would block the diagram's own scripts.
+- The release is pinned in `ixel_mat/addons.py` as `PINNED_COMMIT`, `PINNED_TREE_FILES` and
+  `PINNED_TREE_SHA256` (the tree hash described above). To move the pin: clone the new commit, compute
+  `addons.tree_hash()` of its `skills/diagram-design/` folder, and update all three.
+- Section 1 (Reverse engineer tab) is not part of this build yet.
+
 ---
 
 ## 3. AirLLM
