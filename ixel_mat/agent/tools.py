@@ -29,6 +29,7 @@ import fnmatch
 import hashlib
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -764,19 +765,64 @@ class Workspace:
 
     # ── Computer access ──────────────────────────────────────────────────────
 
+    @staticmethod
+    def _screenshot_argv(path: str) -> list[str] | str:
+        """The words that capture the whole screen into path on this computer, or a plain message saying what
+        is missing. macOS uses screencapture, Windows PowerShell with System.Drawing, and Linux grim on
+        Wayland or the first of gnome-screenshot, scrot and ImageMagick's import on X11."""
+        if sys.platform == "darwin":
+            return ["screencapture", "-x", path]
+        if sys.platform == "win32":
+            if shutil.which("powershell.exe") is None:
+                return "screenshot needs Windows PowerShell (powershell.exe), which wasn't found"
+            if any(char in path for char in "\"\n\r\x00"):
+                return "screenshot can't save to a temporary path with a quote or a line break in it"
+            # run_command passes no environment, and words after -Command are joined into the script, so the
+            # path is an escaped single-quoted literal; PowerShell reads all five of these as quotes
+            literal = "'" + re.sub("['‘’‚‛]", lambda m: m.group(0) * 2, path) + "'"
+            script = "; ".join([
+                "$ErrorActionPreference = 'Stop'",
+                "Add-Type -AssemblyName System.Windows.Forms, System.Drawing",
+                "$b = [System.Windows.Forms.SystemInformation]::VirtualScreen",
+                "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height",
+                "$g = [System.Drawing.Graphics]::FromImage($bmp)",
+                "$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)",
+                f"$bmp.Save({literal}, [System.Drawing.Imaging.ImageFormat]::Png)",
+                "$g.Dispose()",
+                "$bmp.Dispose()",
+            ])
+            return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
+        if os.environ.get("WAYLAND_DISPLAY"):
+            if shutil.which("grim"):
+                return ["grim", path]
+            return "screenshot needs grim on Wayland; install grim"
+        if os.environ.get("DISPLAY"):
+            for command in (["gnome-screenshot", "-f"], ["scrot", "-o"], ["import", "-window", "root"]):
+                if shutil.which(command[0]):
+                    return [*command, path]
+            return ("screenshot needs a screen-capture program; install scrot, gnome-screenshot or "
+                    "ImageMagick (import)")
+        return "screenshot needs a display, and this computer has none (no WAYLAND_DISPLAY or DISPLAY)"
+
     def screenshot(self, cancel: threading.Event | None = None) -> Viewed:
-        """Take an approved screenshot on a Mac into a private temp file, then clean it like view_file.
-        The image lives only in memory once this returns; the temporary file and folder are removed."""
+        """Take an approved screenshot of the whole screen into a private temp file, then clean it like
+        view_file: screencapture on a Mac, grim (Wayland) or gnome-screenshot, scrot or ImageMagick (X11) on
+        Linux, PowerShell with System.Drawing on Windows. With no display or no capture program it returns a
+        message saying what to install. The image lives only in memory once this returns; the temporary file
+        and folder are removed."""
         if not self.computer:
             raise WorkspaceError("unknown action 'screenshot'; Computer access is off")
-        if sys.platform != "darwin":
-            return Viewed("screenshot isn't supported on this computer; it is macOS only")
         with tempfile.TemporaryDirectory(prefix="ixel-agent-screen-") as tmp:
-            with tempfile.NamedTemporaryFile(dir=tmp, suffix=".png") as capture:
-                result = run_command(["screencapture", "-x", capture.name], self.root, computer=True, cancel=cancel)
-                if result.returncode != 0 or result.timed_out or result.cancelled:
-                    raise WorkspaceError(f"screenshot failed: {result.output}")
-                return self._picture(Path(capture.name), "screenshot")
+            # Made here and closed at once: on Windows another program can't write a file Python holds open
+            capture = Path(tmp) / "screen.png"
+            os.close(os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            argv = self._screenshot_argv(str(capture))
+            if isinstance(argv, str):
+                return Viewed(argv)
+            result = run_command(argv, self.root, computer=True, cancel=cancel)
+            if result.returncode != 0 or result.timed_out or result.cancelled:
+                raise WorkspaceError(f"screenshot failed: {result.output}")
+            return self._picture(capture, "screenshot")
 
     def open_argv(self, target: str) -> list[str]:
         """Check what an open would do and return the exact words to approve. A bare app name uses open -a
