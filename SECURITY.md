@@ -427,7 +427,10 @@ network.
   key on a pipe only they read, and stops when they close its stdin. Both accept only an `http://127.0.0.1`
   address from it. The Linux window keeps only that server's pages inside (the address is parsed, so
   `http://127.0.0.1:80@evil.example/` doesn't count), gives the microphone only to them, opens other web
-  links in your browser and ignores any other kind of link.
+  links in your browser and ignores any other kind of link. The Mac app keeps the same pages inside by the
+  same rule, and opens a web or email link you click in your browser (a script in the page can't open one by
+  itself). A download it saves goes in your Downloads folder under a name nothing there has (the file name
+  the page suggests is cut down to one plain name), so it never replaces a file.
 
 **How it's checked:** `tests/test_gui_browser.py` runs the app in real Chromium with a model that answers
 with `<img onerror>`, `<script>`, and `javascript:` links. It asserts that nothing executes, no elements are
