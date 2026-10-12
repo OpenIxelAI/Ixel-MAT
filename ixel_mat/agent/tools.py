@@ -46,6 +46,7 @@ from ixel_mat.pictures import Picture
 
 MAX_LIST_ENTRIES = 500
 MAX_READ_BYTES = 200 * 1024
+MAX_READ_LINES = 400           # read_file with no start and end gives this many lines, then says how many there are
 MAX_SEARCH_LINES = 200
 MAX_SEARCH_FILE_BYTES = 1024 * 1024
 MAX_SEARCH_FILES = 20_000      # a search stops looking after this many files, so a huge folder can't hang it
@@ -511,8 +512,9 @@ class Workspace:
     def read_file(self, path: str, start: int | None = None, end: int | None = None) -> str:
         """A text file's contents, or lines start to end (1-based, both included), with secrets masked.
 
-        At most 200 KB: a bigger file is only read a line range at a time. Files that aren't text (a NUL
-        byte near the start, or more than a few bytes that aren't UTF-8) are refused.
+        With no start and end, the first 400 lines come back (of a document's text too), and a last line says
+        how many lines there are in all. At most 200 KB: a bigger file is only read a line range at a time.
+        Files that aren't text (a NUL byte near the start, or more than a few bytes that aren't UTF-8) are refused.
 
         A document (PDF, Word, Excel, PowerPoint, RTF, OpenDocument, a web page; at most 50 MB) is read as
         its text, with a last line saying what kind it is and how many pictures it holds; start and end are
@@ -538,6 +540,15 @@ class Workspace:
                                          "read part of it with start and end line numbers")
                 data = target.read_bytes()
                 note = ""
+                # Only the first MAX_READ_LINES lines of a text file; a file that isn't text is left whole, so
+                # _decode still refuses it (a NUL byte after the cut would otherwise be lost)
+                total = data.count(b"\n") + (0 if not data or data.endswith(b"\n") else 1)
+                if total > MAX_READ_LINES and not _looks_binary(data):
+                    at = -1
+                    for _ in range(MAX_READ_LINES):
+                        at = data.index(b"\n", at + 1)
+                    data = data[:at + 1]
+                    note = f"\n[showing lines 1-{MAX_READ_LINES}; {total} lines in all; use start and end for more]"
             else:
                 data, note = self._read_lines(target, start or 1, end)
         except OSError as exc:
@@ -561,6 +572,11 @@ class Workspace:
                 text = "(no lines in that range)"
         elif not text.strip():
             text = "(no text in it)"
+        shown: list[str] = []
+        lines = text.splitlines()
+        if start is None and end is None and len(lines) > MAX_READ_LINES:
+            text = "\n".join(lines[:MAX_READ_LINES])
+            shown = [f"[showing lines 1-{MAX_READ_LINES}; {len(lines)} lines in all; use start and end for more]"]
         count = len(doc.images)
         if count:
             note = (f"[{_a(doc.kind)} with {count} picture{'' if count == 1 else 's'} inside; view_file shows "
@@ -568,7 +584,7 @@ class Workspace:
         else:
             note = f"[{_a(doc.kind)}, no pictures]"
         # What the reader left out (text cut at its limit, parts it skipped), for the model to know
-        return "\n".join([text, note, *(f"[{mask_secrets(line)}]" for line in doc.notes)])
+        return "\n".join([text, *shown, note, *(f"[{mask_secrets(line)}]" for line in doc.notes)])
 
     def _read_lines(self, target: Path, start: int, end: int | None) -> tuple[bytes, str]:
         """Lines start..end of a file (end None: to the end) as bytes, at most MAX_READ_BYTES of them."""
