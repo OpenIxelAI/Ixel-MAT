@@ -481,7 +481,7 @@ def _install_app(tmp_path: Path, python: Path):
     """install.sh's install_app on its own (Linux), as the installer runs it."""
     import subprocess
     script = (ROOT / "install.sh").read_text(encoding="utf-8")
-    functions = script[script.index("linux_window_hint() {"):script.index("\nPYTHON_BIN=")]
+    functions = script[script.index("window_ready() {"):script.index("\nPYTHON_BIN=")]
     venv = python.parent.parent
     return subprocess.run(["bash", "-c", "set -euo pipefail\n" + functions + '\nAPP_NOTE=""\nAPP_PATH=""\ninstall_app\nprintf "%s\\n%s" "$APP_PATH" "$APP_NOTE"'],
                           capture_output=True, text=True,
@@ -709,6 +709,54 @@ def test_the_mac_app_shows_a_file_chooser_for_the_page():
     assert "webView.uiDelegate = self" in swift and "runOpenPanelWith parameters: WKOpenPanelParameters" in swift
 
 
+def test_the_mac_app_saves_downloads_to_the_downloads_folder():
+    """Swift can't run here: this checks that the download delegates are there and wired up."""
+    swift = (ROOT / "macos" / "Ixel" / "main.swift").read_text(encoding="utf-8")
+    for wiring in ("webView.navigationDelegate = self", "extension AppDelegate: WKNavigationDelegate",
+                   "extension AppDelegate: WKDownloadDelegate", "shouldPerformDownload", "canShowMIMEType",
+                   "decideDestinationUsing", ".downloadsDirectory", "com.apple.DownloadFileFinished",
+                   "DistributedNotificationCenter", "didFailWithError"):
+        assert wiring in swift, wiring
+    assert swift.count("download.delegate = self") >= 2  # a download that starts from a link, and from a response
+    assert "activateFileViewerSelecting" not in swift  # the Downloads stack bounces; Finder isn't brought up
+
+    # A response becomes a download only for Ixel's own page in the main frame; a frame or another site is cancelled
+    start = swift.index("decidePolicyFor navigationResponse")
+    policy = swift[start:swift.index("func webView(", start)]
+    for rule in ("isForMainFrame", "isIxelPage(navigationResponse.response.url)", "decisionHandler(.cancel)",
+                 "decisionHandler(.download)"):
+        assert rule in policy, rule
+
+    # A name counts as taken if anything is there, a broken symlink too, and a symlink is never followed
+    start = swift.index("private func isTaken")
+    taken = swift[start:swift.index("\n    }", start)]
+    assert "lstat(" in taken and "destinationOfSymbolicLink" in taken
+
+
+def test_the_mac_app_is_built_for_the_macos_it_needs():
+    """WKDownload came in macOS 11.3, and make-app.sh builds for the version Info.plist says the app needs."""
+    import plistlib
+    script = (ROOT / "macos" / "make-app.sh").read_text(encoding="utf-8")
+    # On the swiftc line that follows xcode-select -p, so the tools are known to be there before it runs
+    found = re.search(r'xcode-select -p [^\n]*&& \\\n\s*swiftc [^\n]*-target "\$\(uname -m\)-apple-macos(\d+)\.(\d+)"',
+                      script)
+    assert found
+    built_for = (int(found.group(1)), int(found.group(2)))
+    minimum = plistlib.loads((ROOT / "macos" / "Info.plist").read_bytes())["LSMinimumSystemVersion"]
+    assert built_for >= (11, 3)
+    assert built_for == (tuple(int(n) for n in minimum.split(".")) + (0, 0))[:2]
+
+
+def test_the_mac_app_keeps_ixels_page_inside_and_opens_web_links_in_the_browser():
+    """The same rules as the Linux window's (linux_window.is_ixel_page and opens_in_browser)."""
+    from ixel_mat.gui.linux_window import opens_in_browser
+    swift = (ROOT / "macos" / "Ixel" / "main.swift").read_text(encoding="utf-8")
+    assert 'url.host == "127.0.0.1"' in swift and "url.user == nil" in swift and "url.password == nil" in swift
+    assert '["http", "https", "mailto"]' in swift and "NSWorkspace.shared.open(url)" in swift
+    for scheme in ("http", "https", "mailto"):
+        assert opens_in_browser(f"{scheme}://x.example/") and f'"{scheme}"' in swift
+
+
 def test_the_mac_app_says_why_it_wants_the_microphone():
     import plistlib
     info = plistlib.loads((ROOT / "macos" / "Info.plist").read_bytes())
@@ -722,3 +770,109 @@ def test_the_mac_app_says_why_it_wants_the_microphone():
 def test_linux_window_opens_only_web_links_in_the_browser(uri, opens):
     from ixel_mat.gui.linux_window import opens_in_browser
     assert opens_in_browser(uri) is opens
+
+
+@pytest.mark.parametrize("state", [None, "state"])
+def test_linux_window_keeps_its_storage_in_the_gtk_folder_of_ixels_own(state, tmp_path):
+    """linux_window.py imports nothing from Ixel, so it works out data_dir's folder again. They must agree,
+    or `ixel forget` would delete a folder the window doesn't use."""
+    from ixel_mat.gui.linux_window import storage_folders
+    home = tmp_path / "home"
+    env = {"XDG_STATE_HOME": str(tmp_path / state)} if state else {}
+    data, cache = storage_folders(env, str(home))
+    assert Path(data).parent == Path(cache).parent == window.data_dir("linux", env, home) / "gtk"
+    assert (Path(data).name, Path(cache).name) == ("data", "cache")
+
+
+@pytest.fixture
+def fake_gtk(monkeypatch):
+    """A gi module whose GTK and WebKit write down what linux_window asks of them: the versions it required
+    (calls), the data managers made, and the context and view built from them. Add to `missing` the
+    WebKit2 versions this computer doesn't have."""
+    import types
+
+    calls, managers, missing = [], [], set()
+
+    class WebsiteDataManager:
+        def __init__(self, **options):
+            self.options = options
+            managers.append(self)
+
+    class WebContext:
+        def __init__(self, manager):
+            self.manager = manager
+
+        @staticmethod
+        def new_with_website_data_manager(manager):
+            return WebContext(manager)
+
+    class WebView:
+        def __init__(self, context=None):
+            self.context = context
+
+        @staticmethod
+        def new_with_context(context):
+            return WebView(context)
+
+    def require_version(name, version):
+        calls.append((name, version))
+        if name == "WebKit2" and version in missing:
+            raise ValueError(f"Namespace {name} not available for version {version}")
+
+    gi = types.ModuleType("gi")
+    gi.require_version = require_version
+    repository = types.ModuleType("gi.repository")
+    for name in ("Gdk", "Gio", "GLib", "Gtk"):
+        setattr(repository, name, types.SimpleNamespace(name=name))
+    repository.WebKit2 = types.SimpleNamespace(WebsiteDataManager=WebsiteDataManager, WebContext=WebContext,
+                                               WebView=WebView)
+    gi.repository = repository
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", repository)
+    return types.SimpleNamespace(calls=calls, managers=managers, missing=missing, repository=repository)
+
+
+def test_linux_window_asks_for_gtk_3_and_webkit_4_1_first(fake_gtk):
+    from ixel_mat.gui import linux_window
+    repository = fake_gtk.repository
+    assert linux_window.load_gtk() == (repository.Gdk, repository.Gio, repository.GLib, repository.Gtk,
+                                       repository.WebKit2)
+    assert fake_gtk.calls == [("Gtk", "3.0"), ("Gdk", "3.0"), ("WebKit2", "4.1")]
+
+
+def test_linux_window_falls_back_to_webkit_4_0_and_gives_up_without_it(fake_gtk):
+    from ixel_mat.gui import linux_window
+    fake_gtk.missing.add("4.1")
+    linux_window.load_gtk()
+    assert fake_gtk.calls[-2:] == [("WebKit2", "4.1"), ("WebKit2", "4.0")]
+    fake_gtk.missing.add("4.0")
+    with pytest.raises(ImportError):
+        linux_window.load_gtk()
+
+
+def test_linux_window_builds_its_web_view_on_a_data_manager_with_ixels_own_folders(fake_gtk, tmp_path):
+    from ixel_mat.gui import linux_window
+    *_, WebKit2 = linux_window.load_gtk()
+    folders = linux_window.storage_folders({"XDG_STATE_HOME": str(tmp_path / "state")}, str(tmp_path / "home"))
+    view = linux_window.new_view(WebKit2, folders)
+    [manager] = fake_gtk.managers
+    assert manager.options == {"base_data_directory": folders[0], "base_cache_directory": folders[1]}
+    assert isinstance(view, WebKit2.WebView) and isinstance(view.context, WebKit2.WebContext)
+    assert view.context.manager is manager  # the view uses the manager's folders, not WebKit's own
+    assert not (tmp_path / "state").exists()  # WebKit makes the folders, when it needs them
+
+
+def test_linux_window_uses_ixels_own_folder_unless_given_others(fake_gtk, tmp_path, monkeypatch):
+    from ixel_mat.gui import linux_window
+    *_, WebKit2 = linux_window.load_gtk()
+    home = tmp_path / "home"
+    monkeypatch.setattr(os.path, "expanduser", lambda path: str(home) if path == "~" else path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    linux_window.new_view(WebKit2)
+    monkeypatch.delenv("XDG_STATE_HOME")
+    linux_window.new_view(WebKit2)
+    for manager, env in zip(fake_gtk.managers, [{"XDG_STATE_HOME": str(tmp_path / "state")}, {}]):
+        gtk = window.data_dir("linux", env, home) / "gtk"
+        assert {key: Path(path) for key, path in manager.options.items()} == {
+            "base_data_directory": gtk / "data", "base_cache_directory": gtk / "cache"}
+    assert len(fake_gtk.managers) == 2

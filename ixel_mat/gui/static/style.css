@@ -1701,7 +1701,7 @@ code.set-sub { font-family: var(--mono); }
 .agent-sandbox { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0 0; font-size: 12.5px; }
 .agent-sandbox .icon { flex: none; width: 15px; height: 15px; margin-top: 1px; }
 .agent-sandbox.ok .icon { color: var(--green); }
-.agent-sandbox.no { color: var(--amber); }
+.agent-sandbox.no, .agent-sandbox.partial { color: var(--amber); }
 .agent-approval-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 
 .agent-answer { font-size: 14px; line-height: 1.6; color: var(--text); }

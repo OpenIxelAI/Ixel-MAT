@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tarfile
 from datetime import datetime
 from pathlib import Path
@@ -76,10 +77,12 @@ CLAUDE_CODE = AgentConfig(name="claude", label="Claude Code", type="oneshot", co
                           model_args=["--model", "{model}"])
 
 
-def _add(tar, name, data=b"", kind=tarfile.REGTYPE, link=""):
+def _add(tar, name, data=b"", kind=tarfile.REGTYPE, link="", mode=None):
     info = tarfile.TarInfo(name)
     info.type = kind
-    info.mode = 0o755 if kind == tarfile.DIRTYPE else 0o600  # the archive's modes are never used
+    if mode is None:
+        mode = 0o755 if kind == tarfile.DIRTYPE else 0o600
+    info.mode = mode  # only the execute bit of the archive's modes is used
     info.linkname = link
     if kind == tarfile.REGTYPE:
         info.size = len(data)
@@ -575,12 +578,56 @@ def test_an_empty_subdir_unpacks_the_whole_top_folder(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX's")
-def test_the_archives_modes_are_ignored(tmp_path):
+def test_the_archives_modes_are_ignored_but_the_execute_bit(tmp_path):
     dest = tmp_path / "addons" / "diagram-design"
     addons.extract(TARBALL, SUB, dest)
     assert stat.S_IMODE((dest / "SKILL.md").stat().st_mode) == 0o644
     assert stat.S_IMODE((dest / "references").stat().st_mode) == 0o755
     assert stat.S_IMODE(dest.stat().st_mode) == 0o755
+
+
+@pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX's")
+def test_a_file_with_an_execute_bit_is_executable_and_never_setuid_setgid_or_sticky(tmp_path):
+    dest = tmp_path / "addons" / "diagram-design"
+    base = f"{TOP}/{SUB}"
+    extra = [
+        {"name": f"{base}/bin/tool", "data": b"#!/bin/sh\necho hi\n", "mode": 0o755},
+        {"name": f"{base}/bin/suid", "data": b"#!/bin/sh\n", "mode": 0o4755},
+        {"name": f"{base}/bin/sgid", "data": b"#!/bin/sh\n", "mode": 0o2710},  # only the group may run it
+        {"name": f"{base}/notes.txt", "data": b"plain notes\n", "mode": 0o644},
+        {"name": f"{base}/shared", "kind": tarfile.DIRTYPE, "mode": 0o1777},
+    ]
+    addons.extract(tarball(extra=extra), SUB, dest)
+    special = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
+    for rel in ("bin/tool", "bin/suid", "bin/sgid"):
+        mode = (dest / rel).stat().st_mode
+        assert stat.S_IMODE(mode) == 0o755 and not mode & special, rel
+    for rel in ("notes.txt", "SKILL.md"):  # SKILL.md's member is 0o600
+        assert stat.S_IMODE((dest / rel).stat().st_mode) == 0o644, rel
+    for folder in (dest, dest / "bin", dest / "shared", dest / "references"):
+        mode = folder.stat().st_mode
+        assert stat.S_IMODE(mode) == 0o755 and not mode & special, folder.name
+
+
+def test_an_executable_file_still_matches_the_pin_and_keeps_its_bytes(tmp_path):
+    dest = tmp_path / "addons" / "diagram-design"
+    script = "#!/bin/sh\necho hi\n"
+    files = {**SKILL_FILES, "bin/tool": script}
+    data = tarball(extra=[{"name": f"{TOP}/{SUB}/bin/tool", "data": script.encode("utf-8"), "mode": 0o755}])
+    assert addons.extract(data, SUB, dest, expect=expected_tree(files)) == len(files)
+    assert addons.tree_hash(dest) == expected_tree(files)
+    assert (dest / "bin" / "tool").read_bytes() == script.encode("utf-8")
+
+
+def test_an_add_on_with_an_executable_installs_and_passes_check_installed():
+    script = "#!/bin/sh\necho hi\n"
+    files = {**SKILL_FILES, "bin/tool": script}
+    data = tarball(extra=[{"name": f"{TOP}/{SUB}/bin/tool", "data": script.encode("utf-8"), "mode": 0o755}])
+    tree, count = expected_tree(files)[1], len(files)
+    card = addons.write_agent_card(card_text(source__tree_sha256=tree, source__files=count))
+    addons.install(card, fetch=lambda url: data)
+    addons.check_installed(card)  # raises AddonError(409, "changed") if the files don't match the pin
+    assert (card.files_dir / "bin" / "tool").read_bytes() == script.encode("utf-8")
 
 
 def test_what_was_there_is_replaced_whole(tmp_path):
@@ -1079,7 +1126,9 @@ def test_the_check_sees_no_keys_from_your_shell(skill, tmp_path, monkeypatch):
     assert result.ran and result.messages[0].startswith("names:")
     names = set(result.messages[0].split()[1:])
     assert "OPENAI_API_KEY" not in names and "SOME_TOKEN" not in names
-    assert {name.upper() for name in names} <= set(addons.CHECK_ENV)
+    # macOS itself adds __CF_USER_TEXT_ENCODING (a language setting, no secret) to every program it starts
+    added_by_macos = {"__CF_USER_TEXT_ENCODING"} if sys.platform == "darwin" else set()
+    assert {name.upper() for name in names} - added_by_macos <= set(addons.CHECK_ENV)
 
 
 # ── Making a diagram ─────────────────────────────────────────────────────────

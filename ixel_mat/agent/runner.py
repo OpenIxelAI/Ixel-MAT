@@ -50,7 +50,7 @@ from pathlib import Path
 from ixel_mat.agent import addons, cards
 from ixel_mat.agent.protocol import (Action, MAX_READS, NEEDS_APPROVAL, ProtocolError, Reads, build_prompt,
                                      parse_reply, prompt_prefix)
-from ixel_mat.agent.sandbox import can_sandbox, run_command
+from ixel_mat.agent.sandbox import can_sandbox, run_command, sandbox_kind
 from ixel_mat.agent.store import AgentStore
 from ixel_mat.agent.tools import (MAX_PICTURE_BYTES_PER_CALL, MAX_PICTURES_PER_CALL, PendingWrite, Workspace,
                                   Viewed, WorkspaceError)
@@ -72,6 +72,14 @@ MAX_BAD_REPLY_BYTES = 2 * 1024  # how much of a bad reply is sent back to the mo
 REPEATS = 3                     # the same reply this many times in a row is a loop
 _TERMINAL = ("done", "stopped", "failed")
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
+# What a command's result says about its sandbox (CommandResult.sandbox)
+_SANDBOX_WORDS = {
+    "full": "sandboxed",
+    "writes-only": ("sandboxed for writes only (Windows): it could write only in the workspace and a private "
+                    "temp folder, but the network was on and reads weren't limited, so it could read any file "
+                    "your account can, including your SSH, cloud and browser folders"),
+    "none": "ran without a sandbox",
+}
 
 
 def clip_result(text: str) -> str:
@@ -600,17 +608,23 @@ class AgentRun:
             if needs_approval:
                 self._decision = None
                 self._decision_event.clear()
+                # sandbox is "full", "writes-only" (Windows) or "none"; sandboxed is True only for "full"
+                kind = "none"
+                if action.action == "run_command" and not self.computer:
+                    # In a thread: the first call tests the Windows sandbox by running a small command
+                    kind = await asyncio.to_thread(sandbox_kind)
                 self.pending = {"n": step["n"], "action": action.action, "args": deepcopy(action.args),
                                 "diff": prepared.diff if prepared is not None else note,
                                 "argv": list(action.args["argv"]) if action.action == "run_command" else [],
-                                "sandboxed": (not self.computer and can_sandbox()
-                                              if action.action == "run_command" else False)}
+                                "sandbox": kind, "sandboxed": kind == "full"}
                 if action.action == "screenshot":
-                    self.pending["diff"] = "Take a picture of the screen (macOS only) and send it to the model."
+                    self.pending["diff"] = "Take a picture of the screen and send it to the model."
                 elif opened is not None:
                     self.pending.update(argv=opened, diff=f"Open {action.args['target']!r} using {opened!r}.")
                 elif action.action == "use_tool":
-                    self.pending["sandboxed"] = can_sandbox()
+                    # An add-on is sandboxed fully or not at all: the Windows sandbox doesn't cover add-ons
+                    kind = "full" if can_sandbox() else "none"
+                    self.pending.update(sandbox=kind, sandboxed=kind == "full")
                 paused = time.monotonic()
                 # Saved as waiting before the run says it is, so whoever sees the status finds the card on disk
                 await self._save_async(status="waiting")
@@ -659,8 +673,9 @@ class AgentRun:
             if action.action == "run_command":
                 folder = self.workspace.root
                 if not _in_workspace(action.args.get("cwd")):
-                    # Looked at again: the folder is the copy as it is now, and sandboxed on a Mac unless
-                    # Computer access is on (which is also the only time it has the network)
+                    # Looked at again: the folder is the copy as it is now, and sandboxed (fully on a Mac or on
+                    # Linux, for writes only on Windows) unless Computer access is on. It has the network only
+                    # then, or on Windows, where the sandbox can't block it
                     folder, name = self.workspace.scratch_cwd(action.args["cwd"])
                     where = f"; ran in scratch:{name}"
                 result = await asyncio.to_thread(run_command, action.args["argv"], folder,
@@ -670,7 +685,9 @@ class AgentRun:
                                                  cancel=self._command_cancel)
             status = "stopped" if result.cancelled else ("timed out" if result.timed_out
                                                           else f"exit code {result.returncode}")
-            sandbox = "sandboxed" if result.sandboxed else "ran without a sandbox"
+            sandbox = _SANDBOX_WORDS.get(result.sandbox, "ran without a sandbox")
+            if not result.started:
+                sandbox = "not run"  # the Windows sandbox couldn't be set up, so nothing was started
             return (result.returncode == 0 and not result.cancelled,
                     f"{status}; {sandbox}{where}\n{result.output}")
         if action.action in ("view_file", "screenshot"):

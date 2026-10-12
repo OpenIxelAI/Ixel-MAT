@@ -16,6 +16,13 @@ from ixel_mat.agents.base import AgentConfig
 from ixel_mat.usage import Usage
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sandbox_test(monkeypatch):
+    """These runs use a fake run_command, so a card shouldn't depend on the computer's sandbox, or start the
+    Windows sandbox's test command. A test that cares about the kind sets runner.sandbox_kind itself."""
+    monkeypatch.setattr(runner, "sandbox_kind", lambda: "none")
+
+
 def _reply(action: str, **args) -> str:
     return json.dumps({"thought": "Check one thing", "action": action, "args": args})
 
@@ -152,7 +159,8 @@ def test_write_and_edit_wait_for_approval_then_use_the_reviewed_diff(tmp_path, a
         run.start()
         page = await _waiting(run)
         pending = page["pending"]
-        assert set(pending) == {"n", "action", "args", "diff", "argv", "sandboxed"}
+        assert set(pending) == {"n", "action", "args", "diff", "argv", "sandbox", "sandboxed"}
+        assert pending["sandbox"] == "none" and pending["sandboxed"] is False
         assert pending["n"] == 1 and pending["action"] == action and pending["args"] == args
         assert "+new text" in pending["diff"] and "b/notes.txt" in pending["diff"]
         assert pending["argv"] == []
@@ -222,6 +230,7 @@ def test_always_allow_command_is_saved_and_later_runs_at_once(tmp_path, monkeypa
 
     monkeypatch.setattr(runner, "run_command", command)
     monkeypatch.setattr(runner, "can_sandbox", lambda: False)
+    monkeypatch.setattr(runner, "sandbox_kind", lambda: "none")
 
     async def scenario():
         argv = ["pytest", "-q"]

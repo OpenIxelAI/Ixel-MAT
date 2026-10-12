@@ -20,7 +20,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from ixel_mat.agent import cards
+from ixel_mat.agent import cards, runner
 from ixel_mat.agent.runner import AgentRun
 from ixel_mat.agent.store import AgentStore
 from ixel_mat.agent.tools import Workspace, WorkspaceError
@@ -510,7 +510,8 @@ def test_a_fetched_repo_can_be_read_but_never_written(tmp_path, store):
     assert (copy / "README.md").read_text(encoding="utf-8") == "# Example tool\n"
 
 
-def test_a_command_in_a_fetched_repo_always_asks_even_when_allowed(tmp_path, store):
+def test_a_command_in_a_fetched_repo_always_asks_even_when_allowed(tmp_path, store, monkeypatch):
+    monkeypatch.setattr(runner, "sandbox_kind", lambda: "none")  # the card isn't about this computer's sandbox
     copy = store.scratch_dir() / SCRATCH
     copy.mkdir(parents=True)
     (copy / "README.md").write_bytes(b"# Example tool\n")

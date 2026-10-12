@@ -25,7 +25,7 @@ plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Inf
 
 # xcode-select -p first: without the tools, /usr/bin/swiftc only offers to install them
 if xcode-select -p >/dev/null 2>&1 && \
-   swiftc -O -swift-version 5 -o "$APP/Contents/MacOS/Ixel" "$HERE/Ixel/main.swift" >"$BUILD/swiftc.log" 2>&1; then
+   swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos12.0" -o "$APP/Contents/MacOS/Ixel" "$HERE/Ixel/main.swift" >"$BUILD/swiftc.log" 2>&1; then
   KIND=native
 else
   # Through a login shell, as the native app does, so your model CLIs are on PATH

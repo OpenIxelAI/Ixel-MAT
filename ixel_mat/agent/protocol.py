@@ -78,8 +78,9 @@ ACTIONS: dict[str, dict[str, Any]] = {
                           "approval unless Always allow covers that add-on for this run; pictures reach "
                           "you with your next turn"},
     "screenshot": {"required": {}, "optional": {},
-                   "about": "take a picture of the screen on macOS, after approval; it reaches you with your "
-                            "next turn; Computer access only"},
+                   "about": "take a picture of the screen (macOS, Windows, or Linux with a capture program "
+                            "installed), after approval; it reaches you with your next turn; Computer access "
+                            "only"},
     "open": {"required": {"target": str}, "optional": {},
              "about": "open a path, an https:// link or an app name (macOS), after approval; Computer access "
                       "only; never through a shell"},

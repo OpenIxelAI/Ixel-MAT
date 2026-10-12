@@ -645,6 +645,406 @@ def test_two_ixels_saving_at_once_lose_nothing(tmp_path):
     assert sorted(p.name for p in folder.iterdir()) == ["keychain.json", "keys.enc"]
 
 
+# ── Owner-only access on Windows ──────────────────────────────────────────────
+
+SID = "S-1-5-21-1-2-3-1001"
+WHO = ("desktop-abc\\me", SID)  # what whoami says: the account, in lower case, and its SID
+WHOAMI = f'"{WHO[0]}","{SID}"\r\n'
+DONE = "Successfully processed 1 files; Failed processing 0 files\r\n"
+# How a program goes wrong: it exits with an error, isn't there, or doesn't answer
+FAILURES = [
+    pytest.param((5, "Access is denied.\r\n"), id="exits-with-an-error"),
+    pytest.param(OSError(2, "The system cannot find the file specified"), id="isnt-there"),
+    pytest.param(subprocess.TimeoutExpired(["icacls"], 10), id="doesnt-answer"),
+]
+
+
+def is_tool(argv, name):
+    return argv[0].lower().endswith(name)
+
+
+class Tools:
+    """whoami and icacls as secrets runs them (_run_tool): each answers with (exit code, what it printed), or
+    raises what it's given when that's an exception. Every call is kept, and whether the path icacls was given
+    was there at the time. icacls= answers every icacls call, and inheritance= (when given) the ones that take
+    away what a path inherits instead."""
+
+    def __init__(self, whoami=(0, WHOAMI), icacls=(0, DONE), inheritance=None):
+        self.whoami, self.icacls, self.inheritance = whoami, icacls, inheritance
+        self.calls, self.present = [], []
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        answer = self.whoami
+        if not is_tool(argv, "whoami.exe"):
+            self.present.append(Path(argv[1]).exists())
+            answer = self.icacls
+            if self.inheritance is not None and "/inheritance:r" in argv:
+                answer = self.inheritance
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def grants(self):
+        """The icacls calls that give the account its entry: the first of the two each path gets."""
+        return [argv for argv in self.calls if is_tool(argv, "icacls.exe") and "/grant:r" in argv]
+
+    def inheritance_removals(self):
+        """The icacls calls that take away what a path inherits: the second of the two."""
+        return [argv for argv in self.calls if is_tool(argv, "icacls.exe") and "/inheritance:r" in argv]
+
+
+def on_windows(monkeypatch, **answers):
+    """This run as Windows sees it: sys.platform says so, nobody has asked whoami yet, and whoami and icacls are
+    Tools (answers: whoami=, icacls=, inheritance=). No real program runs."""
+    tools = Tools(**answers)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(secrets, "_USER", None)
+    monkeypatch.setattr(secrets, "_run_tool", tools)
+    return tools
+
+
+def icacls_text(path, *entries, summary=DONE):
+    """`icacls <path>`'s output: the path and the first entry, the others indented under it, a blank line, and
+    a summary in the person's language."""
+    pad = " " * (len(str(path)) + 1)
+    lines = [f"{path} {entries[0]}", *(pad + entry for entry in entries[1:])]
+    return "\r\n".join(lines) + "\r\n\r\n" + summary + "\r\n"
+
+
+def owner_only_acl(monkeypatch):
+    """whoami and icacls answer at once, and say that only you can open anything (on Windows Health and every
+    save run them): for the tests that time the keychain, and nothing else. Nothing is run or changed."""
+    def tool(argv):
+        if is_tool(argv, "whoami.exe"):
+            return 0, WHOAMI
+        if len(argv) == 2:  # icacls <path>: who can open it
+            return 0, icacls_text(argv[1], f"{WHO[0]}:(F)")
+        return 0, DONE
+    monkeypatch.setattr(secrets, "_USER", None)
+    monkeypatch.setattr(secrets, "_run_tool", tool)
+
+
+def test_whoami_gives_the_account_and_its_sid():
+    assert secrets.parse_whoami(WHOAMI) == WHO
+    assert secrets.parse_whoami(WHOAMI.strip()) == WHO
+
+
+def test_a_name_with_a_comma_or_quotes_still_parses():
+    assert secrets.parse_whoami(f'"desk,top\\me ""the one""","{SID}"\r\n') == ('desk,top\\me "the one"', SID)
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "\r\n",
+    "ERROR: Access is denied.\r\n",
+    f'"{SID}"\r\n',
+    f'"desktop-abc\\me","{SID}","extra"\r\n',
+    '"desktop-abc\\me","not-a-sid"\r\n',
+])
+def test_whoami_output_that_isnt_an_account_and_a_sid_gives_none(text):
+    assert secrets.parse_whoami(text) is None
+
+
+# What every owner-only icacls call takes off: the entries a new folder or file can come with on Windows
+REMOVE_DEFAULTS = ["/remove:g", "*S-1-5-18", "/remove:g", "*S-1-5-32-544", "/remove:g", "*S-1-3-4"]
+
+
+def test_the_icacls_call_for_a_file_is_an_argv_list_with_the_path_as_one_item(monkeypatch, tmp_path):
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Win"))
+    path = tmp_path / "Some One" / "keys.enc"
+    argv = secrets.owner_only_argv(path, SID)
+    assert isinstance(argv, list) and len(argv) == 10
+    assert Path(argv[0]) == tmp_path / "Win" / "System32" / "icacls.exe"
+    assert argv[1] == str(path)
+    assert argv[2:] == [*REMOVE_DEFAULTS, "/grant:r", f"*{SID}:F"]
+    assert "/inheritance:r" not in argv  # that's the second call, once this one has worked
+
+
+def test_the_icacls_call_for_a_folder_grants_what_is_made_in_it_too(tmp_path):
+    argv = secrets.owner_only_argv(tmp_path, SID, folder=True)
+    assert argv[1:] == [str(tmp_path), *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:(OI)(CI)F"]
+
+
+def test_the_icacls_call_that_takes_away_what_a_path_inherits_is_an_argv_list_too(monkeypatch, tmp_path):
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Win"))
+    path = tmp_path / "Some One" / "keys.enc"
+    argv = secrets.no_inheritance_argv(path)
+    assert isinstance(argv, list) and len(argv) == 3
+    assert Path(argv[0]) == tmp_path / "Win" / "System32" / "icacls.exe"
+    assert argv[1:] == [str(path), "/inheritance:r"]
+
+
+def test_the_programs_are_found_in_windows_own_folder_even_without_systemroot(monkeypatch, tmp_path):
+    monkeypatch.delenv("SystemRoot", raising=False)
+    assert secrets.owner_only_argv(tmp_path, SID)[0].startswith("C:\\Windows")
+    assert secrets.owner_only_argv(tmp_path, SID)[0].endswith("icacls.exe")
+    assert secrets.no_inheritance_argv(tmp_path)[0].startswith("C:\\Windows")
+    assert secrets.no_inheritance_argv(tmp_path)[0].endswith("icacls.exe")
+
+
+def test_a_file_is_limited_to_the_users_account_on_windows(monkeypatch, tmp_path):
+    tools = on_windows(monkeypatch)
+    path = tmp_path / "keys.enc"
+    assert secrets.secure_owner_only(path) is True
+    assert [Path(argv[0]).name for argv in tools.calls] == ["whoami.exe", "icacls.exe", "icacls.exe"]
+    assert tools.calls[0][1:] == ["/user", "/fo", "csv", "/nh"]
+    assert tools.calls[1][1:] == [str(path), *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:F"]  # the grant comes first
+    assert tools.calls[2][1:] == [str(path), "/inheritance:r"]
+
+
+def test_a_folder_is_limited_with_inheritance_for_what_is_made_in_it(monkeypatch, tmp_path):
+    tools = on_windows(monkeypatch)
+    assert secrets.secure_owner_only(tmp_path, folder=True) is True
+    assert [Path(argv[0]).name for argv in tools.calls] == ["whoami.exe", "icacls.exe", "icacls.exe"]
+    assert tools.calls[1][1:] == [str(tmp_path), *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:(OI)(CI)F"]
+    assert tools.calls[2][1:] == [str(tmp_path), "/inheritance:r"]
+
+
+def test_whoami_is_asked_once_and_its_answer_kept(monkeypatch, tmp_path):
+    tools = on_windows(monkeypatch)
+    assert secrets.secure_owner_only(tmp_path / "keys.enc") and secrets.secure_owner_only(tmp_path, folder=True)
+    assert secrets.user_sid() == WHO
+    assert len([argv for argv in tools.calls if is_tool(argv, "whoami.exe")]) == 1
+    assert len(tools.grants()) == 2 and len(tools.inheritance_removals()) == 2
+
+
+def test_a_whoami_that_failed_is_asked_again(monkeypatch):
+    tools = on_windows(monkeypatch, whoami=(1, "ERROR: Access is denied.\r\n"))
+    assert secrets.user_sid() is None
+    tools.whoami = (0, WHOAMI)
+    assert secrets.user_sid() == WHO
+    assert len(tools.calls) == 2
+
+
+def test_the_programs_get_no_window_no_input_ten_seconds_and_none_of_the_saved_keys(monkeypatch, tmp_path):
+    secrets.set_live("OPENAI_API_KEY", "sk-one")
+    seen = []
+
+    def run(*args, **kwargs):
+        argv = args[0] if args else kwargs["args"]
+        seen.append((argv, kwargs))
+        # Printed in the console's code page: bytes that aren't UTF-8 must not stop it
+        out = WHOAMI.encode("ascii") if is_tool(argv, "whoami.exe") else b"Successfully processed \xe9\xff\r\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr=b"")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(secrets, "_USER", None)
+    monkeypatch.setattr(secrets.subprocess, "run", run)
+    assert secrets.secure_owner_only(tmp_path / "keys.enc") is True
+    assert [Path(argv[0]).name for argv, _ in seen] == ["whoami.exe", "icacls.exe", "icacls.exe"]
+    for argv, kwargs in seen:
+        assert isinstance(argv, list) and not kwargs.get("shell")
+        assert kwargs["creationflags"] == 0x08000000
+        assert kwargs["timeout"] == 10
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert "OPENAI_API_KEY" not in kwargs["env"]
+
+
+@pytest.mark.parametrize("failure", FAILURES)
+def test_a_grant_that_fails_is_logged_and_reported_not_raised(monkeypatch, tmp_path, caplog, failure):
+    tools = on_windows(monkeypatch, icacls=failure)
+    path = tmp_path / "keys.enc"
+    with caplog.at_level("WARNING", logger="ixel_mat.config.secrets"):
+        assert secrets.secure_owner_only(path) is False
+    assert str(path) in caplog.text
+    assert len(tools.grants()) == 1
+    assert tools.inheritance_removals() == []  # what it inherits stays, so the account isn't left without access
+
+
+@pytest.mark.parametrize("failure", FAILURES)
+def test_an_inheritance_removal_that_fails_after_the_grant_is_logged_and_reported_not_raised(
+        monkeypatch, tmp_path, caplog, failure):
+    tools = on_windows(monkeypatch, inheritance=failure)
+    path = tmp_path / "keys.enc"
+    with caplog.at_level("WARNING", logger="ixel_mat.config.secrets"):
+        assert secrets.secure_owner_only(path) is False
+    assert str(path) in caplog.text and "removing what it inherits" in caplog.text
+    assert [Path(argv[0]).name for argv in tools.calls] == ["whoami.exe", "icacls.exe", "icacls.exe"]
+    assert "/grant:r" in tools.calls[1] and "/inheritance:r" not in tools.calls[1]  # the grant was made first
+    assert tools.calls[2][1:] == [str(path), "/inheritance:r"]
+
+
+def test_a_grant_that_fails_says_so_and_one_that_inherits_says_what_failed(monkeypatch, tmp_path, caplog):
+    path = tmp_path / "keys.enc"
+    on_windows(monkeypatch, icacls=(5, "Access is denied.\r\n"))
+    with caplog.at_level("WARNING", logger="ixel_mat.config.secrets"):
+        assert secrets.secure_owner_only(path) is False
+    assert "icacls exited with 5)" in caplog.text
+    caplog.clear()
+    on_windows(monkeypatch, inheritance=(5, "Access is denied.\r\n"))
+    with caplog.at_level("WARNING", logger="ixel_mat.config.secrets"):
+        assert secrets.secure_owner_only(path) is False
+    assert "icacls exited with 5, removing what it inherits)" in caplog.text
+
+
+@pytest.mark.parametrize("failure", [
+    *FAILURES,
+    pytest.param((0, "Something else entirely\r\n"), id="says-something-else"),
+])
+def test_an_account_that_cant_be_found_leaves_the_file_as_it_is(monkeypatch, tmp_path, failure):
+    tools = on_windows(monkeypatch, whoami=failure)
+    assert secrets.secure_owner_only(tmp_path / "keys.enc") is False
+    assert tools.grants() == []  # no grant without a SID
+
+
+@pytest.mark.parametrize("system", ["linux", "darwin"])
+def test_off_windows_nothing_is_run(monkeypatch, tmp_path, system):
+    tools = Tools()
+    monkeypatch.setattr(sys, "platform", system)
+    monkeypatch.setattr(secrets, "_USER", None)
+    monkeypatch.setattr(secrets, "_run_tool", tools)
+    assert secrets.secure_owner_only(tmp_path / "keys.enc") is True
+    assert secrets.secure_owner_only(tmp_path, folder=True) is True
+    assert tools.calls == []
+
+
+def test_saving_a_key_on_windows_limits_the_folder_then_the_file(keychain, monkeypatch):
+    tools = on_windows(monkeypatch)
+    secrets.save_secret("OPENAI_API_KEY", "sk-one")
+    grants = tools.grants()
+    assert [argv[1] for argv in grants] == [str(keys_file().parent), str(keys_file())]
+    assert grants[0][-1] == f"*{SID}:(OI)(CI)F" and grants[1][-1] == f"*{SID}:F"
+    # each path gets its grant, then has what it inherits taken away, the folder before the file
+    assert [(argv[1], "/grant:r" in argv) for argv in tools.calls[1:]] == [
+        (str(keys_file().parent), True), (str(keys_file().parent), False),
+        (str(keys_file()), True), (str(keys_file()), False)]
+    assert tools.present == [True] * 4  # keys.enc was there when it was limited
+    assert secrets.saved_names() == {"OPENAI_API_KEY"}
+
+
+@pytest.mark.parametrize("failure", FAILURES)
+def test_keys_are_saved_even_when_every_grant_fails(keychain, monkeypatch, failure):
+    tools = on_windows(monkeypatch, icacls=failure)
+    secrets.save_secret("OPENAI_API_KEY", "sk-one")
+    secrets.save_secret("XAI_API_KEY", "xai-two")
+    assert len(tools.grants()) == 4  # the folder and the file, twice
+    assert tools.inheritance_removals() == []  # a grant that failed is never followed by that
+    assert secrets.saved_names() == {"OPENAI_API_KEY", "XAI_API_KEY"}
+    keychain.restart()  # the next run reads them back
+    assert secrets.load_env() == {"OPENAI_API_KEY": "sk-one", "XAI_API_KEY": "xai-two"}
+    assert sorted(p.name for p in keys_file().parent.iterdir()) == ["keys.enc"]  # no lock or temp file left
+
+
+def test_keys_are_saved_even_when_whoami_cant_say_who_you_are(keychain, monkeypatch):
+    tools = on_windows(monkeypatch, whoami=OSError(2, "The system cannot find the file specified"))
+    secrets.save_secret("OPENAI_API_KEY", "sk-one")
+    assert tools.grants() == [] and secrets.saved_names() == {"OPENAI_API_KEY"}
+    keychain.restart()
+    assert secrets.load_env() == {"OPENAI_API_KEY": "sk-one"}
+
+
+def test_icacls_output_with_only_the_user_has_nothing_wrong(tmp_path):
+    path = tmp_path / "keys.enc"
+    entries = secrets.parse_icacls(icacls_text(path, "DESKTOP-ABC\\Me:(F)"), path)
+    assert entries == [("DESKTOP-ABC\\Me", "(F)")]
+    assert secrets.acl_problems(entries, *WHO) == (False, [])  # the account's case doesn't matter
+
+
+def test_an_entry_shown_as_the_raw_sid_is_the_user_too(tmp_path):
+    path = tmp_path / "keys.enc"
+    entries = secrets.parse_icacls(icacls_text(path, f"{SID}:(F)"), path)
+    assert entries == [(SID, "(F)")]
+    assert secrets.acl_problems(entries, *WHO) == (False, [])
+
+
+def test_inherited_entries_are_found(tmp_path):
+    path = tmp_path / "keys.enc"
+    text = icacls_text(path, "NT AUTHORITY\\SYSTEM:(I)(F)", "BUILTIN\\Administrators:(I)(F)", "DESKTOP-ABC\\Me:(I)(F)")
+    entries = secrets.parse_icacls(text, path)
+    assert entries == [("NT AUTHORITY\\SYSTEM", "(I)(F)"), ("BUILTIN\\Administrators", "(I)(F)"),
+                       ("DESKTOP-ABC\\Me", "(I)(F)")]
+    inherited, _ = secrets.acl_problems(entries, *WHO)
+    assert inherited
+
+
+def test_other_accounts_with_an_entry_of_their_own_are_found(tmp_path):
+    path = tmp_path / "keys.enc"
+    text = icacls_text(path, "DESKTOP-ABC\\Me:(F)", "DESKTOP-ABC\\Other:(R)", "BUILTIN\\Users:(RX)")
+    entries = secrets.parse_icacls(text, path)
+    assert secrets.acl_problems(entries, *WHO) == (False, ["DESKTOP-ABC\\Other", "BUILTIN\\Users"])
+
+
+def test_a_mandatory_label_and_a_denial_let_no_one_in(tmp_path):
+    path = tmp_path / "keys.enc"
+    text = icacls_text(path, "DESKTOP-ABC\\Me:(F)", "Mandatory Label\\Low Mandatory Level:(I)(NW)",
+                       "DESKTOP-ABC\\Other:(DENY)(R)")
+    entries = secrets.parse_icacls(text, path)
+    assert len(entries) == 3
+    assert secrets.acl_problems(entries, *WHO) == (False, [])
+
+
+def test_an_inherited_entry_and_an_extra_account_are_both_found(tmp_path):
+    path = tmp_path / "keys.enc"
+    entries = secrets.parse_icacls(icacls_text(path, "DESKTOP-ABC\\Me:(F)", "BUILTIN\\Users:(I)(RX)",
+                                               "DESKTOP-ABC\\Other:(R)"), path)
+    assert secrets.acl_problems(entries, *WHO) == (True, ["DESKTOP-ABC\\Other"])
+
+
+def test_a_path_with_spaces_parses(tmp_path):
+    path = tmp_path / "Some One" / "ixel mat" / "keys.enc"
+    entries = secrets.parse_icacls(icacls_text(path, "DESKTOP-ABC\\Me:(F)", "NT AUTHORITY\\SYSTEM:(F)"), path)
+    assert entries == [("DESKTOP-ABC\\Me", "(F)"), ("NT AUTHORITY\\SYSTEM", "(F)")]
+
+
+def test_the_path_is_compared_without_regard_to_case(tmp_path):
+    path = tmp_path / "keys.enc"
+    shouted = Path(str(path).upper())
+    assert secrets.parse_icacls(icacls_text(shouted, "DESKTOP-ABC\\Me:(F)"), path) == [("DESKTOP-ABC\\Me", "(F)")]
+
+
+def test_the_summary_after_the_blank_line_is_not_an_entry(tmp_path):
+    path = tmp_path / "keys.enc"
+    text = icacls_text(path, "DESKTOP-ABC\\Me:(F)", summary="Dateien: (1) verarbeitet, (0) fehlgeschlagen")
+    assert secrets.parse_icacls(text, path) == [("DESKTOP-ABC\\Me", "(F)")]
+
+
+def test_output_that_isnt_about_this_path_gives_none(tmp_path):
+    path = tmp_path / "keys.enc"
+    assert secrets.parse_icacls(icacls_text(tmp_path / "other.enc", "DESKTOP-ABC\\Me:(F)"), path) is None
+    assert secrets.parse_icacls("", path) is None
+    assert secrets.parse_icacls("Access is denied.\r\n", path) is None
+    assert secrets.parse_icacls(f"{path} \r\n\r\n{DONE}", path) is None  # no entry
+
+
+def test_read_acl_gives_the_entries_icacls_printed(monkeypatch, tmp_path):
+    path = tmp_path / "keys.enc"
+    tools = on_windows(monkeypatch, icacls=(0, icacls_text(path, "DESKTOP-ABC\\Me:(F)")))
+    assert secrets.read_acl(path) == ([("DESKTOP-ABC\\Me", "(F)")], "")
+    assert is_tool(tools.calls[0], "icacls.exe") and tools.calls[0][1:] == [str(path)]
+
+
+@pytest.mark.parametrize("answer, why", [
+    ((5, "Access is denied.\r\n"), "icacls failed"),
+    (OSError(2, "The system cannot find the file specified"), "The system cannot find the file specified"),
+    (subprocess.TimeoutExpired(["icacls"], 10), "no answer in 10 s"),
+])
+def test_read_acl_says_why_it_couldnt(monkeypatch, tmp_path, answer, why):
+    on_windows(monkeypatch, icacls=answer)
+    assert secrets.read_acl(tmp_path / "keys.enc") == (None, why)
+
+
+def test_read_acl_says_when_the_answer_isnt_one_it_understands(monkeypatch, tmp_path):
+    on_windows(monkeypatch, icacls=(0, "Something else entirely\r\n"))
+    entries, why = secrets.read_acl(tmp_path / "keys.enc")
+    assert entries is None and why
+
+
+def test_the_fix_is_one_icacls_line_that_is_safe_to_paste(tmp_path):
+    path = tmp_path / "Some One" / "keys.enc"
+    assert secrets.owner_only_fix(path, SID, False, []) == f'icacls "{path}" /inheritance:r /grant:r "*{SID}:F"'
+    assert secrets.owner_only_fix(path.parent, SID, True, []) == (
+        f'icacls "{path.parent}" /inheritance:r /grant:r "*{SID}:(OI)(CI)F"')
+
+
+def test_the_fix_takes_the_extra_accounts_off_and_writes_a_raw_sid_with_a_star(tmp_path):
+    path = tmp_path / "keys.enc"
+    fix = secrets.owner_only_fix(path, SID, False, ["DESKTOP-ABC\\Other", "S-1-5-32-545"])
+    assert fix == (f'icacls "{path}" /inheritance:r /grant:r "*{SID}:F" /remove:g "DESKTOP-ABC\\Other" '
+                   '/remove:g "*S-1-5-32-545"')
+    assert "\n" not in fix
+
+
 # ── The app: requests never wait ──────────────────────────────────────────────
 
 def _saving_in_the_background(name, value):
@@ -721,9 +1121,10 @@ def test_keys_saved_elsewhere_meanwhile_are_read_on_a_thread_of_their_own(keycha
     assert quickly(secrets.saved_names) == {"OPENAI_API_KEY"}
 
 
-def test_the_apps_pages_dont_wait_to_open_keys_another_ixel_saved(keychain):
+def test_the_apps_pages_dont_wait_to_open_keys_another_ixel_saved(keychain, monkeypatch):
     """The app asked the keychain as it started, when there was no keys.enc; ixel setup in a terminal made one
     since. Settings and Health say where keys are at once, and keys.enc is opened on a thread of its own."""
+    owner_only_acl(monkeypatch)  # (on Windows Health would run icacls: this measures the keychain)
     assert secrets.where_keys_are().kind == "keychain"  # as the app does when it starts
     secrets.save_secret("OPENAI_API_KEY", "sk-one")
     secrets._keychain.key = None  # (this run never opened keys.enc: the other Ixel did)
@@ -740,6 +1141,7 @@ def test_the_apps_pages_dont_wait_while_a_save_asks_a_keychain_that_failed_befor
     """The keychain failed as the app started; unlocked since, a save asks it again. Settings and Health give
     the answer they had meanwhile, rather than waiting for the save (and its password prompt)."""
     monkeypatch.setattr(secrets, "KEYCHAIN_TIMEOUT", 5.0)
+    owner_only_acl(monkeypatch)  # (on Windows Health would run icacls: this measures the keychain)
     calls, answer = [], threading.Event()
 
     def find():

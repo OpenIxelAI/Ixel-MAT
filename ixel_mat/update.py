@@ -20,6 +20,7 @@ import importlib.metadata
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,6 +33,7 @@ from ixel_mat.agents.launch import find_on_path
 INSTALL_INFO = Path(sys.prefix).parent / "install.json"
 CHECK_FILE = Path.home() / ".config" / "ixel-mat" / "update_check.json"
 CHECK_EVERY = timedelta(days=1)
+STALE_LOCK_AFTER = timedelta(minutes=30)  # a lock folder with no owner file this old was left by an install that died
 
 # For the background check: never ask for a password or open a browser. Terminal prompts off,
 # every askpass program off (an empty GIT_ASKPASS stops git falling back to core.askPass or
@@ -431,8 +433,12 @@ STILL_INSTALLING = ("An update is still installing, in another window. Let it fi
 def _install_lock():
     """
     On macOS and Linux, for as long as the block runs: an exclusive lock on install.lock, so a second
-    `ixel update` sees that one is installing. Yields False when another holds it. (On Windows,
-    install.ps1 holds the file open itself while it runs.)
+    `ixel update` sees that one is installing, and an install.lock.d folder beside it with this
+    process's PID in an owner file. Yields False when another holds either. That includes install.sh
+    run by hand: it locks the same file, or, where there's no flock command (macOS has none), makes
+    the same folder with its own PID in it, so each sees the other. A folder whose owner has stopped
+    running was left by an install that died, so it's taken over; so is one with no owner file once
+    it's over half an hour old. (On Windows, install.ps1 holds the file open itself while it runs.)
     """
     if os.name == "nt":
         yield not _windows_installing()
@@ -451,7 +457,77 @@ def _install_lock():
             return
         except OSError:  # a file system without locks (some network and FUSE mounts): go on without it
             pass
-        yield True
+        folder = INSTALL_INFO.with_name("install.lock.d")
+        made = _make_lock_folder(folder)
+        if made is None:  # an install.sh without flock holds it
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            if made:
+                _remove_lock_folder(folder)
+
+
+def _make_lock_folder(folder: Path) -> bool | None:
+    """Make the install.lock.d folder with this process's PID in its owner file. True when it's ours now,
+    False when it can't be made (a folder Ixel can't write to: go on without it), None when an install
+    that's still running holds it."""
+    try:
+        os.mkdir(folder)
+    except FileExistsError:
+        if not folder.is_dir():  # something else is in the way: go without, as install.sh does
+            return False
+        if _lock_folder_held(folder):
+            return None
+        shutil.rmtree(folder, ignore_errors=True)
+        try:
+            os.mkdir(folder)
+        except FileExistsError:
+            return None
+        except OSError:
+            return False
+    except OSError:
+        return False
+    try:
+        (folder / "owner").write_text(f"{os.getpid()}\n", encoding="utf-8")
+    except OSError:  # an owner can't be named: go without, rather than leave a folder nobody can take over
+        shutil.rmtree(folder, ignore_errors=True)
+        return False
+    return True
+
+
+def _lock_folder_held(folder: Path) -> bool:
+    """Whether the install.lock.d folder that's there belongs to an install that's running now: its owner
+    file names a process that's still alive, or, with no owner file, the folder is under half an hour old."""
+    try:
+        owner = (folder / "owner").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        owner = ""
+    if not owner:
+        try:
+            age = datetime.now(timezone.utc).timestamp() - folder.stat().st_mtime
+        except OSError:  # gone since
+            return False
+        return age < STALE_LOCK_AFTER.total_seconds()
+    if not (owner.isascii() and owner.isdigit()):
+        return True
+    try:
+        os.kill(int(owner), 0)  # signal 0 only asks (macOS and Linux: on Windows that number means Ctrl+C)
+    except PermissionError:  # alive, and someone else's
+        return True
+    except (ProcessLookupError, OverflowError):
+        return False
+    return True
+
+
+def _remove_lock_folder(folder: Path) -> None:
+    """Remove the install.lock.d folder, unless its owner file now names another process."""
+    try:
+        if (folder / "owner").read_text(encoding="utf-8", errors="replace").strip() == str(os.getpid()):
+            shutil.rmtree(folder, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def _still_installing() -> bool:
@@ -494,6 +570,7 @@ def _reinstall(info: dict, say) -> int:
                          creationflags=subprocess.CREATE_NEW_CONSOLE)  # type: ignore[attr-defined]
         say("Finishing the update in a new window. When it says Ixel is installed, you're done.")
         return 0
+    env["IXEL_INSTALL_LOCK_HELD"] = "1"  # run_update holds install.lock while this runs; install.sh needn't take it
     result = subprocess.run([_program("bash"), str(source / "install.sh")], env=env)
     if result.returncode == 0:
         say("Updated. Restart any open ixel windows to use the new version.")

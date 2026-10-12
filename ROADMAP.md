@@ -40,7 +40,9 @@ Last updated: 2026-10-11
   on PATH only, and long prompts go on stdin.
 - **Ixel as an app:** `ixel app`, and **Ixel** in the Start Menu, Applications or the app menu. On Windows
   it's an Edge or Chrome app window (nothing new to install, so Smart App Control has nothing to block), on
-  a Mac a native Ixel.app built at install, on Linux a GTK window. It stops when you close it.
+  a Mac a native Ixel.app built at install, on Linux a GTK window. It stops when you close it. The Mac's
+  Ixel.app saves a download (a recording you save, say) to your Downloads folder, and opens a link away from
+  Ixel in your browser.
 - **A better terminal:** completion, history, multi-line input and folded pastes at the prompt; Ctrl+C cancels a
   running review; a welcome card with the logo; a live view that scrolls finished rounds into your history.
 - **The one Ixel app:** Ask, Board, Machines, Health and Settings in one window, down a rail on the left.

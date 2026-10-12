@@ -944,17 +944,29 @@ function approvalCard(pending, computerOn) {
   const body = [];
   if (command) {
     const argv = Array.isArray(pending.argv) && pending.argv.length ? pending.argv : (args.argv || []);
+    // "full" (Mac, Linux), "writes-only" (Windows: the network is on and reads aren't limited) or "none";
+    // saved pages from before "sandbox" existed only have the true or false "sandboxed"
+    const kind = ["full", "writes-only", "none"].includes(pending.sandbox)
+      ? pending.sandbox : (pending.sandboxed ? "full" : "none");
+    let sandboxNote;
+    if (kind === "full") {
+      sandboxNote = el("p", { class: "agent-sandbox ok" }, icon("lock"),
+        el("span", {}, scratch
+          ? "Runs in a sandbox in Ixel's copy of the downloaded repo, not the workspace: no network, and it can write only there and in the temp folder."
+          : "Runs in a sandbox: no network, and it can write only in the workspace and the temp folder."));
+    } else if (kind === "writes-only") {
+      sandboxNote = el("p", { class: "agent-sandbox partial" }, icon("alert"),
+        el("span", {}, scratch
+          ? "Partly sandboxed (Windows): it can write only in Ixel's copy of the downloaded repo, not the workspace, and a private temp folder, but it has the network, and it can read any file your account can, including your SSH, cloud and browser folders (without the keys saved in Ixel)."
+          : "Partly sandboxed (Windows): it can write only in the workspace and a private temp folder, but it has the network, and it can read any file your account can, including your SSH, cloud and browser folders (without the keys saved in Ixel)."));
+    } else {
+      sandboxNote = el("p", { class: "agent-sandbox no" }, icon("alert"),
+        el("span", {}, scratch
+          ? "Not sandboxed: it runs in Ixel's copy of the downloaded repo, not the workspace, with your account's access (without the keys saved in Ixel)."
+          : "Not sandboxed: it runs with your account's access (without the keys saved in Ixel)."));
+    }
     body.push(el("p", { class: "agent-approval-what" }, "It wants to run this command:"),
-      el("pre", { class: "agent-command" }, commandLine(argv)),
-      pending.sandboxed
-        ? el("p", { class: "agent-sandbox ok" }, icon("lock"),
-          el("span", {}, scratch
-            ? "Runs in a sandbox in Ixel's copy of the downloaded repo, not the workspace: no network, and it can write only there and in the temp folder."
-            : "Runs in a sandbox: no network, and it can write only in the workspace and the temp folder."))
-        : el("p", { class: "agent-sandbox no" }, icon("alert"),
-          el("span", {}, scratch
-            ? "Not sandboxed: it runs in Ixel's copy of the downloaded repo, not the workspace, with your account's access (without the keys saved in Ixel)."
-            : "Not sandboxed: it runs with your account's access (without the keys saved in Ixel).")));
+      el("pre", { class: "agent-command" }, commandLine(argv)), sandboxNote);
   } else if (addon) {
     body.push(el("p", { class: "agent-approval-what" }, pending.diff || "Use this add-on tool:"),
       el("pre", { class: "agent-command" }, JSON.stringify(args, null, 2)),

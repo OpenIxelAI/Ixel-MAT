@@ -29,6 +29,7 @@ import fnmatch
 import hashlib
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -852,23 +853,157 @@ class Workspace:
 
     # ── Computer access ──────────────────────────────────────────────────────
 
+    @staticmethod
+    def _screenshot_argv(path: str) -> list[str] | str:
+        """The words that capture the whole screen into path on this computer, or a plain message saying what
+        is missing. macOS uses screencapture, Windows PowerShell with System.Drawing, and Linux grim on
+        Wayland or the first of gnome-screenshot, scrot and ImageMagick's import on X11."""
+        if sys.platform == "darwin":
+            return ["screencapture", "-x", path]
+        if sys.platform == "win32":
+            if shutil.which("powershell.exe") is None:
+                return "screenshot needs Windows PowerShell (powershell.exe), which wasn't found"
+            if any(char in path for char in "\"\n\r\x00"):
+                return "screenshot can't save to a temporary path with a quote or a line break in it"
+            # run_command passes no environment, and words after -Command are joined into the script, so the
+            # path is an escaped single-quoted literal; PowerShell reads all five of these as quotes
+            literal = "'" + re.sub("['‘’‚‛]", lambda m: m.group(0) * 2, path) + "'"
+            script = "; ".join([
+                "$ErrorActionPreference = 'Stop'",
+                "Add-Type -AssemblyName System.Windows.Forms, System.Drawing",
+                "$b = [System.Windows.Forms.SystemInformation]::VirtualScreen",
+                "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height",
+                "$g = [System.Drawing.Graphics]::FromImage($bmp)",
+                "$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)",
+                f"$bmp.Save({literal}, [System.Drawing.Imaging.ImageFormat]::Png)",
+                "$g.Dispose()",
+                "$bmp.Dispose()",
+            ])
+            return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
+        if os.environ.get("WAYLAND_DISPLAY"):
+            if shutil.which("grim"):
+                return ["grim", path]
+            return "screenshot needs grim on Wayland; install grim"
+        if os.environ.get("DISPLAY"):
+            for command in (["gnome-screenshot", "-f"], ["scrot", "-o"], ["import", "-window", "root"]):
+                if shutil.which(command[0]):
+                    return [*command, path]
+            return ("screenshot needs a screen-capture program; install scrot, gnome-screenshot or "
+                    "ImageMagick (import)")
+        return "screenshot needs a display, and this computer has none (no WAYLAND_DISPLAY or DISPLAY)"
+
     def screenshot(self, cancel: threading.Event | None = None) -> Viewed:
-        """Take an approved screenshot on a Mac into a private temp file, then clean it like view_file.
-        The image lives only in memory once this returns; the temporary file and folder are removed."""
+        """Take an approved screenshot of the whole screen into a private temp file, then clean it like
+        view_file: screencapture on a Mac, grim (Wayland) or gnome-screenshot, scrot or ImageMagick (X11) on
+        Linux, PowerShell with System.Drawing on Windows. With no display or no capture program it returns a
+        message saying what to install. The image lives only in memory once this returns; the temporary file
+        and folder are removed."""
         if not self.computer:
             raise WorkspaceError("unknown action 'screenshot'; Computer access is off")
-        if sys.platform != "darwin":
-            return Viewed("screenshot isn't supported on this computer; it is macOS only")
         with tempfile.TemporaryDirectory(prefix="ixel-agent-screen-") as tmp:
-            with tempfile.NamedTemporaryFile(dir=tmp, suffix=".png") as capture:
-                result = run_command(["screencapture", "-x", capture.name], self.root, computer=True, cancel=cancel)
-                if result.returncode != 0 or result.timed_out or result.cancelled:
-                    raise WorkspaceError(f"screenshot failed: {result.output}")
-                return self._picture(Path(capture.name), "screenshot")
+            # Made here and closed at once: on Windows another program can't write a file Python holds open
+            capture = Path(tmp) / "screen.png"
+            os.close(os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            argv = self._screenshot_argv(str(capture))
+            if isinstance(argv, str):
+                return Viewed(argv)
+            result = run_command(argv, self.root, computer=True, cancel=cancel)
+            if result.returncode != 0 or result.timed_out or result.cancelled:
+                raise WorkspaceError(f"screenshot failed: {result.output}")
+            return self._picture(capture, "screenshot")
+
+    @staticmethod
+    def _desktop_entry(path: Path) -> tuple[str, bool] | None:
+        """The Name, and whether the entry is hidden (NoDisplay or Hidden is true), from the [Desktop Entry]
+        group of one .desktop file; None when the file can't be read or is too big to be one."""
+        try:
+            if not path.is_file() or path.stat().st_size > 256 * 1024:
+                return None
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        name, hidden, inside = "", False, False
+        for line in text.split("\n"):
+            line = line.strip()
+            if line.startswith("["):
+                if inside:
+                    break
+                inside = line == "[Desktop Entry]"
+            elif inside and "=" in line and not line.startswith("#"):
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                if key == "Name" and not name:
+                    name = value
+                elif key in ("NoDisplay", "Hidden") and value.casefold() == "true":
+                    hidden = True
+        return name, hidden
+
+    @staticmethod
+    def _desktop_apps():
+        """The apps installed on Linux as (desktop id, .desktop path, Name), in the order the desktop searches:
+        the person's data folder, the system ones, then Flatpak's. The first file for an id wins even when it is
+        hidden, and entries marked NoDisplay or Hidden are left out."""
+        data_home = os.environ.get("XDG_DATA_HOME")
+        folders = [Path(data_home) / "applications" if data_home else Path.home() / ".local/share/applications"]
+        data_dirs = [d for d in os.environ.get("XDG_DATA_DIRS", "").split(os.pathsep) if d]
+        for d in data_dirs or ["/usr/local/share", "/usr/share"]:
+            folders.append(Path(d) / "applications")
+        folders.append(Path("/var/lib/flatpak/exports/share/applications"))
+        folders.append(Path.home() / ".local/share/flatpak/exports/share/applications")
+        seen: set[str] = set()
+        for folder in folders:
+            for dirpath, dirnames, filenames in os.walk(folder):
+                dirnames.sort()
+                for filename in sorted(filenames):
+                    if not filename.endswith(".desktop"):
+                        continue
+                    path = Path(dirpath) / filename
+                    desktop_id = path.relative_to(folder).as_posix()[:-len(".desktop")].replace("/", "-")
+                    if not desktop_id or desktop_id.startswith("-") or desktop_id in seen:
+                        continue
+                    entry = Workspace._desktop_entry(path)
+                    if entry is None:
+                        continue
+                    seen.add(desktop_id)
+                    if not entry[1]:
+                        yield desktop_id, path, entry[0]
+
+    def _linux_app_argv(self, target: str) -> list[str]:
+        """The words that start the installed app called target: the .desktop entry whose Name or file name
+        matches, in any case, launched with gtk-launch or else gio."""
+        wanted = target.strip().casefold()
+        for desktop_id, path, name in self._desktop_apps():
+            if wanted in (name.casefold(), path.stem.casefold()):
+                break
+        else:
+            raise WorkspaceError(f"no installed app is called {target!r}; give a path or https:// link")
+        if shutil.which("gtk-launch"):
+            return ["gtk-launch", desktop_id]
+        if shutil.which("gio"):
+            return ["gio", "launch", str(path)]
+        raise WorkspaceError("opening an app by name needs gtk-launch (GTK) or gio (GLib), and neither is installed")
+
+    def _windows_app_argv(self, target: str) -> list[str]:
+        """The words that open the Start-menu shortcut (.lnk) called target, looking in the person's Start menu
+        and then the shared one, folders included."""
+        wanted = target.strip().casefold()
+        for variable in ("APPDATA", "ProgramData"):
+            base = os.environ.get(variable)
+            if not base:
+                continue
+            programs = Path(base, "Microsoft", "Windows", "Start Menu", "Programs")
+            for dirpath, dirnames, filenames in os.walk(programs):
+                dirnames.sort()
+                for filename in sorted(filenames):
+                    path = Path(dirpath) / filename
+                    if path.suffix.lower() == ".lnk" and path.stem.casefold() == wanted:
+                        return ["start", str(path)]
+        raise WorkspaceError(f"no installed app is called {target!r} in the Start menu; give a path or https:// link")
 
     def open_argv(self, target: str) -> list[str]:
-        """Check what an open would do and return the exact words to approve. A bare app name uses open -a
-        on macOS; paths are resolved with the same home and secret checks as any file action."""
+        """Check what an open would do and return the exact words to approve. A bare app name uses open -a on
+        macOS, the app's .desktop entry (gtk-launch, or else gio launch) on Linux, and its Start-menu shortcut
+        on Windows; paths are resolved with the same home and secret checks as any file action."""
         if not self.computer:
             raise WorkspaceError("unknown action 'open'; Computer access is off")
         if not isinstance(target, str) or not target.strip() or "\x00" in target:
@@ -888,12 +1023,14 @@ class Workspace:
               or PureWindowsPath(target).drive or (self.root / target).exists()
               or (Path(target).suffix and Path(target).suffix.lower() != ".app")):
             opened = str(self.resolve(target))
-        elif sys.platform == "darwin":
+        else:
             if target.startswith("-"):
                 raise WorkspaceError("an app name can't start with '-'")
-            return ["open", "-a", target]
-        else:
-            raise WorkspaceError("opening an app by name is supported only on macOS; give a path or https:// link")
+            if sys.platform == "darwin":
+                return ["open", "-a", target]
+            if sys.platform == "win32":
+                return self._windows_app_argv(target)
+            return self._linux_app_argv(target)
         if sys.platform == "darwin":
             return ["open", "--", opened]
         if sys.platform == "win32":
@@ -903,7 +1040,8 @@ class Workspace:
     def open(self, target: str, expected_argv: list[str] | None = None,
              cancel: threading.Event | None = None) -> CommandResult:
         """Open an approved path, link or app, with an argv list and never a command shell. Windows' start is
-        a cmd.exe built-in, so its direct equivalent, os.startfile, opens the target without that shell."""
+        a cmd.exe built-in, so its direct equivalent, os.startfile, opens the target (a Start-menu shortcut
+        for an app) without that shell."""
         argv = self.open_argv(target)
         if expected_argv is not None and argv != expected_argv:
             raise WorkspaceError("the open target changed since it was shown; propose the action again")

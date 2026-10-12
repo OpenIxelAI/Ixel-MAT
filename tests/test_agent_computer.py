@@ -309,6 +309,7 @@ def test_computer_commands_ignore_the_allowlist_and_always_wait(home: Path, monk
 
     monkeypatch.setattr(runner, "run_command", command)
     monkeypatch.setattr(runner, "can_sandbox", lambda: True)
+    monkeypatch.setattr(runner, "sandbox_kind", lambda: "full")
 
     async def scenario() -> None:
         argv = ["fake-check", "--quick"]
@@ -429,13 +430,6 @@ def test_a_model_without_vision_still_waits_but_does_not_capture(home: Path, mon
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("platform", ["linux", "win32"])
-def test_screenshot_is_unsupported_elsewhere(home: Path, monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
-    monkeypatch.setattr(tools.sys, "platform", platform)
-    viewed = Workspace(home / "workspace", computer=True).screenshot()
-    assert "isn't supported" in viewed.text and viewed.pictures == []
-
-
 @pytest.mark.skipif(os.name == "nt", reason="a Python program on PATH is a POSIX stand-in")
 @pytest.mark.parametrize("platform,program,target", [
     ("darwin", "open", "Fake App $(touch shell-ran)"),
@@ -518,3 +512,263 @@ def test_windows_open_uses_the_direct_start_equivalent_without_a_shell(
     assert workspace.open_argv(target) == ["start", target]
     result = workspace.open(target)
     assert result.returncode == 0 and opened == [target]
+
+
+def _desktop_file(path: Path, name: str = "Ixel Fake Editor", extra: str = "") -> Path:
+    """A .desktop file with exactly these bytes, so its line endings are the same on every platform."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        f"[Desktop Entry]\nType=Application\nName={name}\nExec=ixel-fake-editor\n{extra}".encode("utf-8"))
+    return path
+
+
+def _installed(monkeypatch: pytest.MonkeyPatch, *programs: str) -> None:
+    """Make shutil.which find only these programs."""
+    def which(command: str, *args: Any, **kwargs: Any) -> str | None:
+        return f"/usr/bin/{command}" if command in programs else None
+
+    monkeypatch.setattr(tools.shutil, "which", which)
+
+
+def _linux_apps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *programs: str) -> tuple[Path, Path]:
+    """Act as Linux with only these programs installed (gtk-launch when none are named), and send the app
+    search to empty temp folders so no real app is seen. Returns the person's applications folder and the
+    first system one; neither exists yet."""
+    data_home, share = tmp_path / "data-home", tmp_path / "share"
+    monkeypatch.setattr(tools.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    monkeypatch.setenv("XDG_DATA_DIRS", os.pathsep.join([str(share), str(tmp_path / "share-2")]))
+    _installed(monkeypatch, *(programs or ("gtk-launch",)))
+    return data_home / "applications", share / "applications"
+
+
+def test_linux_open_finds_an_app_by_its_name_in_any_case(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, system = _linux_apps(tmp_path, monkeypatch)
+    _desktop_file(system / "ixel-fake-editor.desktop", name="Ixel Fake Editor")
+    workspace = Workspace(home / "workspace", computer=True)
+    for target in ("Ixel Fake Editor", "ixel fake editor", "IXEL FAKE EDITOR", "  Ixel Fake Editor"):
+        assert workspace.open_argv(target) == ["gtk-launch", "ixel-fake-editor"]
+
+
+def test_linux_open_matches_the_file_name_and_falls_back_to_gio(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    user, _ = _linux_apps(tmp_path, monkeypatch, "gio")
+    app = _desktop_file(user / "ixel-fake-editor.desktop", name="Ixel Editor Pro")
+    workspace = Workspace(home / "workspace", computer=True)
+    assert workspace.open_argv("Ixel-Fake-Editor") == ["gio", "launch", str(app)]
+    assert workspace.open_argv("ixel editor pro") == ["gio", "launch", str(app)]
+    _installed(monkeypatch, "gtk-launch", "gio")
+    assert workspace.open_argv("Ixel Editor Pro") == ["gtk-launch", "ixel-fake-editor"]
+
+
+def test_linux_open_needs_gtk_launch_or_gio(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, system = _linux_apps(tmp_path, monkeypatch, "xdg-open")
+    _desktop_file(system / "ixel-fake-editor.desktop")
+    with pytest.raises(WorkspaceError, match="gtk-launch.*gio"):
+        Workspace(home / "workspace", computer=True).open_argv("Ixel Fake Editor")
+
+
+def test_linux_open_says_when_no_installed_app_has_that_name(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    user, system = _linux_apps(tmp_path, monkeypatch)
+    workspace = Workspace(home / "workspace", computer=True)
+    with pytest.raises(WorkspaceError, match="no installed app is called 'ixel-no-such-app-5f2c'"):
+        workspace.open_argv("ixel-no-such-app-5f2c")
+    _desktop_file(system / "ixel-fake-editor.desktop")
+    _desktop_file(user / "ixel-fake-viewer.desktop", name="Ixel Fake Viewer")
+    (system / "ixel-fake-editor.desktop.txt").write_bytes(b"[Desktop Entry]\nName=Ixel Fake Text\n")
+    for target in ("ixel-no-such-app-5f2c", "Ixel Fake", "Ixel Fake Text", "Ixel Fake Editor Pro"):
+        with pytest.raises(WorkspaceError, match="no installed app is called"):
+            workspace.open_argv(target)
+
+
+@pytest.mark.parametrize("extra", ["NoDisplay=true\n", "Hidden=true\n", "NoDisplay = TRUE\n", "Hidden=True \n"])
+def test_linux_open_skips_hidden_entries(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: str) -> None:
+    _, system = _linux_apps(tmp_path, monkeypatch)
+    _desktop_file(system / "ixel-fake-editor.desktop", extra=extra)
+    workspace = Workspace(home / "workspace", computer=True)
+    for target in ("Ixel Fake Editor", "ixel-fake-editor"):
+        with pytest.raises(WorkspaceError, match="no installed app is called"):
+            workspace.open_argv(target)
+
+
+@pytest.mark.parametrize("extra", ["NoDisplay=false\n", "Hidden=false\n", "NoDisplay=\n"])
+def test_linux_open_keeps_entries_that_are_not_hidden(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: str) -> None:
+    _, system = _linux_apps(tmp_path, monkeypatch)
+    _desktop_file(system / "ixel-fake-editor.desktop", extra=extra)
+    assert Workspace(home / "workspace", computer=True).open_argv("Ixel Fake Editor") == [
+        "gtk-launch", "ixel-fake-editor"]
+
+
+def test_the_first_file_for_an_id_hides_the_same_id_in_later_folders(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    user, system = _linux_apps(tmp_path, monkeypatch)
+    _desktop_file(user / "ixel-fake-editor.desktop", extra="Hidden=true\n")
+    _desktop_file(system / "ixel-fake-editor.desktop")
+    _desktop_file(user / "ixel-fake-viewer.desktop", name="Ixel Fake Viewer")
+    _desktop_file(system / "ixel-fake-viewer.desktop", name="Ixel Older Viewer")
+    workspace = Workspace(home / "workspace", computer=True)
+    assert workspace.open_argv("Ixel Fake Viewer") == ["gtk-launch", "ixel-fake-viewer"]
+    for target in ("Ixel Fake Editor", "ixel-fake-editor", "Ixel Older Viewer"):
+        with pytest.raises(WorkspaceError, match="no installed app is called"):
+            workspace.open_argv(target)
+
+
+def test_linux_open_takes_the_first_match_in_search_order(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    user, system = _linux_apps(tmp_path, monkeypatch)
+    _desktop_file(system / "ixel-fake-0.desktop")
+    _desktop_file(user / "ixel-fake-b.desktop")
+    _desktop_file(user / "ixel-fake-a.desktop")
+    assert Workspace(home / "workspace", computer=True).open_argv("Ixel Fake Editor") == ["gtk-launch", "ixel-fake-a"]
+
+
+@pytest.mark.parametrize("data_home", [None, ""])
+@pytest.mark.parametrize("folder", [".local/share/applications", ".local/share/flatpak/exports/share/applications"])
+def test_linux_open_searches_the_home_folders_when_no_data_home_is_set(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, data_home: str | None, folder: str) -> None:
+    _linux_apps(tmp_path, monkeypatch)
+    if data_home is None:
+        monkeypatch.delenv("XDG_DATA_HOME")
+    else:
+        monkeypatch.setenv("XDG_DATA_HOME", data_home)
+    _desktop_file(home / folder / "ixel-fake-editor.desktop")
+    assert Workspace(home / "workspace", computer=True).open_argv("Ixel Fake Editor") == [
+        "gtk-launch", "ixel-fake-editor"]
+
+
+def test_linux_open_searches_every_data_dir_and_the_folders_inside_them(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _linux_apps(tmp_path, monkeypatch)
+    first, second = tmp_path / "first-share", tmp_path / "second-share"
+    monkeypatch.setenv("XDG_DATA_DIRS", os.pathsep.join([str(first), "", str(second)]))
+    app = _desktop_file(second / "applications" / "vendor" / "ixel-fake-editor.desktop")
+    workspace = Workspace(home / "workspace", computer=True)
+    assert workspace.open_argv("Ixel Fake Editor") == ["gtk-launch", "vendor-ixel-fake-editor"]
+    _installed(monkeypatch, "gio")
+    assert workspace.open_argv("ixel-fake-editor") == ["gio", "launch", str(app)]
+
+
+def test_linux_open_reads_only_the_plain_name_in_the_desktop_entry_group(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, system = _linux_apps(tmp_path, monkeypatch)
+    system.mkdir(parents=True)
+    (system / "ixel-fake-viewer.desktop").write_bytes(
+        b"# a comment\r\n[Desktop Entry]\r\nName[de]=Ixel Deutscher Betrachter\r\nName = Ixel Fake Viewer\r\n"
+        b"NoDisplay=false\r\n\r\n[Desktop Action new-window]\r\nName=Ixel New Window\r\nNoDisplay=true\r\n")
+    (system / "ixel-fake-notes.desktop").write_bytes(
+        b"[Desktop Action early]\nName=Ixel Early Action\n\n[Desktop Entry]\nName=Ixel Fake Notes\n")
+    workspace = Workspace(home / "workspace", computer=True)
+    assert workspace.open_argv("Ixel Fake Viewer") == ["gtk-launch", "ixel-fake-viewer"]
+    assert workspace.open_argv("Ixel Fake Notes") == ["gtk-launch", "ixel-fake-notes"]
+    for target in ("Ixel Deutscher Betrachter", "Ixel New Window", "Ixel Early Action"):
+        with pytest.raises(WorkspaceError, match="no installed app is called"):
+            workspace.open_argv(target)
+
+
+def test_linux_open_skips_a_desktop_file_that_is_too_big(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, system = _linux_apps(tmp_path, monkeypatch)
+    system.mkdir(parents=True)
+    (system / "ixel-fake-huge.desktop").write_bytes(
+        b"[Desktop Entry]\nName=Ixel Fake Huge\n" + b"# padding\n" * 40_000)
+    workspace = Workspace(home / "workspace", computer=True)
+    for target in ("Ixel Fake Huge", "ixel-fake-huge"):
+        with pytest.raises(WorkspaceError, match="no installed app is called"):
+            workspace.open_argv(target)
+
+
+def test_a_name_with_a_path_separator_is_still_a_path(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    user, _ = _linux_apps(tmp_path, monkeypatch)
+    _desktop_file(user / "ixel-fake-editor.desktop", name="Ixel/Fake Editor")
+    workspace = Workspace(home / "workspace", computer=True)
+    assert workspace.open_argv("Ixel/Fake Editor") == ["xdg-open", str(workspace.resolve("Ixel/Fake Editor"))]
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+@pytest.mark.parametrize("target", ["-a", "-ixel-fake-editor", "--help"])
+def test_an_app_name_starting_with_a_dash_is_refused_on_every_platform(
+        home: Path, monkeypatch: pytest.MonkeyPatch, platform: str, target: str) -> None:
+    monkeypatch.setattr(tools.sys, "platform", platform)
+    with pytest.raises(WorkspaceError, match="can't start with '-'"):
+        Workspace(home / "workspace", computer=True).open_argv(target)
+
+
+def test_macos_open_still_names_the_app_with_open_dash_a(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    user, _ = _linux_apps(tmp_path, monkeypatch, "gtk-launch", "gio")
+    _desktop_file(user / "ixel-fake-editor.desktop")
+    monkeypatch.setattr(tools.sys, "platform", "darwin")
+    assert Workspace(home / "workspace", computer=True).open_argv("Ixel Fake Editor") == [
+        "open", "-a", "Ixel Fake Editor"]
+
+
+def _start_menu(base: Path) -> Path:
+    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+
+
+def _shortcut(folder: Path, name: str) -> Path:
+    """A stand-in for a Start-menu shortcut; only its name matters to the search."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(b"stub shortcut\n")
+    return path
+
+
+def test_windows_open_finds_a_start_menu_shortcut_by_name(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    roaming, shared = tmp_path / "roaming", tmp_path / "program-data"
+    monkeypatch.setattr(tools.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("ProgramData", str(shared))
+    nested = _shortcut(_start_menu(shared) / "Ixel Fake Suite", "Ixel Fake Editor.LNK")
+    _shortcut(_start_menu(shared), "Ixel Fake Viewer.lnk")
+    _shortcut(_start_menu(roaming), "Ixel Fake Editor.txt")
+    workspace = Workspace(home / "workspace", computer=True)
+    assert workspace.open_argv("ixel fake editor") == ["start", str(nested)]
+    assert workspace.open_argv("Ixel Fake Viewer") == ["start", str(_start_menu(shared) / "Ixel Fake Viewer.lnk")]
+    own = _shortcut(_start_menu(roaming) / "Games", "Ixel Fake Editor.lnk")
+    assert workspace.open_argv("Ixel Fake Editor") == ["start", str(own)]
+
+
+def test_windows_open_says_when_no_start_menu_shortcut_has_that_name(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shared = tmp_path / "program-data"
+    monkeypatch.setattr(tools.sys, "platform", "win32")
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setenv("ProgramData", str(shared))
+    workspace = Workspace(home / "workspace", computer=True)
+    with pytest.raises(WorkspaceError, match="no installed app is called 'ixel-no-such-app-5f2c'"):
+        workspace.open_argv("ixel-no-such-app-5f2c")
+    _shortcut(_start_menu(shared), "Ixel Fake Editor.lnk")
+    for target in ("ixel-no-such-app-5f2c", "Ixel Fake", "Ixel Fake Editor Pro"):
+        with pytest.raises(WorkspaceError, match="no installed app is called"):
+            workspace.open_argv(target)
+    monkeypatch.setenv("ProgramData", "")
+    with pytest.raises(WorkspaceError, match="no installed app is called"):
+        workspace.open_argv("Ixel Fake Editor")
+
+
+def test_windows_open_starts_the_shortcut_without_a_shell(
+        home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    roaming = tmp_path / "roaming"
+    monkeypatch.setattr(tools.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("ProgramData", str(tmp_path / "program-data"))
+    link = _shortcut(_start_menu(roaming), "Ixel Fake Editor.lnk")
+    opened: list[str] = []
+    monkeypatch.setattr(tools.os, "startfile", opened.append, raising=False)
+
+    def no_process(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("start must not run through cmd.exe")
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", no_process)
+    workspace = Workspace(home / "workspace", computer=True)
+    shown = workspace.open_argv("Ixel Fake Editor")
+    assert shown == ["start", str(link)]
+    result = workspace.open("Ixel Fake Editor", expected_argv=shown)
+    assert result.argv == shown and result.returncode == 0 and opened == [str(link)]

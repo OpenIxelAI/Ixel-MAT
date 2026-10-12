@@ -4,11 +4,20 @@ Running a command the person approved (or always allows), for the agent's run_co
 The model never gets a shell: a command is a list of words, run as it is, with the workspace as its folder,
 a time limit, its first and last 32 KB of output kept (a line says how much was left out between), and the
 environment without any keys saved in Ixel (child_env) or the ssh-agent socket. On a Mac it runs under
-sandbox-exec, with the network denied, writes allowed only in the workspace and the temp folder, the secret
-folders and files under the home folder and Ixel's config folder unreadable (other reads work, so programs
-run), and the keychain services and Apple Events out of reach. Elsewhere nothing like that is there to use, so
-the result says it ran unsandboxed, and the approval card says so before it runs.
-With Computer access on, it runs without sandbox-exec and with the network, keeping the same environment,
+sandbox-exec and on Linux under bubblewrap (bwrap), with the network denied, writes allowed only in the
+workspace and the temp folder, and the secret folders and files (secret_folders) and Ixel's config folder
+unreadable (other reads work, so programs run). On a Mac the keychain services and Apple Events are out of
+reach too. On Linux the system and session sockets (/run, the session's runtime folder, the X11 and ICE
+socket folders) are hidden and /dev/shm is private, because denying the network doesn't cover Unix sockets
+reachable by path (the session D-Bus, systemd, ssh-agent, the X server, docker.sock).
+On Windows (winsandbox.py) it runs with a low-integrity token in a job
+object: writes land only in the workspace and a private temp folder, but the network is on and reads aren't
+limited, so the secret and browser folders can be read there. CommandResult.sandbox says which of "full",
+"writes-only" (Windows) and "none" a run had, and sandbox_kind which the next one will have. Where there is
+none to use (no bwrap, a system that won't let it start, a Windows sandbox that fails its test, or another
+system), the result says it ran unsandboxed, and the approval card says so before it runs;
+sandbox_unavailable_reason says why.
+With Computer access on, it runs without the sandbox and with the network, keeping the same environment,
 time limit, output limit and way of stopping its children.
 
 is_shell_or_interpreter tells the commands that can run anything at all (a shell, `python -c`, `node -e`)
@@ -16,8 +25,10 @@ from the rest. The allowlist never matches those, so they always ask.
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -28,7 +39,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from ixel_mat.config import secrets as _secrets
+from ixel_mat.agent import winsandbox
+from ixel_mat.agent.secret_folders import SECRET_HOME_FOLDERS, _homes, secret_folders
 from ixel_mat.config.secrets import child_env
 from ixel_mat.material import mask_secrets
 
@@ -42,6 +54,10 @@ _MASK_MARGIN = 4 * 1024
 # The outermost bytes of a margin, longer than any secret's first part that no pattern matches yet
 _MASK_EDGE = 128
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# "1" here means Ubuntu 24.04+'s AppArmor refuses user namespaces to programs without a profile (bwrap needs them)
+_APPARMOR_USERNS = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+_BWRAP_INSTALL = ("Debian/Ubuntu: sudo apt install bubblewrap; Fedora: sudo dnf install bubblewrap; "
+                  "Arch: sudo pacman -S bubblewrap")
 _READ_CHUNK = 8 * 1024
 # After the command itself ended, how long the output is still read while programs it left running in the
 # background hold it open, before they're stopped too
@@ -53,29 +69,18 @@ KEYCHAIN_MACH_SERVICES = (
     "com.apple.SecurityServer", "com.apple.securityd", "com.apple.securityd.xpc", "com.apple.secd",
     "com.apple.security.agent", "com.apple.security.agent.login", "com.apple.security.authhost",
 )
-# Home folders and files that hold keys, logins or browser sessions, on macOS, Linux and Windows. tools.py
-# refuses paths under them for Computer access, and the sandbox denies reads of them (secret_folders). Refuse
-# the whole browser folder, including cookies and login databases outside its Profiles subfolder. A file
-# works here as a folder does: the sandbox's subpath rule and the path check both match the file itself.
-# Files named .env* are found by name (secret_folders, is_secret_name).
-SECRET_HOME_FOLDERS = (
-    ".ssh", ".aws", ".gnupg", ".netrc", ".npmrc", ".pypirc", ".git-credentials", ".config/gh", ".kube",
-    ".docker/config.json", ".config/gcloud", ".azure",
-    "Library/Keychains", "Library/Safari", "Library/Cookies",
-    "Library/WebKit", "Library/Containers/com.apple.Safari",
-    "Library/Group Containers/group.com.apple.Safari",
-    "Library/Application Support/Google/Chrome", "Library/Application Support/Chromium",
-    "Library/Application Support/Firefox", "Library/Application Support/BraveSoftware",
-    "Library/Application Support/Microsoft Edge", "Library/Application Support/Arc",
-    "Library/Application Support/Vivaldi", "Library/Application Support/com.operasoftware.Opera",
-    ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
-    ".config/microsoft-edge", ".config/vivaldi", ".config/opera", ".config/mozilla",
-    ".var/app/org.mozilla.firefox", ".var/app/com.google.Chrome", ".var/app/org.chromium.Chromium",
-    ".var/app/com.brave.Browser", "snap/firefox", "snap/chromium",
-    "AppData/Local/Google/Chrome", "AppData/Local/Chromium", "AppData/Local/BraveSoftware",
-    "AppData/Local/Microsoft/Edge", "AppData/Local/Vivaldi", "AppData/Local/Mozilla/Firefox",
-    "AppData/Roaming/Mozilla/Firefox", "AppData/Roaming/Opera Software",
-)
+
+# Where the system's and the session's Unix sockets live on Linux (/var/run is normally a link to /run)
+_RUNTIME_FOLDERS = ("/run", "/var/run")
+# Inside those, kept readable: NixOS keeps the programs on the PATH in /run/current-system
+_RUNTIME_KEEP = ("/run/current-system",)
+# Often a link into /run (systemd-resolved), and add-ons that have the network need it for DNS
+_RESOLV_CONF = "/etc/resolv.conf"
+# Folders of the X server's and the session manager's sockets, in the temp folder
+_SOCKET_FOLDERS = (".X11-unix", ".ICE-unix")
+# Variables that point a program at those sockets; a sandboxed command on Linux runs without them
+SESSION_ENV = ("DBUS_SESSION_BUS_ADDRESS", "DBUS_SYSTEM_BUS_ADDRESS", "SSH_AUTH_SOCK", "GPG_AGENT_INFO",
+               "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XAUTHORITY", "SESSION_MANAGER")
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "ash", "csh", "tcsh", "yash", "nu",
                      "xonsh", "elvish", "busybox", "cmd", "powershell", "pwsh"})
@@ -95,17 +100,32 @@ _PYTHON_NAME = re.compile(r"(python|pypy)(\d+(\.\d+)*)?[a-z]?")
 _VERSIONED_INTERPRETER = re.compile(r"(ruby|perl|php|lua|tclsh|rscript)(\d+(\.\d+)*)?")
 
 
+SANDBOX_KINDS = ("full", "writes-only", "none")
+
+
 @dataclass
 class CommandResult:
-    """What a command did. returncode is None when it was stopped at the time limit; sandboxed says whether
-    it ran under sandbox-exec (network denied, writes only in the workspace and the temp folder, the secret
-    folders unreadable)."""
+    """What a command did. returncode is None when it was stopped at the time limit. sandbox says how it was
+    confined: "full" (sandbox-exec on a Mac or bubblewrap on Linux: network denied, writes only in the
+    workspace and the temp folder, the secret folders unreadable), "writes-only" (Windows: writes only in the
+    workspace and a private temp folder, but the network is on and reads aren't limited) or "none". sandboxed
+    is True only for "full"; when sandbox is left out it follows sandboxed. started is False when the command
+    was never started because the Windows sandbox couldn't be set up."""
     argv: list[str]
     returncode: int | None
     output: str
     timed_out: bool
     sandboxed: bool
     cancelled: bool = False
+    sandbox: str = ""
+    started: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.sandbox:
+            self.sandbox = "full" if self.sandboxed else "none"
+        elif self.sandbox not in SANDBOX_KINDS:
+            raise ValueError(f"sandbox is one of {', '.join(SANDBOX_KINDS)}")
+        self.sandboxed = self.sandbox == "full"
 
 
 def _program(word: str) -> str:
@@ -170,35 +190,6 @@ def _quoted(path: str) -> str:
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _homes() -> list[Path]:
-    """The home folder, and the account's own home folder too when $HOME points somewhere else."""
-    homes = [Path.home()]
-    if os.name == "posix":
-        try:
-            import pwd
-            account = Path(pwd.getpwuid(os.getuid()).pw_dir)
-        except (ImportError, KeyError, OSError):
-            account = None
-        if account is not None and account != homes[0]:
-            homes.append(account)
-    return homes
-
-
-def secret_folders() -> list[str]:
-    """The real paths a command must not read: the secret folders and files (SECRET_HOME_FOLDERS) under the
-    home folder, and under the account's own home folder too when $HOME points somewhere else, and the
-    .env* files directly in a home folder (not deeper), then Ixel's own config folder, where its keys live.
-    Read each time, so tests can move the home."""
-    homes = _homes()
-    paths = [os.path.realpath(home / folder) for home in homes for folder in SECRET_HOME_FOLDERS]
-    for home in homes:
-        with suppress(OSError), os.scandir(home) as entries:
-            for name in sorted(entry.name for entry in entries if entry.name.lower().startswith(".env")):
-                paths.append(os.path.realpath(home / name))
-    paths.append(os.path.realpath(_secrets._ENV_DIR))
-    return list(dict.fromkeys(paths))
-
-
 def sandbox_profile(workspace: Path, *, network: bool = False, files: str = "chosen-folder",
                     temporary: bool = True, addon_files: Path | None = None) -> str:
     """The shared sandbox profile. Commands default to no network and workspace/temp writes; MCP cards
@@ -251,13 +242,187 @@ def sandbox_profile(workspace: Path, *, network: bool = False, files: str = "cho
             + keychain + " (deny appleevent-send)")
 
 
+def _inside(path: str, folder: str) -> bool:
+    """Whether path is folder or something under it, compared on whole path parts."""
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def _bwrap_hide(paths: list[str]) -> list[str]:
+    """bwrap's words that hide each path: an empty folder over a folder, /dev/null over a file."""
+    words: list[str] = []
+    for path in paths:
+        words += ["--tmpfs", path] if os.path.isdir(path) else ["--ro-bind", "/dev/null", path]
+    return words
+
+
+def _socket_folders(temps: list[str], runtime: list[str], temporary: bool) -> list[str]:
+    """The real paths of the folders that hold session sockets, those there: the X11 and ICE ones in the temp
+    folders (only when the command is given the real temp folders), and the session's runtime folder
+    (XDG_RUNTIME_DIR) when it isn't already under one of the hidden runtime folders."""
+    found: list[str] = []
+    if temporary:
+        found += [os.path.realpath(os.path.join(temp, name)) for temp in temps for name in _SOCKET_FOLDERS]
+    session = os.environ.get("XDG_RUNTIME_DIR")
+    if session:
+        session = os.path.realpath(session)
+        if not any(_inside(session, folder) for folder in runtime):
+            found.append(session)
+    return [path for path in dict.fromkeys(found) if os.path.isdir(path)]
+
+
+def bwrap_argv(workspace: Path, argv: list[str], *, network: bool = False, files: str = "chosen-folder",
+               temporary: bool = True) -> list[str]:
+    """argv under bubblewrap, with the same rules as sandbox_profile: no network unless network, writes only
+    in the workspace (none when files is "none") and the temp folders (temporary=False gives the command a
+    private empty /tmp instead), everything else read-only. Reads aren't blocked, except that the secret
+    and browser folders (secret_folders) are hidden, and so are the folders of Unix sockets, which the
+    network rule doesn't cover when they're reachable by path: /run (the system and session D-Bus, systemd,
+    Wayland), the session's runtime folder when it's elsewhere, and the X11 and ICE socket folders in the
+    temp folders. /dev/shm is a private empty one. Paths are real paths. It only builds the command;
+    can_sandbox says whether bwrap works here."""
+    if files not in ("none", "output-folder", "chosen-folder"):
+        raise ValueError("unknown files permission")
+    ws = os.path.realpath(workspace)
+    temps = [path for path in dict.fromkeys([os.path.realpath(tempfile.gettempdir()), os.path.realpath("/tmp")])
+             if os.path.exists(path)]
+    runtime = list(dict.fromkeys(os.path.realpath(path) for path in _RUNTIME_FOLDERS if os.path.isdir(path)))
+    keep = [path for path in (*_RUNTIME_KEEP, os.path.realpath(_RESOLV_CONF))
+            if os.path.exists(path) and any(_inside(path, folder) for folder in runtime)]
+    # Always bound, read-only when it can't be written, so --chdir works when a --tmpfs or a hidden folder
+    # covers it. A later mount covers an earlier one, so the order matters: the system, the runtime folders,
+    # the temp folders, the socket folders, the workspace, then the hidden folders on top
+    bind = ["--bind" if files != "none" else "--ro-bind", ws, ws]
+    command = [shutil.which("bwrap") or "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", "/dev/shm",
+               "--proc", "/proc"]
+    command += _bwrap_hide(runtime)
+    for path in keep:
+        command += ["--ro-bind", path, path]
+    for path in temps:
+        command += ["--bind", path, path] if temporary else ["--tmpfs", path]
+    sockets = _socket_folders(temps, runtime, temporary)
+    command += _bwrap_hide(sockets)
+    # Binding the workspace shows again what's under it (a workspace of /tmp shows /tmp/.X11-unix)
+    masked_inside = [path for path in runtime + sockets if path != ws and _inside(path, ws)]
+    command += bind + _bwrap_hide(masked_inside)
+    hidden = [path for path in secret_folders() if os.path.exists(path)]
+    command += _bwrap_hide(hidden)
+    if any(_inside(ws, path) for path in hidden):
+        # The workspace is in a hidden folder, or is one (a fetched repo under Ixel's config folder): bind it
+        # back so it stays usable, and hide again what's hidden inside it
+        command += (bind + _bwrap_hide([path for path in hidden if path != ws and _inside(path, ws)])
+                    + _bwrap_hide(masked_inside))
+    command += ["--unshare-pid", "--unshare-ipc", "--unshare-uts"]
+    if not network:
+        command.append("--unshare-net")
+    return command + ["--die-with-parent", "--chdir", ws, "--", *argv]
+
+
+@functools.cache
+def _bwrap_status() -> tuple[str | None, str | None]:
+    """(the bwrap program, None) when bubblewrap works here, otherwise (None, why not). Found out once, by
+    running a tiny sandboxed command, because an installed bwrap can still be refused by the system."""
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        return None, ("Commands run without a sandbox because bubblewrap (bwrap) isn't installed. "
+                      f"Install it: {_BWRAP_INSTALL}")
+    probe = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--unshare-ipc",
+             "--unshare-uts", "--unshare-net", "--die-with-parent", "--", "true"]
+    try:
+        done = subprocess.run(probe, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                              timeout=10)
+    except subprocess.TimeoutExpired:
+        return None, ("Commands run without a sandbox because bubblewrap (bwrap) didn't finish a test run "
+                      "within 10 seconds")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"Commands run without a sandbox because bubblewrap (bwrap) can't be started: {exc}"
+    if done.returncode == 0:
+        return bwrap, None
+    try:
+        blocked = _APPARMOR_USERNS.read_text(encoding="utf-8").strip() == "1"
+    except OSError:
+        blocked = False
+    if blocked:
+        profile = f"abi <abi/4.0>, profile bwrap {os.path.realpath(bwrap)} flags=(unconfined) {{ userns, }}"
+        return None, ("Commands run without a sandbox because AppArmor (Ubuntu 24.04+) blocks the user "
+                      "namespaces bubblewrap (bwrap) needs. Allow it with this one line: "
+                      f"echo '{profile}' | sudo tee /etc/apparmor.d/bwrap && "
+                      "sudo apparmor_parser -r /etc/apparmor.d/bwrap")
+    lines = (done.stderr or "").strip().splitlines()
+    detail = lines[0].strip() if lines else f"it exited with code {done.returncode}"
+    return None, f"Commands run without a sandbox because bubblewrap (bwrap) can't start here: {detail}"
+
+
 def can_sandbox() -> bool:
-    """Whether commands run sandboxed on this computer (a Mac with sandbox-exec)."""
-    return sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC)
+    """Whether commands run fully sandboxed on this computer (network denied, writes only in the workspace and
+    the temp folder): a Mac with sandbox-exec, or Linux with a working bubblewrap (bwrap on the PATH, and a
+    test run of it that succeeded, done once). Always False on Windows, whose sandbox is for Agent commands
+    only and limits writes alone: see sandbox_kind."""
+    if sys.platform == "darwin":
+        return os.path.exists(SANDBOX_EXEC)
+    if sys.platform.startswith("linux"):
+        return _bwrap_status()[0] is not None
+    return False
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
+def sandbox_kind() -> str:
+    """How far an Agent command is sandboxed here: "full" (can_sandbox), "writes-only" (Windows, when the
+    low-integrity sandbox passed its test: writes only in the workspace and a private temp folder, with the
+    network on and reads not limited) or "none". Add-ons and sandboxed_argv follow can_sandbox, so they
+    aren't sandboxed on Windows."""
+    if can_sandbox():
+        return "full"
+    if sys.platform == "win32" and winsandbox.available():
+        return "writes-only"
+    return "none"
+
+
+def sandbox_unavailable_reason() -> str | None:
+    """None when commands run fully sandboxed here, otherwise a sentence saying why they don't and what to
+    do. On Windows, where the sandbox limits writes only, it is the sentence saying what that leaves open
+    when it works, and the reason when it doesn't."""
+    if sys.platform == "darwin":
+        if os.path.exists(SANDBOX_EXEC):
+            return None
+        return f"Commands run without a sandbox because sandbox-exec isn't at {SANDBOX_EXEC} on this Mac."
+    if sys.platform.startswith("linux"):
+        return _bwrap_status()[1]
+    if sys.platform == "win32":
+        return winsandbox.WRITES_ONLY_NOTE if winsandbox.available() else winsandbox.unavailable_reason()
+    return ("Commands run without a sandbox because there's none for this system yet (macOS, Linux and, for "
+            "writes only, Windows have one).")
+
+
+def sandboxed_argv(argv: list[str], workspace: Path, *, network: bool = False, files: str = "chosen-folder",
+                   temporary: bool = True, addon_files: Path | None = None) -> list[str]:
+    """argv wrapped to run under the sandbox of this system (sandbox-exec on a Mac, bubblewrap on Linux),
+    with the same network, files, temporary and addon_files meaning as sandbox_profile (bubblewrap doesn't
+    hide the home folder for files="none", so addon_files changes nothing there). Unchanged when can_sandbox is
+    False, so a caller that must not run unsandboxed checks that first."""
+    if not can_sandbox():
+        return list(argv)
+    if sys.platform == "darwin":
+        profile = sandbox_profile(workspace, network=network, files=files, temporary=temporary,
+                                  addon_files=addon_files)
+        return [SANDBOX_EXEC, "-p", profile, *argv]
+    return bwrap_argv(workspace, argv, network=network, files=files, temporary=temporary)
+
+
+def sandboxed_env(env: dict[str, str]) -> dict[str, str]:
+    """env for a command that runs under the sandbox of this system. On Linux, where sandboxed_argv wraps the
+    command in bubblewrap, it's a copy without the SESSION_ENV names: the sandbox hides the sockets they
+    point at (the session bus, ssh-agent, the X server), so the command isn't pointed at them. Otherwise it's
+    a copy of env as it is."""
+    if sys.platform.startswith("linux") and can_sandbox():
+        return {name: value for name, value in env.items() if name not in SESSION_ENV}
+    return dict(env)
+
+
+def _kill_tree(proc: subprocess.Popen | winsandbox.LowProcess) -> None:
     """Stop a command and everything it started."""
+    if isinstance(proc, winsandbox.LowProcess):
+        with suppress(OSError):
+            proc.kill()  # its job object holds everything it started
+        return
     if os.name == "posix":
         # It leads its own process group (start_new_session), and its children are in it unless they left
         with suppress(ProcessLookupError, PermissionError):
@@ -342,28 +507,45 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
     if not folder.is_dir():
         raise ValueError("the workspace isn't a folder")
     argv = list(argv)
-    sandboxed = not computer and can_sandbox()
     if cancel is not None and cancel.is_set():
-        return CommandResult(argv, None, "[stopped by the person]", False, sandboxed, cancelled=True)
-    command = [SANDBOX_EXEC, "-p", sandbox_profile(folder), *argv] if sandboxed else argv
-    options: dict = {"start_new_session": True} if os.name == "posix" else {}
-    if os.name == "nt":
-        from ixel_mat.agents.launch import NO_WINDOW_FLAGS
-        options["creationflags"] = NO_WINDOW_FLAGS
+        # A stopped command starts nothing, not even sandbox_kind's first test run of bwrap on Linux: the kind
+        # it reports is the one already known, or "none"
+        unknown = sys.platform.startswith("linux") and _bwrap_status.cache_info().currsize == 0
+        kind = "none" if computer or unknown else sandbox_kind()
+        return CommandResult(argv, None, "[stopped by the person]", False, kind == "full", cancelled=True,
+                             sandbox=kind)
+    kind = "none" if computer else sandbox_kind()
+    sandboxed = kind == "full"
     # No ssh-agent socket for the command: it would sign with the person's keys, secret folders or not
     env = child_env(nested=False, drop_env=["SSH_AUTH_SOCK"])
     try:
-        proc = subprocess.Popen(command, cwd=folder, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options)
+        if kind == "writes-only":
+            proc = winsandbox.start(argv, folder, env)
+        else:
+            command = sandboxed_argv(argv, folder) if sandboxed else argv
+            options: dict = {"start_new_session": True} if os.name == "posix" else {}
+            if os.name == "nt":
+                from ixel_mat.agents.launch import NO_WINDOW_FLAGS
+                options["creationflags"] = NO_WINDOW_FLAGS
+            if sandboxed:
+                env = sandboxed_env(env)
+            proc = subprocess.Popen(command, cwd=folder, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options)
+    except winsandbox.SetupError as exc:
+        # Not run, rather than run without the limits the card promised; the next card says it isn't sandboxed
+        winsandbox.mark_broken(exc)
+        return CommandResult(argv, 126, f"[not run: the Windows sandbox couldn't be set up: {exc}. Nothing was "
+                                        "started. Commands will say they aren't sandboxed until Ixel is "
+                                        "restarted.]", False, False, sandbox="none", started=False)
     except FileNotFoundError:
         return CommandResult(argv, 127, f"there's no program {argv[0]!r} (check the name, or give its full path)",
-                             False, sandboxed)
+                             False, sandboxed, sandbox=kind)
     except PermissionError:
         return CommandResult(argv, 126, f"{argv[0]!r} can't be run (it isn't a program, or isn't allowed)",
-                             False, sandboxed)
+                             False, sandboxed, sandbox=kind)
     except OSError as exc:
         return CommandResult(argv, 126, f"{argv[0]!r} couldn't start: {exc.strerror or type(exc).__name__}",
-                             False, sandboxed)
+                             False, sandboxed, sandbox=kind)
 
     output = _Output(proc.stdout)
     deadline = time.monotonic() + timeout
@@ -399,6 +581,8 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
         output.thread.join(_DRAIN_WAIT)
         with suppress(OSError):
             proc.stdout.close()
+        if isinstance(proc, winsandbox.LowProcess):
+            proc.close()  # its private temp folder goes, and the workspace's Low label if this was the last run
     return CommandResult(argv=argv, returncode=None if timed_out else proc.returncode,
                          output=output.text() + note, timed_out=timed_out, sandboxed=sandboxed,
-                         cancelled=cancelled)
+                         cancelled=cancelled, sandbox=kind)

@@ -4,8 +4,9 @@ the one line that fixes it.
 
 Each check is ok, warn (works, but something's off), fail (won't work), off (optional and not set up)
 or unchecked (needs a network call or a program run: the page's "Check now", `ixel doctor --check`).
-Without probe nothing goes over the network and no program runs, so the page opens at once. Nothing
-here ever returns a key: only whether one is set.
+Without probe nothing goes over the network and no program runs, so the page opens at once. The one
+exception is on Windows, where `icacls` (a quick local program, run by its full path) reads who can open
+the saved keys. Nothing here ever returns a key: only whether one is set.
 """
 from __future__ import annotations
 
@@ -40,6 +41,16 @@ BROWSER_NAMES = {"msedge": "Microsoft Edge", "chrome": "Google Chrome", "microso
                  "google-chrome-stable": "Google Chrome", "chromium": "Chromium", "chromium-browser": "Chromium",
                  "brave-browser": "Brave"}
 GIT_INSTALL = {"win32": "winget install --id Git.Git -e", "darwin": "xcode-select --install"}
+OS_RELEASE = Path("/etc/os-release")
+# The words of ID and ID_LIKE that put a Linux in each family, in the order install.sh tries them
+DISTRO_FAMILIES = (("debian", ("debian", "ubuntu")), ("fedora", ("fedora", "rhel", "centos")), ("arch", ("arch",)),
+                   ("suse", ("suse", "opensuse")), ("alpine", ("alpine",)))
+# Installs git and ssh together. Argv, never given to a shell: only joined with spaces to be shown
+LINUX_INSTALL = {"debian": ("sudo", "apt", "install", "git", "openssh-client"),
+                 "fedora": ("sudo", "dnf", "install", "git", "openssh-clients"),
+                 "arch": ("sudo", "pacman", "-S", "git", "openssh"),
+                 "suse": ("sudo", "zypper", "install", "git", "openssh-clients"),
+                 "alpine": ("sudo", "apk", "add", "git", "openssh-client")}
 
 
 @dataclass
@@ -98,6 +109,33 @@ async def off_the_loop(fn, *args):
     return await in_daemon_thread(fn, *args)
 
 
+def linux_distro(path: Path | None = None) -> str:
+    """Which family this Linux is in (debian, fedora, arch, suse or alpine), from the ID and ID_LIKE in
+    os-release as install.sh reads them; "" for any other, or when the file can't be read. Any check that
+    needs to know the distro can use it. path is os-release's, OS_RELEASE when None."""
+    try:
+        text = (OS_RELEASE if path is None else path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    values = {}
+    for line in text.splitlines():
+        key, equals, value = line.strip().partition("=")
+        if not equals or key.startswith("#"):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value.lower()
+    words = [("opensuse" if word.startswith("opensuse") else word)
+             for word in f"{values.get('ID', '')} {values.get('ID_LIKE', '')}".split()]
+    return next((family for family, names in DISTRO_FAMILIES if any(word in names for word in words)), "")
+
+
+def linux_install_line(path: Path | None = None) -> str:
+    """The line that installs git and ssh on this Linux, or "" when its distro isn't one Ixel knows."""
+    return " ".join(LINUX_INSTALL.get(linux_distro(path), ()))
+
+
 # ── Ixel MAT itself ───────────────────────────────────────────────────────────
 
 def ixel_checks(settings, which: Callable[[str], str | None] | None = None, keychain_wait: bool = True) -> list[Check]:
@@ -133,6 +171,8 @@ def ixel_checks(settings, which: Callable[[str], str | None] | None = None, keyc
         checks.append(Check("git", "Git", "ok", f"Found at {git}"))
     else:
         fix = GIT_INSTALL.get(sys.platform, "")
+        if not fix and sys.platform.startswith("linux"):
+            fix = linux_install_line()
         checks.append(Check("git", "Git", "fail", "Not found. Code reviews and Handoff need it"
                             + ("" if fix else ": install it with your package manager"), fix))
     return checks
@@ -147,8 +187,51 @@ def keys_check(wait: bool = True) -> Check:
         return Check("keys-file", "Saved keys", "fail", f"Ixel can't read the keys saved in it: {exc}")
 
 
+def _mode_of(path: Path) -> int:
+    """path's mode bits, or 0 where there are none to read (Windows) or no such file."""
+    if os.name != "posix":
+        return 0
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return 0
+
+
+def _keys_access(secrets, keys: Path, mode: int) -> Check | None:
+    """A warning when someone besides you may be able to open keys.enc, or when that couldn't be checked,
+    else None. mode is keys.enc's, as it was found. On Windows its access list is read, then its folder's:
+    what's made in a folder that lets others in is open to them too."""
+    if sys.platform != "win32":
+        if mode & 0o077:
+            return Check("keys-file", "Saved keys", "warn", f"{keys} is encrypted, but other people on this "
+                         f"computer could read it ({mode:o}). Ixel resets it to 600 when it opens it",
+                         f"chmod 600 '{keys}'")
+        return None
+    who = secrets.user_sid()
+    if who is None:
+        return Check("keys-file", "Saved keys", "warn", "Ixel couldn't check who can open the file your keys "
+                     "are saved in: it couldn't tell which Windows account this is")
+    account, sid = who
+    for path, folder in ((keys, False), (keys.parent, True)):
+        entries, why = secrets.read_acl(path)
+        if entries is None:
+            return Check("keys-file", "Saved keys", "warn", f"Ixel couldn't check who can open {path} ({why})")
+        inherited, extras = secrets.acl_problems(entries, account, sid)
+        if inherited:
+            detail = (f"{path} also lets in whoever its folder lets in, so other people on this computer may be "
+                      "able to open it")
+        elif extras:
+            detail = f"{path} can also be opened by other accounts on this computer: {', '.join(extras)}"
+        else:
+            continue
+        return Check("keys-file", "Saved keys", "warn", detail, secrets.owner_only_fix(path, sid, folder, extras))
+    return None
+
+
 def _keys_check(wait: bool = True) -> Check:
     from ixel_mat.config import secrets
+    keys = secrets.get_keys_file_path()
+    keys_mode = _mode_of(keys)  # before where_keys_are: opening keys.enc resets a loose mode to 0600
     store = secrets.where_keys_are(wait)
     plain = secrets.get_env_file_path()
     if plain.exists() and os.name == "posix":  # a .env left with keys, or the only place there is
@@ -160,6 +243,10 @@ def _keys_check(wait: bool = True) -> Check:
         return Check("keys-file", "Saved keys", "fail", store.problem, "ixel setup")
     if store.kind == "unavailable":
         return Check("keys-file", "Saved keys", "warn", store.problem)
+    if keys.exists():
+        access = _keys_access(secrets, keys, keys_mode)
+        if access is not None:
+            return access
     some = bool(secrets.saved_names())
     if store.kind == "keychain":
         what = "Encrypted" if some else "None yet. Keys you save are encrypted"
@@ -406,17 +493,21 @@ def _machine_checks(probe: bool, which=None, system: str | None = None) -> list[
     if program:
         checks.append(Check("ssh", "ssh", "ok", f"Found at {program}"))
     else:
+        fix = SSH_INSTALL.get(system, "")
+        if not fix and system.startswith("linux"):
+            fix = linux_install_line()
         checks.append(Check("ssh", "ssh", "fail", "Not installed, or not on PATH, so no machine can connect. " + (
             "Run this in PowerShell as administrator" if system == "win32" else
-            "Install OpenSSH's client (openssh-client, or openssh)"), SSH_INSTALL.get(system, "")))
+            "Run this in a terminal" if fix else
+            "Install OpenSSH's client (openssh-client, or openssh)"), fix))
     window = terminal.find()
     checks.append(Check("terminal", "Terminal for Connect", "ok", f"Connect opens {terminal.label(window)}")
                   if window else
                   Check("terminal", "Terminal for Connect", "warn", (
-                      "There's no desktop here to open a terminal window on" if terminal.no_screen() else
-                      "There's no terminal Ixel knows how to open (konsole, gnome-terminal, kitty, alacritty or "
-                      "xterm)") + ", so Connect gives the line to run instead: `ixel machines connect NAME` "
-                      "connects in the terminal you're in."))
+                      "There's no desktop here to open a terminal window on, so Connect" if terminal.no_screen() else
+                      f"There's no terminal Ixel knows how to open. {terminal.INSTALL_HINT} Until then, Connect") +
+                      " gives the line to run instead: `ixel machines connect NAME` connects in the terminal "
+                      "you're in."))
     if not probe or not program:
         checks.append(Check("pinned", "Pinned keys", "unchecked", "Check now counts the machines whose key is "
                             "pinned"))

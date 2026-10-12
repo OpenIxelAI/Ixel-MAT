@@ -135,12 +135,49 @@ def test_a_link_inside_the_window_folder_is_never_followed(tmp_path, monkeypatch
 @pytest.mark.parametrize("system, env, expected", [
     ("win32", {"LOCALAPPDATA": "C:/Users/someone/AppData/Local"}, ["C:/Users/someone/AppData/Local/IxelMAT/window"]),
     ("darwin", {}, ["HOME/Library/Application Support/IxelMAT/window", "HOME/Library/WebKit/com.ixelai.ixel"]),
-    ("linux", {}, ["HOME/.local/state/ixel-mat/window"]),
-    ("linux", {"XDG_STATE_HOME": "/state"}, ["/state/ixel-mat/window"]),
+    ("linux", {}, ["HOME/.local/state/ixel-mat/window", "HOME/.local/state/ixel-mat/gtk"]),
+    ("linux", {"XDG_STATE_HOME": "/state"}, ["/state/ixel-mat/window", "/state/ixel-mat/gtk"]),
 ])
 def test_where_the_window_keeps_its_storage(system, env, expected, tmp_path):
     home = tmp_path / "home"
     assert window_folders(system, env, home) == [Path(e.replace("HOME", str(home))) for e in expected]
+
+
+def linux_window_storage(home):
+    """The Linux window's storage as it leaves it, with a file in each folder: the Chrome profile of
+    `ixel app --browser`, and what linux_window.py has WebKit keep (its data and cache). (window, gtk)."""
+    from ixel_mat.gui.linux_window import storage_folders
+    window, gtk = window_folders("linux", {}, home)
+    data, cache = (Path(folder) for folder in storage_folders({}, str(home)))
+    (window / "Default").mkdir(parents=True)
+    (window / "Default" / "Preferences").write_text("{}", encoding="utf-8")
+    (data / "localstorage").mkdir(parents=True)
+    (data / "localstorage" / "x.localstorage").write_text("ixel.handoff.project", encoding="utf-8")
+    cache.mkdir(parents=True)
+    (cache / "index").write_text("cached", encoding="utf-8")
+    return window, gtk
+
+
+def test_forget_deletes_the_linux_windows_own_storage_with_the_rest_of_the_window(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(forget, "window_folders", lambda: window_folders("linux", {}, home))
+    window, gtk = linux_window_storage(home)
+    (gtk.parent / "kept.txt").write_text("kept", encoding="utf-8")  # beside them, in Ixel's own folder
+    found = forget.forget()
+    assert [(item.what, item.path, item.error) for item in found] == [
+        (forget.WINDOW, window, ""), (forget.WINDOW, gtk, "")]
+    assert not window.exists() and not gtk.exists()
+    assert not gtk.with_name("gtk.forgotten").exists()
+    assert (gtk.parent / "kept.txt").read_text(encoding="utf-8") == "kept"
+    assert forget.forget() == []  # nothing left to forget
+
+
+def test_the_settings_button_leaves_the_linux_windows_storage_it_is_using(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(forget, "window_folders", lambda: window_folders("linux", {}, home))
+    window, gtk = linux_window_storage(home)
+    assert forget.forget(window=False) == []
+    assert (gtk / "data" / "localstorage" / "x.localstorage").exists() and window.is_dir()
 
 
 # ── ixel forget ───────────────────────────────────────────────────────────────
@@ -157,17 +194,36 @@ def test_ixel_forget_says_what_it_deleted(capsys):
     assert "Nothing to forget" in capsys.readouterr().out
 
 
-def test_ixel_forget_says_where_the_linux_windows_own_storage_is(tmp_path, monkeypatch, capsys):
+def squashed(text):
+    """text with no whitespace at all: a long path the console folded over two lines is whole again."""
+    return "".join(text.split())
+
+
+def test_ixel_forget_says_it_deleted_the_linux_windows_storage(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    monkeypatch.setattr(forget, "window_folders", lambda: window_folders("linux", {}, home))
+    monkeypatch.setattr(forget, "gtk_window_folders", lambda: [])  # none from an earlier Ixel
+    window, gtk = linux_window_storage(home)
+    assert cli.cmd_forget([]) == 0
+    out = capsys.readouterr().out
+    assert "Deleted the app window's storage" in " ".join(out.split())
+    assert squashed(str(window)) in squashed(out) and squashed(str(gtk)) in squashed(out)
+    assert not window.exists() and not gtk.exists()
+
+
+def test_ixel_forget_says_where_an_earlier_linux_window_left_its_storage(tmp_path, monkeypatch, capsys):
     data, cache = forget.gtk_window_folders({}, tmp_path)
     assert (data, cache) == (tmp_path / ".local" / "share" / "ixel", tmp_path / ".cache" / "ixel")
     assert forget.gtk_window_folders({"XDG_DATA_HOME": str(tmp_path / "d")}, tmp_path)[0] == tmp_path / "d" / "ixel"
     monkeypatch.setattr(forget, "gtk_window_folders", lambda: [data, cache])
     cli.cmd_forget([])
-    assert "Linux window" not in capsys.readouterr().out  # no such window here
+    assert "left its storage" not in capsys.readouterr().out  # none of it here
     (data / "localstorage").mkdir(parents=True)
     cli.cmd_forget([])
-    out = capsys.readouterr().out.replace("\n", "")
-    assert "Linux window keeps its own storage in" in out and str(data) in out and str(cache) not in out
+    out = capsys.readouterr().out
+    assert "An earlier Ixel's Linux window left its storage in" in " ".join(out.split())
+    assert "which this leaves alone: delete it with Ixel closed." in " ".join(out.split())
+    assert squashed(str(data)) in squashed(out) and squashed(str(cache)) not in squashed(out)
     assert data.is_dir()  # said, not deleted
 
 

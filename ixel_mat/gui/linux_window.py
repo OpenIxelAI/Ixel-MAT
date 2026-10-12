@@ -10,6 +10,9 @@ environment can't see them), so it imports nothing from Ixel:
 It starts `<python> -I -m ixel_mat app --host`, reads the page's address (with this session's key) from
 its stdout, a pipe only this window reads, and shows it. Closing the window closes that program's stdin,
 which stops it.
+
+What the page keeps in the window (its localStorage) and WebKit's cache are in `gtk` in Ixel's own folder
+(storage_folders), which `ixel forget` deletes.
 """
 from __future__ import annotations
 
@@ -37,6 +40,25 @@ def load_gtk():
         raise ImportError("WebKit2GTK isn't installed")
     from gi.repository import Gdk, Gio, GLib, Gtk, WebKit2
     return Gdk, Gio, GLib, Gtk, WebKit2
+
+
+def storage_folders(env=os.environ, home: str | None = None) -> tuple[str, str]:
+    """(data, cache) for the window's storage: the `gtk` folder in Ixel's own folder, which is what
+    window.data_dir gives on Linux (this file imports nothing from Ixel, so it's worked out again here).
+    `ixel forget` deletes that folder."""
+    home = home or os.path.expanduser("~")
+    state = env.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
+    gtk = os.path.join(state, "ixel-mat", "gtk")
+    return os.path.join(gtk, "data"), os.path.join(gtk, "cache")
+
+
+def new_view(WebKit2, folders: tuple[str, str] | None = None):
+    """A web view that keeps its storage in folders (data, cache), by default Ixel's own, not the places
+    WebKitGTK picks for a program named `ixel`. WebKit makes the folders."""
+    data, cache = folders or storage_folders()
+    manager = WebKit2.WebsiteDataManager(base_data_directory=data, base_cache_directory=cache)
+    context = WebKit2.WebContext.new_with_website_data_manager(manager)
+    return WebKit2.WebView.new_with_context(context)
 
 
 def _origin(uri: str | None) -> tuple[str, str, int] | None:
@@ -116,7 +138,7 @@ def main(argv: list[str]) -> int:
     width, height = (min(1280, int(area.width * 0.9)), min(840, int(area.height * 0.9))) if area else (1280, 840)
     window.set_default_size(width, height)
     window.set_position(Gtk.WindowPosition.CENTER)
-    view = WebKit2.WebView()
+    view = new_view(WebKit2)
     page = {"address": None}  # the server's address, once it's printed it
 
     def stay_inside(_view, decision, kind):

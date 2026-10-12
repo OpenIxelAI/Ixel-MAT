@@ -14,11 +14,11 @@ the repository is public, so if you don't see it, email us.
 
 | Asset | Where it lives |
 |---|---|
-| Your API keys | `~/.config/ixel-mat/keys.enc` (0600), encrypted with a key kept in your system's keychain (below). On a computer with no keychain Ixel can use, or one that won't keep that key, `~/.config/ixel-mat/.env` (0600), in plain text. Or your shell environment |
+| Your API keys | `~/.config/ixel-mat/keys.enc` (0600; on Windows an access list that lets only your account in), encrypted with a key kept in your system's keychain (below). On a computer with no keychain Ixel can use, or one that won't keep that key, `~/.config/ixel-mat/.env` (0600), in plain text. Or your shell environment |
 | Your subscription logins | Each CLI's own storage (`~/.claude`, `~/.codex`, `~/.gemini`…). Ixel never reads these |
 | Your files | Anything your user account can read |
 | Your code | Only the diff or files you name for a review (`--diff`, `--file`…) are read, once, and sent to the models on your panel (below) |
-| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`, each with the time it was saved. Each one is deleted once it's 24 hours old, by the next `ixel` command after that (continuing the conversation doesn't keep its earlier questions longer), and all of them at once by `ixel forget` (or Forget in the app's Settings). The terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and so does the browser app: Ixel's own server keeps each tab's conversations so a reload brings them back, never the browser's storage, and they're gone when Ixel stops. `ixel forget` also deletes the app window's browser storage (`ixel app`'s Edge or Chrome profile, and on a Mac Ixel.app's WebKit storage). Gemini CLI, Copilot and OpenCode save every question they're asked in their own folders; Ixel removes what each run saved (below) |
+| Your questions | Sent only to the models on your panel, and to TypeSafe if you set triage to use it (below). The last three `ixel review` exchanges are kept in `~/.config/ixel-mat/conversation.json` (0600) for `--continue`, each with the time it was saved. Each one is deleted once it's 24 hours old, by the next `ixel` command after that (continuing the conversation doesn't keep its earlier questions longer), and all of them at once by `ixel forget` (or Forget in the app's Settings). The terminal app keeps its conversation, and the questions you can recall with the up arrow, in memory only, and so does the browser app: Ixel's own server keeps each tab's conversations so a reload brings them back, never the browser's storage, and they're gone when Ixel stops. `ixel forget` also deletes the app window's browser storage (`ixel app`'s Edge or Chrome profile, on a Mac Ixel.app's WebKit storage, and on Linux Ixel's own GTK window's). Gemini CLI, Copilot and OpenCode save every question they're asked in their own folders; Ixel removes what each run saved (below) |
 | Your usage and money | Every model call is billed to you |
 
 ## Who we assume might be hostile
@@ -91,6 +91,18 @@ anyway: from your keychain, which gives them to programs you run (below), or fro
   if an Ixel that stopped mid-save left it behind for 2 minutes). When the keychain is still asking for
   your password as Ixel stops waiting for a new item, the lock stays until it answers (or those 2 minutes
   pass), so no other Ixel makes a different one meanwhile.
+- **Owner-only on Windows too.** File modes mean nothing there, so each time Ixel writes `keys.enc` it sets
+  an access list with `icacls`: first on `~/.config/ixel-mat` (so the file starts out owner-only, as does
+  anything else made in that folder), then on `keys.enc`, in both cases with inheritance off and full control
+  for your account's SID only, found with `whoami /user`. `icacls.exe` and `whoami.exe` are run by their full
+  path under `%SystemRoot%\System32`, as an argument list (no shell), with no window and a 10-second
+  limit, so an `icacls.exe` planted in the folder you run Ixel in never runs. If that fails, the keys are
+  saved anyway, Ixel logs why (never a key), and Health warns and gives the `icacls` line that fixes it.
+  Health also warns when the file or the folder inherits its access from above, or lists another account.
+  The Windows `Administrators` group can still take ownership of the file and change that list, so this
+  keeps other accounts out of it, not someone with administrator rights. The file is encrypted either way,
+  with a key kept in your keychain (above). On macOS and Linux Health checks that group and others can't read
+  `keys.enc` (mode 0600), and gives `chmod 600` when they can.
 - **What the keychain doesn't stop.** A program running as you can usually ask the keychain too: Windows
   gives it to any program you run, an unlocked Linux keyring to any program in your session, and a Mac
   asks first, except for the Python that saved it (a script run with that same Python counts as it). While
@@ -289,12 +301,26 @@ your computer waits for you.
   command, become a pending approval: you see the diff, or the exact command, before anything
   happens. "Always allow" adds a command's argv to an allowlist for that workspace, and never a shell
   or an interpreter running `-c`.
-- **Commands are sandboxed on macOS.** An approved command runs as a list of arguments, never a
-  shell string, with the workspace as its folder, a 120-second limit and 64 KB of output kept. On
-  macOS it runs under `sandbox-exec` with network access denied and writes allowed only in the
-  workspace and the temp folder. The sandbox doesn't limit reads: a sandboxed command can still read
-  any file your user can, and print it into the run. On other systems the approval card says it is not
-  sandboxed. Computer access (below) is the exception.
+- **Commands are sandboxed on macOS and Linux, and for writes only on Windows.** An approved command runs
+  as a list of arguments, never a shell string, with the workspace as its folder, a 120-second limit and
+  64 KB of output kept. On macOS it runs under `sandbox-exec`, and on Linux under `bwrap` (bubblewrap,
+  which has to be installed and allowed to start), with network access denied and writes allowed only in
+  the workspace and the temp folder. The sandbox doesn't limit reads: a sandboxed command can still read
+  any file your user can, and print it into the run, except that on Linux your SSH, cloud and browser
+  folders and Ixel's own config folder are hidden from it. On Linux the sandbox also hides `/run`, the
+  session's runtime folder, the X11 and ICE socket folders and `/dev/shm`, and drops the environment
+  variables that point at them, because denying the network doesn't stop a program reaching a Unix socket
+  by its path: without this, a command could ask systemd over D-Bus to run something outside the sandbox,
+  or use ssh-agent, the keyring, the X server or `docker.sock`. One known limit: when the network is
+  allowed (add-ons that have it), abstract Unix sockets such as X11's `@/tmp/.X11-unix/X0` stay reachable,
+  since only the network namespace separates those. On Windows it runs with a low-integrity token inside a
+  job object: it can write only in the workspace and a private temp folder. **The network is not blocked**
+  (that needs administrator rights), and **reads are not limited**: your SSH, cloud and browser folders
+  and Ixel's own config folder can be read, and printed into the run, because Windows can't hide them from
+  it the way Linux does. Tools that write caches into your user profile may fail under it. If the Windows
+  sandbox can't be set up, or on another system, or on Linux without a working `bwrap`, the approval card
+  says it is not sandboxed. MCP add-ons aren't sandboxed on Windows. Computer access (below) is the
+  exception. The design and its risks are in `docs/windows-sandbox-design.md`.
 - **None of your keys.** A command runs with the environment Ixel gives it, without any key saved
   in Ixel.
 - **Files and pictures.** `read_file` also reads documents Ixel already knows (PDF, Word, Excel,
@@ -380,9 +406,10 @@ network.
   an earlier Ixel kept in that tab's `sessionStorage` (`ixel-conversations`). Restored text is rendered the
   same way as live text. The browser's storage keeps the Board's recent folders and the last /handoff project
   (`localStorage`), never a question or answer. On Linux, Ixel's own window (GTK with WebKit) keeps that
-  storage, and WebKit's cache, where WebKitGTK puts them for a program named `ixel` (usually
-  `~/.local/share/ixel` and `~/.cache/ixel`). `ixel forget` doesn't delete those: it says where they are, to
-  delete with Ixel closed.
+  storage, and WebKit's cache, in `gtk` in Ixel's own folder (`~/.local/state/ixel-mat/gtk`, or under
+  `$XDG_STATE_HOME`), which `ixel forget` deletes. A window from an earlier Ixel kept them where WebKitGTK
+  puts them for a program named `ixel` (usually `~/.local/share/ixel` and `~/.cache/ixel`), and `ixel forget`
+  says where those are, to delete with Ixel closed.
 - Spell check, writing suggestions and autofill are off in every box you type into (`spellcheck`,
   `writingsuggestions`, `autocomplete`): in Edge, enhanced spell check and text predictions send what's typed
   to Microsoft, and autofill keeps it in the browser profile.
@@ -412,7 +439,12 @@ network.
   key on a pipe only they read, and stops when they close its stdin. Both accept only an `http://127.0.0.1`
   address from it. The Linux window keeps only that server's pages inside (the address is parsed, so
   `http://127.0.0.1:80@evil.example/` doesn't count), gives the microphone only to them, opens other web
-  links in your browser and ignores any other kind of link.
+  links in your browser and ignores any other kind of link. The Mac app keeps the same pages inside by the
+  same rule, and opens a web or email link you click in your browser (a script in the page can't open one by
+  itself). Only Ixel's own page, in its main frame, can start a download (not the frame an add-on's diagram
+  runs in, and not another site). It goes in your Downloads folder under a name nothing there has (the file
+  name the page suggests is cut down to one plain name), so it never replaces a file or is written through
+  a symlink, even a broken one.
 
 **How it's checked:** `tests/test_gui_browser.py` runs the app in real Chromium with a model that answers
 with `<img onerror>`, `<script>`, and `javascript:` links. It asserts that nothing executes, no elements are
@@ -581,8 +613,10 @@ scripted panels. End-to-end runs check that only the question and the anonymous 
   ssh, the terminal and `ssh-keygen` get their arguments as a list; Windows Terminal, which splits its own
   command line at `;`, gets only Python and a private one-shot script holding the exact list, and
   `cmd.exe` is never asked to read one. On a Mac, Terminal.app opens a private one-shot `/bin/sh` script
-  that deletes itself, with each argument quoted (`shlex`). The line the page offers to paste
-  (`ixel machines connect NAME`) is quoted for your shell too.
+  that deletes itself, with each argument quoted (`shlex`). On Linux, `$TERMINAL` is only split to find its
+  program, never run through a shell, and Tilix, whose `-e` takes one command string, gets the arguments
+  quoted with `shlex.join`. The line the page offers to paste (`ixel machines connect NAME`) is quoted for
+  your shell too.
 - **Trust on first use, then strict.** A server's key is learned by ssh itself (so `~/.ssh/config`'s
   HostName, Port and ProxyJump apply) into a temporary file, with every way of signing in switched off.
   A server can still let a client in with no credentials at all (and so could someone in between, before
