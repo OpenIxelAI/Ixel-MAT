@@ -93,10 +93,8 @@ def server_parameters(card: Card, workspace: Path) -> StdioServerParameters:
         raise ValueError("unknown files permission")
     if not isinstance(card.permissions.network, bool):
         raise ValueError("network permission must be true or false")
-    if sandbox.can_sandbox():
-        profile = sandbox.sandbox_profile(workspace, network=card.permissions.network,
-                                          files=card.permissions.files, temporary=False)
-        command = [sandbox.SANDBOX_EXEC, "-p", profile, *command]
+    command = sandbox.sandboxed_argv(command, workspace, network=card.permissions.network,
+                                     files=card.permissions.files, temporary=False)
     # stdio_client merges its default environment into this one. Explicit empty values prevent it
     # restoring a saved key in any of those default names after child_env withheld it.
     env = {key: "" for key in get_default_environment()}

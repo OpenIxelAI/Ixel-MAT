@@ -3,10 +3,12 @@ Running a command the person approved (or always allows), for the agent's run_co
 
 The model never gets a shell: a command is a list of words, run as it is, with the workspace as its folder,
 a time limit, at most 64 KB of its output kept, and the environment without any keys saved in Ixel
-(child_env). On a Mac it runs under sandbox-exec, with the network denied and writes allowed only in the
-workspace and the temp folder. Elsewhere nothing like that is there to use, so the result says it ran
-unsandboxed, and the approval card says so before it runs.
-With Computer access on, it runs without sandbox-exec and with the network, keeping the same environment,
+(child_env). On a Mac it runs under sandbox-exec and on Linux under bubblewrap (bwrap), with the network
+denied and writes allowed only in the workspace and the temp folder; on Linux the secret and browser folders
+(secret_folders) are hidden too. Where neither is there to use (no bwrap, a system that won't let it start,
+or another system), the result says it ran unsandboxed, and the approval card says so before it runs;
+sandbox_unavailable_reason says why.
+With Computer access on, it runs without the sandbox and with the network, keeping the same environment,
 time limit, output limit and way of stopping its children.
 
 is_shell_or_interpreter tells the commands that can run anything at all (a shell, `python -c`, `node -e`)
@@ -14,8 +16,10 @@ from the rest. The allowlist never matches those, so they always ask.
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,12 +30,17 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from ixel_mat.agent.secret_folders import secret_folders
 from ixel_mat.config.secrets import child_env
 from ixel_mat.material import mask_secrets
 
 DEFAULT_TIMEOUT = 120.0
 MAX_OUTPUT_BYTES = 64 * 1024
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# "1" here means Ubuntu 24.04+'s AppArmor refuses user namespaces to programs without a profile (bwrap needs them)
+_APPARMOR_USERNS = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+_BWRAP_INSTALL = ("Debian/Ubuntu: sudo apt install bubblewrap; Fedora: sudo dnf install bubblewrap; "
+                  "Arch: sudo pacman -S bubblewrap")
 _READ_CHUNK = 8 * 1024
 # After the command itself ended, how long the output is still read while programs it left running in the
 # background hold it open, before they're stopped too
@@ -58,7 +67,8 @@ _VERSIONED_INTERPRETER = re.compile(r"(ruby|perl|php|lua|tclsh|rscript)(\d+(\.\d
 @dataclass
 class CommandResult:
     """What a command did. returncode is None when it was stopped at the time limit; sandboxed says whether
-    it ran under sandbox-exec (network denied, writes only in the workspace and the temp folder)."""
+    it ran under sandbox-exec (macOS) or bubblewrap (Linux): network denied, writes only in the workspace and
+    the temp folder."""
     argv: list[str]
     returncode: int | None
     output: str
@@ -146,9 +156,118 @@ def sandbox_profile(workspace: Path, *, network: bool = False, files: str = "cho
             + "(deny file-write*)" + writes)
 
 
+def _inside(path: str, folder: str) -> bool:
+    """Whether path is folder or something under it, compared on whole path parts."""
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def _bwrap_hide(paths: list[str]) -> list[str]:
+    """bwrap's words that hide each path: an empty folder over a folder, /dev/null over a file."""
+    words: list[str] = []
+    for path in paths:
+        words += ["--tmpfs", path] if os.path.isdir(path) else ["--ro-bind", "/dev/null", path]
+    return words
+
+
+def bwrap_argv(workspace: Path, argv: list[str], *, network: bool = False, files: str = "chosen-folder",
+               temporary: bool = True) -> list[str]:
+    """argv under bubblewrap, with the same rules as sandbox_profile: no network unless network, writes only
+    in the workspace (none when files is "none") and the temp folders (temporary=False gives the command a
+    private empty /tmp instead), everything else read-only. Reads aren't blocked, except that the secret
+    and browser folders (secret_folders) are hidden. Paths are real paths. It only builds the command;
+    can_sandbox says whether bwrap works here."""
+    if files not in ("none", "output-folder", "chosen-folder"):
+        raise ValueError("unknown files permission")
+    ws = os.path.realpath(workspace)
+    temps = [path for path in dict.fromkeys([os.path.realpath(tempfile.gettempdir()), os.path.realpath("/tmp")])
+             if os.path.exists(path)]
+    # Always bound, read-only when it can't be written, so --chdir works when a --tmpfs or a hidden folder
+    # covers it. A later mount covers an earlier one, so the order matters: the system, the temp folders,
+    # the workspace, then the hidden folders on top
+    bind = ["--bind" if files != "none" else "--ro-bind", ws, ws]
+    command = [shutil.which("bwrap") or "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
+    for path in temps:
+        command += ["--bind", path, path] if temporary else ["--tmpfs", path]
+    command += bind
+    hidden = [path for path in secret_folders() if os.path.exists(path)]
+    command += _bwrap_hide(hidden)
+    if any(_inside(ws, path) for path in hidden):
+        # The workspace is in a hidden folder, or is one (a fetched repo under Ixel's config folder): bind it
+        # back so it stays usable, and hide again what's hidden inside it
+        command += bind + _bwrap_hide([path for path in hidden if path != ws and _inside(path, ws)])
+    command += ["--unshare-pid", "--unshare-ipc", "--unshare-uts"]
+    if not network:
+        command.append("--unshare-net")
+    return command + ["--die-with-parent", "--chdir", ws, "--", *argv]
+
+
+@functools.cache
+def _bwrap_status() -> tuple[str | None, str | None]:
+    """(the bwrap program, None) when bubblewrap works here, otherwise (None, why not). Found out once, by
+    running a tiny sandboxed command, because an installed bwrap can still be refused by the system."""
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        return None, ("Commands run without a sandbox because bubblewrap (bwrap) isn't installed. "
+                      f"Install it: {_BWRAP_INSTALL}")
+    probe = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--unshare-ipc",
+             "--unshare-uts", "--unshare-net", "--die-with-parent", "--", "true"]
+    try:
+        done = subprocess.run(probe, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                              timeout=10)
+    except subprocess.TimeoutExpired:
+        return None, ("Commands run without a sandbox because bubblewrap (bwrap) didn't finish a test run "
+                      "within 10 seconds")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"Commands run without a sandbox because bubblewrap (bwrap) can't be started: {exc}"
+    if done.returncode == 0:
+        return bwrap, None
+    try:
+        blocked = _APPARMOR_USERNS.read_text(encoding="utf-8").strip() == "1"
+    except OSError:
+        blocked = False
+    if blocked:
+        profile = f"abi <abi/4.0>, profile bwrap {os.path.realpath(bwrap)} flags=(unconfined) {{ userns, }}"
+        return None, ("Commands run without a sandbox because AppArmor (Ubuntu 24.04+) blocks the user "
+                      "namespaces bubblewrap (bwrap) needs. Allow it with this one line: "
+                      f"echo '{profile}' | sudo tee /etc/apparmor.d/bwrap && "
+                      "sudo apparmor_parser -r /etc/apparmor.d/bwrap")
+    lines = (done.stderr or "").strip().splitlines()
+    detail = lines[0].strip() if lines else f"it exited with code {done.returncode}"
+    return None, f"Commands run without a sandbox because bubblewrap (bwrap) can't start here: {detail}"
+
+
 def can_sandbox() -> bool:
-    """Whether commands run sandboxed on this computer (a Mac with sandbox-exec)."""
-    return sys.platform == "darwin" and os.path.exists(SANDBOX_EXEC)
+    """Whether commands run sandboxed on this computer: a Mac with sandbox-exec, or Linux with a working
+    bubblewrap (bwrap on the PATH, and a test run of it that succeeded, done once)."""
+    if sys.platform == "darwin":
+        return os.path.exists(SANDBOX_EXEC)
+    if sys.platform.startswith("linux"):
+        return _bwrap_status()[0] is not None
+    return False
+
+
+def sandbox_unavailable_reason() -> str | None:
+    """None when commands run sandboxed here, otherwise a sentence saying why they don't and what to do."""
+    if sys.platform == "darwin":
+        if os.path.exists(SANDBOX_EXEC):
+            return None
+        return f"Commands run without a sandbox because sandbox-exec isn't at {SANDBOX_EXEC} on this Mac."
+    if sys.platform.startswith("linux"):
+        return _bwrap_status()[1]
+    return "Commands run without a sandbox because there's none for this system yet (macOS and Linux have one)."
+
+
+def sandboxed_argv(argv: list[str], workspace: Path, *, network: bool = False, files: str = "chosen-folder",
+                   temporary: bool = True) -> list[str]:
+    """argv wrapped to run under the sandbox of this system (sandbox-exec on a Mac, bubblewrap on Linux),
+    with the same network, files and temporary meaning as sandbox_profile. Unchanged when can_sandbox is
+    False, so a caller that must not run unsandboxed checks that first."""
+    if not can_sandbox():
+        return list(argv)
+    if sys.platform == "darwin":
+        profile = sandbox_profile(workspace, network=network, files=files, temporary=temporary)
+        return [SANDBOX_EXEC, "-p", profile, *argv]
+    return bwrap_argv(workspace, argv, network=network, files=files, temporary=temporary)
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -217,7 +336,7 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
     sandboxed = not computer and can_sandbox()
     if cancel is not None and cancel.is_set():
         return CommandResult(argv, None, "[stopped by the person]", False, sandboxed, cancelled=True)
-    command = [SANDBOX_EXEC, "-p", sandbox_profile(folder), *argv] if sandboxed else argv
+    command = sandboxed_argv(argv, folder) if sandboxed else argv
     options: dict = {"start_new_session": True} if os.name == "posix" else {}
     if os.name == "nt":
         from ixel_mat.agents.launch import NO_WINDOW_FLAGS
