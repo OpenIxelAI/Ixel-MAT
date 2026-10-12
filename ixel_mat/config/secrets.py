@@ -207,10 +207,16 @@ def _grant(sid: str, folder: bool) -> str:
     return f"*{sid}:(OI)(CI)F" if folder else f"*{sid}:F"
 
 
+# Accounts a new folder or file can have its own entries for (Python's mkdir with a mode gives SYSTEM,
+# Administrators and OWNER RIGHTS full control on Windows), by SID, since Windows names them in its own language
+_DEFAULT_GRANTEES = ("*S-1-5-18", "*S-1-5-32-544", "*S-1-3-4")
+
+
 def owner_only_argv(path: Path, sid: str, folder: bool = False) -> list[str]:
     """The icacls call that takes away what path inherits and leaves access to the account with this SID
     only (a folder: and to what's made in it)."""
-    return [_system_tool("icacls.exe"), str(path), "/inheritance:r", "/grant:r", _grant(sid, folder)]
+    removals = [word for default in _DEFAULT_GRANTEES for word in ("/remove:g", default)]
+    return [_system_tool("icacls.exe"), str(path), "/inheritance:r", *removals, "/grant:r", _grant(sid, folder)]
 
 
 def secure_owner_only(path: Path, folder: bool = False) -> bool:
