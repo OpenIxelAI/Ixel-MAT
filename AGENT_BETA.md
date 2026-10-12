@@ -189,3 +189,49 @@ and on a step whose action showed pictures, `"pictures": n`.
 - **History** behind a button at the top (a list of earlier conversations); **Memory and skills** behind
   another, as now. No side column.
 - Light and dark, the app's variables, no new libraries, nothing kept in browser storage.
+
+# Beta 3: open-source tools as add-on cards
+
+Angel's idea: rather than Ixel writing code for every outside tool (REA, Diagram Design…), the agent fills in a
+short **add-on card** (`addon.toml`, the format in `docs/addon-cards.md` on the open-source add-ons branch) and
+the person decides in Settings › Add-ons whether to turn it on. The agent never turns a card on.
+
+## Adding a tool from a GitHub link
+
+New actions (they work with or without Computer access):
+
+- `fetch_repo` (`url`: `https://github.com/<owner>/<repo>`, optional `commit`): **after approval**, downloads
+  `https://codeload.github.com/<owner>/<repo>/tar.gz/<commit or HEAD>` (no git, no shell) into the agent's
+  folder under `scratch/<owner>-<repo>/`, extracting regular files only (refusing absolute paths, `..`, links
+  and devices; at most 200 MB and 20,000 files). The result: the full commit sha (resolved with GitHub's API
+  `GET /repos/<owner>/<repo>/commits/<ref>` when no commit was given), the top-level files, the README's first
+  lines, and for a `subdir` the agent names later, the tree hash and file count per the card spec. The agent
+  reaches the files as `scratch:<owner>-<repo>/PATH` in `list_dir`, `read_file`, `search` and `view_file`.
+- `tree_hash` (`repo`: the scratch name, `subdir`): the card spec's `tree_sha256` and `files` for that
+  folder, computed by Ixel (never by the model).
+- `run_command` takes an optional `cwd`: `scratch:<owner>-<repo>` runs the approved command in that scratch
+  copy (sandboxed on macOS; the network only with Computer access), to try the tool.
+- `write_addon_card` (`id`, `card`: the TOML text): Ixel checks the card against every rule in the spec
+  (unknown keys, ids, kinds, the commit and hash shapes, the repo URL, subdir, commands and placeholders)
+  and that `[source]`'s `commit`, `tree_sha256` and `files` match what `fetch_repo`/`tree_hash` computed for
+  that run. **After approval** (the card is shown in full) it's written to `~/.ixel/addons/<id>/addon.toml`.
+  It refuses ids of built-in cards. Writing over an existing card is allowed only after approval and the
+  approval card says the add-on must be approved again in Settings.
+- The run's answer tells the person to open **Settings › Add-ons** to review and approve it.
+- A starter skill `add-tool-from-github` walks the model through it: fetch, read the README and
+  entry points, pick the kind (an `SKILL.md` folder is `skill`, an MCP server is `mcp`, else `cli`), pick
+  the narrowest permissions, compute the hash, try it in scratch, write the card, finish.
+
+## Using approved MCP add-ons
+
+- Cards with `kind = "mcp"` that are switched on in Settings › Add-ons (asked through
+  `ixel_mat.addons.enabled_cards("mcp")`; a missing module means none) are offered to the agent: the prompt
+  lists each one's tools (name, description, input schema), found by starting the server once per run.
+- New action `use_tool` (`addon`, `tool`, `arguments`): calls that tool over MCP stdio and returns its text
+  (pictures it returns go to the model like `view_file`'s). The server is started from the card's one
+  `commands` entry as an argv list, never a shell, `{addon}` filled with the card's installed files and
+  `{output}` with the run's workspace; with the key-free environment; under `sandbox-exec` on macOS with the
+  network allowed only when the card says `network = true`, and writes only in the workspace (`files =
+  "output-folder"` or `"chosen-folder"`) or nowhere (`"none"`). The first call to each add-on in a run asks
+  for approval (showing the add-on, the tool and its arguments); "Always allow" covers that add-on for the
+  rest of the run. Servers are stopped when the run ends.
