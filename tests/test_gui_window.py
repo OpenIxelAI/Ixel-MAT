@@ -720,6 +720,18 @@ def test_the_mac_app_saves_downloads_to_the_downloads_folder():
     assert swift.count("download.delegate = self") >= 2  # a download that starts from a link, and from a response
     assert "activateFileViewerSelecting" not in swift  # the Downloads stack bounces; Finder isn't brought up
 
+    # A response becomes a download only for Ixel's own page in the main frame; a frame or another site is cancelled
+    start = swift.index("decidePolicyFor navigationResponse")
+    policy = swift[start:swift.index("func webView(", start)]
+    for rule in ("isForMainFrame", "isIxelPage(navigationResponse.response.url)", "decisionHandler(.cancel)",
+                 "decisionHandler(.download)"):
+        assert rule in policy, rule
+
+    # A name counts as taken if anything is there, a broken symlink too, and a symlink is never followed
+    start = swift.index("private func isTaken")
+    taken = swift[start:swift.index("\n    }", start)]
+    assert "lstat(" in taken and "destinationOfSymbolicLink" in taken
+
 
 def test_the_mac_app_is_built_for_the_macos_it_needs():
     """WKDownload came in macOS 11.3, and make-app.sh builds for the version Info.plist says the app needs."""

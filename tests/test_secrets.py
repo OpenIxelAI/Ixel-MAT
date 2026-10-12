@@ -666,10 +666,11 @@ def is_tool(argv, name):
 class Tools:
     """whoami and icacls as secrets runs them (_run_tool): each answers with (exit code, what it printed), or
     raises what it's given when that's an exception. Every call is kept, and whether the path icacls was given
-    was there at the time."""
+    was there at the time. icacls= answers every icacls call, and inheritance= (when given) the ones that take
+    away what a path inherits instead."""
 
-    def __init__(self, whoami=(0, WHOAMI), icacls=(0, DONE)):
-        self.whoami, self.icacls = whoami, icacls
+    def __init__(self, whoami=(0, WHOAMI), icacls=(0, DONE), inheritance=None):
+        self.whoami, self.icacls, self.inheritance = whoami, icacls, inheritance
         self.calls, self.present = [], []
 
     def __call__(self, argv):
@@ -678,17 +679,24 @@ class Tools:
         if not is_tool(argv, "whoami.exe"):
             self.present.append(Path(argv[1]).exists())
             answer = self.icacls
+            if self.inheritance is not None and "/inheritance:r" in argv:
+                answer = self.inheritance
         if isinstance(answer, BaseException):
             raise answer
         return answer
 
     def grants(self):
-        return [argv for argv in self.calls if is_tool(argv, "icacls.exe")]
+        """The icacls calls that give the account its entry: the first of the two each path gets."""
+        return [argv for argv in self.calls if is_tool(argv, "icacls.exe") and "/grant:r" in argv]
+
+    def inheritance_removals(self):
+        """The icacls calls that take away what a path inherits: the second of the two."""
+        return [argv for argv in self.calls if is_tool(argv, "icacls.exe") and "/inheritance:r" in argv]
 
 
 def on_windows(monkeypatch, **answers):
     """This run as Windows sees it: sys.platform says so, nobody has asked whoami yet, and whoami and icacls are
-    Tools (answers: whoami=, icacls=). No real program runs."""
+    Tools (answers: whoami=, icacls=, inheritance=). No real program runs."""
     tools = Tools(**answers)
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(secrets, "_USER", None)
@@ -746,36 +754,51 @@ def test_the_icacls_call_for_a_file_is_an_argv_list_with_the_path_as_one_item(mo
     monkeypatch.setenv("SystemRoot", str(tmp_path / "Win"))
     path = tmp_path / "Some One" / "keys.enc"
     argv = secrets.owner_only_argv(path, SID)
-    assert isinstance(argv, list) and len(argv) == 11
+    assert isinstance(argv, list) and len(argv) == 10
     assert Path(argv[0]) == tmp_path / "Win" / "System32" / "icacls.exe"
     assert argv[1] == str(path)
-    assert argv[2:] == ["/inheritance:r", *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:F"]
+    assert argv[2:] == [*REMOVE_DEFAULTS, "/grant:r", f"*{SID}:F"]
+    assert "/inheritance:r" not in argv  # that's the second call, once this one has worked
 
 
 def test_the_icacls_call_for_a_folder_grants_what_is_made_in_it_too(tmp_path):
     argv = secrets.owner_only_argv(tmp_path, SID, folder=True)
-    assert argv[1:] == [str(tmp_path), "/inheritance:r", *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:(OI)(CI)F"]
+    assert argv[1:] == [str(tmp_path), *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:(OI)(CI)F"]
+
+
+def test_the_icacls_call_that_takes_away_what_a_path_inherits_is_an_argv_list_too(monkeypatch, tmp_path):
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Win"))
+    path = tmp_path / "Some One" / "keys.enc"
+    argv = secrets.no_inheritance_argv(path)
+    assert isinstance(argv, list) and len(argv) == 3
+    assert Path(argv[0]) == tmp_path / "Win" / "System32" / "icacls.exe"
+    assert argv[1:] == [str(path), "/inheritance:r"]
 
 
 def test_the_programs_are_found_in_windows_own_folder_even_without_systemroot(monkeypatch, tmp_path):
     monkeypatch.delenv("SystemRoot", raising=False)
     assert secrets.owner_only_argv(tmp_path, SID)[0].startswith("C:\\Windows")
     assert secrets.owner_only_argv(tmp_path, SID)[0].endswith("icacls.exe")
+    assert secrets.no_inheritance_argv(tmp_path)[0].startswith("C:\\Windows")
+    assert secrets.no_inheritance_argv(tmp_path)[0].endswith("icacls.exe")
 
 
 def test_a_file_is_limited_to_the_users_account_on_windows(monkeypatch, tmp_path):
     tools = on_windows(monkeypatch)
     path = tmp_path / "keys.enc"
     assert secrets.secure_owner_only(path) is True
-    assert [Path(argv[0]).name for argv in tools.calls] == ["whoami.exe", "icacls.exe"]
+    assert [Path(argv[0]).name for argv in tools.calls] == ["whoami.exe", "icacls.exe", "icacls.exe"]
     assert tools.calls[0][1:] == ["/user", "/fo", "csv", "/nh"]
-    assert tools.calls[1][1:] == [str(path), "/inheritance:r", *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:F"]
+    assert tools.calls[1][1:] == [str(path), *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:F"]  # the grant comes first
+    assert tools.calls[2][1:] == [str(path), "/inheritance:r"]
 
 
 def test_a_folder_is_limited_with_inheritance_for_what_is_made_in_it(monkeypatch, tmp_path):
     tools = on_windows(monkeypatch)
     assert secrets.secure_owner_only(tmp_path, folder=True) is True
-    assert tools.calls[-1][1:] == [str(tmp_path), "/inheritance:r", *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:(OI)(CI)F"]
+    assert [Path(argv[0]).name for argv in tools.calls] == ["whoami.exe", "icacls.exe", "icacls.exe"]
+    assert tools.calls[1][1:] == [str(tmp_path), *REMOVE_DEFAULTS, "/grant:r", f"*{SID}:(OI)(CI)F"]
+    assert tools.calls[2][1:] == [str(tmp_path), "/inheritance:r"]
 
 
 def test_whoami_is_asked_once_and_its_answer_kept(monkeypatch, tmp_path):
@@ -783,7 +806,7 @@ def test_whoami_is_asked_once_and_its_answer_kept(monkeypatch, tmp_path):
     assert secrets.secure_owner_only(tmp_path / "keys.enc") and secrets.secure_owner_only(tmp_path, folder=True)
     assert secrets.user_sid() == WHO
     assert len([argv for argv in tools.calls if is_tool(argv, "whoami.exe")]) == 1
-    assert len(tools.grants()) == 2
+    assert len(tools.grants()) == 2 and len(tools.inheritance_removals()) == 2
 
 
 def test_a_whoami_that_failed_is_asked_again(monkeypatch):
@@ -809,7 +832,7 @@ def test_the_programs_get_no_window_no_input_ten_seconds_and_none_of_the_saved_k
     monkeypatch.setattr(secrets, "_USER", None)
     monkeypatch.setattr(secrets.subprocess, "run", run)
     assert secrets.secure_owner_only(tmp_path / "keys.enc") is True
-    assert [Path(argv[0]).name for argv, _ in seen] == ["whoami.exe", "icacls.exe"]
+    assert [Path(argv[0]).name for argv, _ in seen] == ["whoami.exe", "icacls.exe", "icacls.exe"]
     for argv, kwargs in seen:
         assert isinstance(argv, list) and not kwargs.get("shell")
         assert kwargs["creationflags"] == 0x08000000
@@ -826,6 +849,33 @@ def test_a_grant_that_fails_is_logged_and_reported_not_raised(monkeypatch, tmp_p
         assert secrets.secure_owner_only(path) is False
     assert str(path) in caplog.text
     assert len(tools.grants()) == 1
+    assert tools.inheritance_removals() == []  # what it inherits stays, so the account isn't left without access
+
+
+@pytest.mark.parametrize("failure", FAILURES)
+def test_an_inheritance_removal_that_fails_after_the_grant_is_logged_and_reported_not_raised(
+        monkeypatch, tmp_path, caplog, failure):
+    tools = on_windows(monkeypatch, inheritance=failure)
+    path = tmp_path / "keys.enc"
+    with caplog.at_level("WARNING", logger="ixel_mat.config.secrets"):
+        assert secrets.secure_owner_only(path) is False
+    assert str(path) in caplog.text and "removing what it inherits" in caplog.text
+    assert [Path(argv[0]).name for argv in tools.calls] == ["whoami.exe", "icacls.exe", "icacls.exe"]
+    assert "/grant:r" in tools.calls[1] and "/inheritance:r" not in tools.calls[1]  # the grant was made first
+    assert tools.calls[2][1:] == [str(path), "/inheritance:r"]
+
+
+def test_a_grant_that_fails_says_so_and_one_that_inherits_says_what_failed(monkeypatch, tmp_path, caplog):
+    path = tmp_path / "keys.enc"
+    on_windows(monkeypatch, icacls=(5, "Access is denied.\r\n"))
+    with caplog.at_level("WARNING", logger="ixel_mat.config.secrets"):
+        assert secrets.secure_owner_only(path) is False
+    assert "icacls exited with 5)" in caplog.text
+    caplog.clear()
+    on_windows(monkeypatch, inheritance=(5, "Access is denied.\r\n"))
+    with caplog.at_level("WARNING", logger="ixel_mat.config.secrets"):
+        assert secrets.secure_owner_only(path) is False
+    assert "icacls exited with 5, removing what it inherits)" in caplog.text
 
 
 @pytest.mark.parametrize("failure", [
@@ -855,7 +905,11 @@ def test_saving_a_key_on_windows_limits_the_folder_then_the_file(keychain, monke
     grants = tools.grants()
     assert [argv[1] for argv in grants] == [str(keys_file().parent), str(keys_file())]
     assert grants[0][-1] == f"*{SID}:(OI)(CI)F" and grants[1][-1] == f"*{SID}:F"
-    assert tools.present == [True, True]  # keys.enc was there when it was limited
+    # each path gets its grant, then has what it inherits taken away, the folder before the file
+    assert [(argv[1], "/grant:r" in argv) for argv in tools.calls[1:]] == [
+        (str(keys_file().parent), True), (str(keys_file().parent), False),
+        (str(keys_file()), True), (str(keys_file()), False)]
+    assert tools.present == [True] * 4  # keys.enc was there when it was limited
     assert secrets.saved_names() == {"OPENAI_API_KEY"}
 
 
@@ -865,6 +919,7 @@ def test_keys_are_saved_even_when_every_grant_fails(keychain, monkeypatch, failu
     secrets.save_secret("OPENAI_API_KEY", "sk-one")
     secrets.save_secret("XAI_API_KEY", "xai-two")
     assert len(tools.grants()) == 4  # the folder and the file, twice
+    assert tools.inheritance_removals() == []  # a grant that failed is never followed by that
     assert secrets.saved_names() == {"OPENAI_API_KEY", "XAI_API_KEY"}
     keychain.restart()  # the next run reads them back
     assert secrets.load_env() == {"OPENAI_API_KEY": "sk-one", "XAI_API_KEY": "xai-two"}
