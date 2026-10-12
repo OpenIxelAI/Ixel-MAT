@@ -291,7 +291,9 @@ def label_sddl(path: str | os.PathLike) -> str:
                 descriptor.value, _SDDL_REVISION_1, _LABEL_SECURITY_INFORMATION, ctypes.byref(string), None):
             raise _failed(api, "ConvertSecurityDescriptorToStringSecurityDescriptorW")
         try:
-            return ctypes.wstring_at(string.value) if string.value else ""
+            text = ctypes.wstring_at(string.value) if string.value else ""
+            # A label list with no entries ('S:', what taking our label off leaves) is no label, like ''
+            return text if _LABEL_ACE.search(text) else ""
         finally:
             api.LocalFree(string.value)
     finally:
@@ -701,8 +703,10 @@ def _self_test() -> None:
             raise SetupError("the test command couldn't write in its temp folder")
         if (outside / "denied.txt").exists():
             raise SetupError("the test command could write outside the workspace")
-        if label_sddl(work) != before:
-            raise SetupError("the workspace's label wasn't put back after the test command")
+        after = label_sddl(work)
+        if after != before:
+            raise SetupError(f"the workspace's label wasn't put back after the test command ({before!r} "
+                             f"before, {after!r} after)")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

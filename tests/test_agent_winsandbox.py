@@ -553,6 +553,13 @@ def test_label_sddl_reads_the_label_or_nothing(api, tmp_path):
     assert api.bad == [] and api.memory == set()  # what was allocated was freed
 
 
+def test_label_sddl_counts_an_empty_label_list_as_none(api, tmp_path):
+    # What taking our label off leaves behind reads as 'S:', and that's the same as no label at all
+    api.labels[os.fspath(tmp_path)] = "S:"
+    assert winsandbox.label_sddl(tmp_path) == ""
+    assert api.bad == [] and api.memory == set()
+
+
 def test_label_sddl_says_which_call_failed(api, tmp_path):
     api.fail["GetNamedSecurityInfoW"] = (5, None)
     with pytest.raises(winsandbox.SetupError) as raised:
