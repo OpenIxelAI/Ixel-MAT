@@ -10,6 +10,8 @@ Under ~/.config/ixel-mat/agent/ (the folder Ixel's config uses, on Windows too):
   sessions/<id>.json            each run: its goal, model, workspace, steps, approvals and usage
   uploads/<run id>/<name>       files the person attached to a run (never in the workspace; at most 10 a
                                 run, 50 MB each; the agent reaches them as upload:NAME)
+  scratch/<owner>-<repo>/       a GitHub repo fetched for an add-on card (made by fetch_repo, private; the
+                                agent reaches it as scratch:<owner>-<repo>)
   allow.json                    the commands you always allow, by workspace
 
 Every file is written the way Ixel writes its config (private to you, and atomically). The allowlist never
@@ -155,8 +157,8 @@ def safe_upload_name(name: object) -> str:
 
 
 class AgentStore:
-    """The agent's files: persona, user and memory, skills, sessions, uploads and the allowlist. root
-    defaults to ~/.config/ixel-mat/agent; tests give a folder of their own."""
+    """The agent's files: persona, user and memory, skills, sessions, uploads, fetched repos and the
+    allowlist. root defaults to ~/.config/ixel-mat/agent; tests give a folder of their own."""
 
     def __init__(self, root: Path | None = None):
         self.root = Path(root) if root is not None else default_root()
@@ -428,6 +430,13 @@ class AgentStore:
         folder = self.uploads_dir(run_id)
         with _LOCK:
             shutil.rmtree(folder, ignore_errors=True)
+
+    # ── Fetched repos ────────────────────────────────────────────────────────
+
+    def scratch_dir(self) -> Path:
+        """The folder holding the GitHub repos the agent fetched, scratch/<owner>-<repo>/. It isn't made here
+        (and isn't in _ensure): cards.fetch_repo makes it, private, the first time it's needed."""
+        return self.root / "scratch"
 
     # ── The allowlist ────────────────────────────────────────────────────────
 
