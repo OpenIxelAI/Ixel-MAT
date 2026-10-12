@@ -45,6 +45,7 @@ let panel = {
 };
 let mode = "review";
 let modePicked = false;  // the person chose a mode here, rather than taking the default
+let diagram = false;     // the Diagram button is pressed: questions are drawn as a diagram, not sent to the panel
 // A follow-up carries the last few questions and the panel's answers to them
 const MAX_EARLIER = 3;
 const EARLIER_CHARS = 8000;  // the server clips them further, and marks what it cut
@@ -218,6 +219,20 @@ function renderPanel() {
     el("span", { class: "id" }, own ? `decided by ${triage.via}` : triage.official ? triage.host
       : `not TypeSafe: ${triage.host}`)));
   }
+  renderDiagram();
+}
+
+// The Diagram button is only there while the Diagram Design add-on is on
+const diagramAvailable = () => Boolean(panel.addons && panel.addons.diagram);
+
+function renderDiagram() {
+  const button = $("#diagram-toggle");
+  if (!button) return;  // a page without the button
+  const offered = diagramAvailable();
+  if (!offered) diagram = false;  // switched off in Settings: it can't stay pressed
+  button.hidden = !offered;
+  button.classList.toggle("on", diagram);
+  button.setAttribute("aria-pressed", String(diagram));
 }
 
 function saverHint() {
@@ -417,7 +432,9 @@ function renderFollowup() {
     : n === 1
     ? "Follow-up: the panel also sees your last question and its answer."
     : `Follow-up: the panel also sees your last ${n} questions and their answers.`;
-  $("#question").placeholder = n
+  $("#question").placeholder = diagram
+    ? "Say what to draw: how a request moves through your services, the steps of a process…"
+    : n
     ? "Ask a follow-up…"
     : "Ask the panel anything. Paste code, an error, or a decision you're weighing.";
 }
@@ -1282,6 +1299,219 @@ function startHandoff(request) {
   else card.explain();
 }
 
+// ── Diagram: one HTML file, drawn in your brand (the Diagram Design add-on) ───
+
+const DIAGRAM_PREFIX = /^\/diagram\b/i;
+const DIAGRAM_EXAMPLE = "/diagram how a request moves from the browser through our services to the database";
+
+const money = (usd) => (usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`);
+const tokens = (n) => n.toLocaleString("en-US");
+
+// "3,421 in · 812 out · $0.04" for one call; token counts the model didn't report are estimates
+function usageText(usage) {
+  if (!usage) return "";
+  const about = usage.estimated ? "about " : "";
+  const read = (usage.input_tokens || 0) + (usage.cache_read_tokens || 0) + (usage.cache_write_tokens || 0);
+  const parts = [`${about}${tokens(read)} in`, `${about}${tokens(usage.output_tokens || 0)} out`];
+  if (typeof usage.cost_usd === "number") parts.push(money(usage.cost_usd));
+  return parts.join(" · ");
+}
+
+// Open or Show in folder: Ixel does it on this computer, and a failure is said in a toast
+async function diagramAction(button, path, id, title, problem) {
+  button.disabled = true;
+  try {
+    const text = problem(await postJSON(path, { id }));
+    if (text) toast(title, text);
+  } catch (e) {
+    toast(title, e.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// The diagram as it's made: which model, the check's findings, then the file itself in a sandboxed frame.
+// Not a Turn: it isn't kept with the conversation, and the panel never sees it as an earlier question.
+class DiagramCard {
+  constructor(topic, question) {
+    this.topic = topic;
+    this.question = question;
+    this.label = "The model";
+    this.done = false;   // the diagram arrived
+    this.note = "";      // why it didn't: an error, or stopped
+    this.status = el("span", { class: "status", "aria-live": "polite" });
+    this.calls = el("ul", { class: "diagram-calls", "aria-label": "Model calls" });
+    this.checks = el("div", { class: "diagram-checks" });
+    this.slot = el("div", { class: "diagram-result" });
+    this.el = el("article", { class: "turn diagram-turn running" },
+      el("div", { class: "you" }, el("div", { class: "bubble" }, question)),
+      el("div", { class: "reply" },
+        el("div", { class: "reply-head" },
+          el("span", { class: "avatar" }, el("img", { src: "/mark.svg", alt: "", width: "16", height: "16" })),
+          el("span", { class: "who" }, "Diagram"), this.status),
+        this.calls, this.checks, this.slot));
+    this.setStatus("Connecting…", true);
+  }
+
+  setStatus(text, working = false) {
+    const label = el("span", { class: "status-text" }, text);
+    this.status.replaceChildren(...(working ? [el("i", { class: "spin", "aria-hidden": "true" }), label] : [label]));
+  }
+
+  handle(kind, data) {
+    switch (kind) {
+      case "start":
+        this.label = data.label || data.agent || this.label;
+        this.setStatus(`${this.label} is drawing a ${data.kind} diagram…`, true);
+        break;
+      case "model":
+        this.addCall(data);
+        this.setStatus("Checking the diagram…", true);
+        break;
+      case "check":
+        this.addCheck(data);
+        break;
+      case "retry":
+        this.setStatus("Fixing what the check found…", true);
+        break;
+      case "final":
+        this.complete(data.diagram || {});
+        break;
+      case "error":
+        this.fail(data.message || "The diagram couldn't be made.");
+        break;
+      default:
+        break;
+    }
+  }
+
+  // One model call: how long it took and what it used
+  addCall(d) {
+    const parts = [this.label, d.attempt > 1 ? "second draft" : "first draft",
+      typeof d.ms === "number" ? secs(d.ms) : "", usageText(d.usage)].filter(Boolean);
+    this.calls.append(el("li", { title: d.model || null }, icon("pulse"), el("span", {}, parts.join(" · "))));
+  }
+
+  // What the add-on's own check said about the file, green when it passed
+  addCheck(d) {
+    const messages = Array.isArray(d.messages) ? d.messages : [];
+    const state = !d.ran ? "skipped" : d.ok ? "ok" : "bad";
+    const result = { skipped: "not run", ok: "passed", bad: "found problems" }[state];
+    this.checks.append(el("div", { class: `diagram-check ${state}` },
+      el("div", { class: "diagram-check-head" }, icon(state === "ok" ? "check" : state === "bad" ? "alert" : "info"),
+        el("span", {}, `${d.attempt > 1 ? "Check on the second draft" : "Check"}: ${result}`)),
+      messages.length ? el("ul", {}, messages.map((m) => el("li", {}, String(m)))) : null));
+  }
+
+  complete(d) {
+    const id = String(d.id || "");
+    if (!/^[0-9a-f]{32}$/.test(id)) {  // it only ever goes in the frame's address as 32 hex characters
+      this.fail("Ixel finished the diagram but didn't say where it is.");
+      return;
+    }
+    this.done = true;
+    const check = d.check || {};
+    if (!this.checks.childElementCount) this.addCheck({ attempt: 1, ...check });
+    const state = check.ran === false ? "skipped" : check.ok ? "ok" : "bad";
+    const verdict = { skipped: "not checked", ok: "passed the check", bad: "still has problems the check found" }[state];
+    const openButton = el("button", { type: "button", class: "btn" }, icon("play"), "Open");
+    const folderButton = el("button", { type: "button", class: "btn" }, icon("folder"), "Show in folder");
+    openButton.addEventListener("click", () => diagramAction(openButton, "/api/diagram/open", id,
+      "Couldn't open the diagram",
+      (r) => (r.opened ? "" : `Ixel couldn't start a browser. The file is ${r.file || d.file || d.name}.`)));
+    folderButton.addEventListener("click", () => diagramAction(folderButton, "/api/diagram/reveal", id,
+      "Couldn't show the folder",
+      (r) => (r.shown ? "" : `Ixel couldn't open it. The diagram is in ${r.folder || d.file || d.name}.`)));
+    this.slot.replaceChildren(
+      el("iframe", { class: "diagram-frame", sandbox: "allow-scripts", src: `/diagram/${id}`,
+        referrerpolicy: "no-referrer", title: "Diagram" }),
+      el("div", { class: "diagram-foot" },
+        el("span", { class: "diagram-file", title: d.file || null }, icon("file"), el("span", {}, d.name || "diagram.html")),
+        el("span", { class: `diagram-verdict ${state}` }, verdict),
+        el("span", { class: "spacer" }),
+        openButton, folderButton));
+    const ms = (Array.isArray(d.calls) ? d.calls : []).reduce((sum, c) => sum + (Number(c.ms) || 0), 0);
+    this.setStatus([d.kind ? `${d.kind} diagram` : "Diagram", ms ? secs(ms) : ""].filter(Boolean).join(" · "));
+  }
+
+  fail(message) {
+    this.note = message;
+    this.el.classList.add("failed");
+    this.setStatus("Couldn't draw it");
+    this.slot.append(el("div", { class: "notice error", role: "alert" }, icon("alert"), el("span", {}, message)));
+  }
+
+  stop(message) {
+    this.note = message;
+    this.setStatus("Stopped");
+    this.slot.append(el("div", { class: "notice" }, icon("info"), el("span", {}, message)));
+  }
+}
+
+// A diagram instead of a review: one model draws it from the question alone, and the add-on checks the file.
+// `original` is what was typed, put back in the box if nothing came of it.
+async function askDiagram(question, original) {
+  const box = $("#question");
+  if (!diagramAvailable()) {
+    showNotice(["Diagram Design is off. Turn it on in Settings, then ask again. ",
+      el("button", { type: "button", class: "linkish", onclick: openSettings }, "Open Settings")], "info");
+    return;
+  }
+  if (!question) {
+    showNotice(`Say what to draw after /diagram, for example: ${DIAGRAM_EXAMPLE}`, "info");
+    return;
+  }
+  if (question.length > MAX_QUESTION_CHARS) {
+    showNotice(TOO_LONG(question.length), "error");
+    return;
+  }
+  if ($("#material").value.trim() || attached.length) {  // only the question goes to be drawn
+    showNotice("A diagram is drawn from your question alone: the attached code and pictures aren't sent. Take " +
+      "them out first, or switch Diagram off to ask the panel.", "info");
+    return;
+  }
+  hideNotice();
+  const topic = active || newTopic(question);
+  for (const t of topic.turns) t.setExpanded(false);
+  const card = new DiagramCard(topic, question);
+  topic.thread.append(card.el);
+  const controller = new AbortController();
+  current = { turn: card, controller };
+  show(topic);
+  reveal(card.el);
+  box.value = "";
+  grow();
+  setBusy(true);
+  const agent = (panel.agents.find((a) => a.ready) || {}).name || null;  // none: Ixel says why
+  try {
+    const res = await api("/api/diagram", {
+      method: "POST", signal: controller.signal, body: JSON.stringify({ question, agent }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+    await readEvents(res, ({ kind, data = {} }) => follow(card, () => card.handle(kind, data)));
+    if (!card.done && !card.note) card.fail("The connection closed before the diagram was finished.");
+  } catch (e) {
+    if (e.name === "AbortError") card.stop("Stopped. The model call was cancelled.");
+    else card.fail(e.message);
+  } finally {
+    current = null;
+    card.el.classList.remove("running");
+    setBusy(false);
+    if (!card.done && !box.value.trim()) {  // so it can be asked again
+      box.value = original;
+      grow();
+    }
+    renderConvos();
+    if (panelStale) {
+      panelStale = false;
+      settingsChanged();
+    }
+  }
+}
+
 let starting = false;  // waiting for pictures to finish attaching before asking
 
 async function ask() {
@@ -1302,6 +1532,12 @@ async function ask() {
     return;
   }
   if (stillReading()) return;
+  const wanted = box.value.trim();
+  const slashed = DIAGRAM_PREFIX.test(wanted);
+  if (slashed || (diagram && diagramAvailable())) {  // drawn as a diagram, not reviewed by the panel
+    await askDiagram(slashed ? wanted.replace(DIAGRAM_PREFIX, "").trim() : wanted, box.value);
+    return;
+  }
   if (attached.some((p) => !p.id)) {  // still being made smaller and sent to Ixel (well under a second each)
     const before = failures;
     starting = true;
@@ -2046,6 +2282,14 @@ $("#open-sidebar").addEventListener("click", openDrawer);
 $("#close-sidebar").addEventListener("click", closeDrawer);
 $("#scrim").addEventListener("click", closeDrawer);
 $("#attach-toggle").addEventListener("click", toggleAttach);
+const diagramToggle = $("#diagram-toggle");
+if (diagramToggle) {  // there when the page has the button
+  diagramToggle.addEventListener("click", () => {
+    diagram = !diagram;
+    renderDiagram();
+    renderFollowup();  // the box says what it's for
+  });
+}
 $("#picture-add").addEventListener("click", () => $("#picture-file").click());
 $("#picture-file").addEventListener("change", (e) => {
   addFiles([...e.target.files]);
