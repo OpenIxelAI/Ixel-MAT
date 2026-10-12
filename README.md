@@ -23,6 +23,26 @@ Build), with no API key.
 **[ixelai.com/ixel-mat](https://ixelai.com/ixel-mat/)** · [Docs](https://ixelai.com/docs/) ·
 [Privacy](https://ixelai.com/docs/privacy/)
 
+## What it is, and what it isn't
+
+- Ixel has no account and no telemetry. Your questions go only to the AI services you set up, and each key stays
+  on your computer. Once a day it checks the repository you installed it from for updates, and installs nothing;
+  you can turn that off.
+- It is not a model and not a hosted service. It uses your own API keys, subscription sign-ins and local models,
+  so calls are billed to you or count against your plan.
+- The panel agreeing doesn't make an answer right. Models can share the same mistake, so check what matters.
+- It acts only when you ask. The panel and reviews only answer; an agent you set up yourself keeps whatever tools
+  it has. The Agent (beta) asks before it edits a file, runs a command or downloads a repository, and, with
+  Computer access on, before a screenshot or opening a file, link or app. A command you approved with "Always
+  allow" runs again without asking, while Computer access is off.
+- It is not an unattended agent. A run starts when you start it, pauses whenever it needs your approval, and ends
+  at a step limit (25 by default). The beta has no cron jobs and no messaging channels. The Board's Merge pushes
+  nothing.
+- The Agent's sandbox has limits. A command it runs has no network and can write only in the workspace and the
+  temp folder, but only on macOS and only while Computer access is off; it can still read your files. Elsewhere,
+  or with Computer access on, an approved command runs as you and can do anything you can. The approval card says
+  which.
+
 ## Install
 
 Windows, in a normal PowerShell window (not "Run as administrator"):
