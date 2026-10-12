@@ -1284,20 +1284,58 @@ function askEffortRow(asked, worker) {
 }
 
 // Who takes over when a model hits its usage limit: the next best models, from Handoff's benchmark rankings, that
-// this computer has. Shown before the yes, with a switch; approve sends exactly the list shown (Handoff seals it),
-// so a run goes on with the next model, and says so, instead of stopping with nothing done. Nothing is shown by a
-// Handoff that can't say, and nothing is sent then.
+// this computer has. Shown before the yes, with a switch, and one toggle per agent in the list (`state.off` holds the
+// ones unticked; an entry "codex:gpt-6-astra" is agent "codex"); approve sends exactly the list shown (Handoff seals
+// it), so a run goes on with the next model, and says so, instead of stopping with nothing done. Nothing is shown by
+// a Handoff that can't say, and nothing is sent then. The toggles sit beside the line, not in it (its label is the
+// sentence alone).
 function fallbackRow(asked, t, agent, kindNow, modelsNow) {
-  const state = asked.fallback || (asked.fallback = { on: true, list: [], words: "", key: "", listKey: "" });
+  const state = asked.fallback
+    || (asked.fallback = { on: true, list: [], words: "", key: "", listKey: "", off: [] });
+  state.off = state.off || [];
+  const agentOf = (entry) => entry.split(":")[0];
+  const kept = () => state.list.filter((entry) => !state.off.includes(agentOf(entry)));
   const box = el("input", { type: "checkbox", id: "needs-fallback", "data-key": "needs-fallback" });
   box.checked = state.on;
-  box.addEventListener("change", () => { state.on = box.checked; });
+  box.addEventListener("change", () => {
+    state.on = box.checked;
+    if (state.on && !kept().length) state.off = [];  // (switched on with every agent unticked: they all come back)
+  });
   const words = el("span", {});
   const row = el("label", { class: "fallback-row", for: "needs-fallback", hidden: true }, box, words);
+  const agents = el("div", { class: "fallback-agents", role: "group", "aria-label": "Agents to go on with",
+    hidden: true });
+  let drawn = null;  // the agents the toggles were built for: rebuilt only when these change, so focus stays put
+  let chips = [];  // [agent, checkbox] of each toggle
+  const chipFor = (name, i) => {
+    const input = el("input", { type: "checkbox", id: `needs-fallback-agent-${i}`,
+      "data-key": `needs-fallback-agent:${name}`, "aria-label": `Go on with ${name}` });
+    input.addEventListener("change", () => {
+      state.off = state.off.filter((n) => n !== name);
+      if (!input.checked) state.off.push(name);
+    });
+    return [name, input];
+  };
   // (the line stays as it is while the list for a new pick comes, so the form doesn't jump under the pointer)
   const draw = () => {
-    row.hidden = !state.list.length || kindNow() === "image";
-    words.textContent = `If a model hits its usage limit, go on with ${state.words || state.list.join(", then ")}`;
+    const left = kept();
+    const gone = !state.list.length || kindNow() === "image";
+    row.hidden = gone;
+    agents.hidden = gone;
+    const trimmed = left.length > 0 && left.length < state.list.length;  // (something unticked, something left)
+    const shown = trimmed ? left.join(", then ") : state.words || state.list.join(", then ");
+    words.textContent = `If a model hits its usage limit, go on with ${shown}`;
+    box.checked = state.on && left.length > 0;  // (every agent unticked reads as the switch off)
+    const names = [...new Set(state.list.map(agentOf))];
+    if (names.join("\n") !== drawn) {
+      drawn = names.join("\n");
+      chips = names.map(chipFor);
+      agents.replaceChildren(...chips.map(([name, input]) => el("label", { class: "fallback-agent" }, input, name)));
+    }
+    for (const [name, input] of chips) {
+      input.checked = !state.off.includes(name);
+      input.disabled = !state.on;
+    }
   };
   let asking = 0;
   let pending = Promise.resolve();  // the list for what's picked now, on its way
@@ -1308,6 +1346,7 @@ function fallbackRow(asked, t, agent, kindNow, modelsNow) {
     if (key === state.key) { draw(); return pending; }
     state.key = key;
     if (kind === "image" || !agent) {
+      if (key !== state.listKey) state.off = [];  // (a new pick: the choice starts over)
       state.list = [];
       state.listKey = key;
       draw();
@@ -1318,19 +1357,26 @@ function fallbackRow(asked, t, agent, kindNow, modelsNow) {
     pending = getJSON(`/api/board/fallbacks?${query}`)
       .then((found) => {
         if (mine !== asking) return;  // (something newer was picked meanwhile)
+        if (key !== state.listKey) state.off = [];  // (a new pick starts over; a redraw, the same key, keeps it)
         state.list = Array.isArray(found.fallbacks) ? found.fallbacks.filter((f) => typeof f === "string").slice(0, 5) : [];
         state.words = typeof found.words === "string" ? found.words : "";
       })
-      .catch(() => { if (mine === asking) state.list = []; })  // (a run without fallbacks stops at a limit, as before)
+      .catch(() => {  // (a run without fallbacks stops at a limit, as before)
+        if (mine !== asking) return;
+        if (key !== state.listKey) state.off = [];
+        state.list = [];
+      })
       .finally(() => { if (mine === asking) { state.listKey = key; draw(); } });
     return pending;
   };
   state.key = "";
   refresh();
-  // Only the list shown for what's picked now: approve seals it
-  const args = () => (state.on && state.list.length && state.listKey === state.key && kindNow() !== "image"
-    ? { fallbacks: [...state.list] } : {});
-  return { row, refresh, args };
+  // Only the list shown for what's picked now, less the agents unticked: approve seals it
+  const args = () => {
+    const left = kept();
+    return state.on && left.length && state.listKey === state.key && kindNow() !== "image" ? { fallbacks: left } : {};
+  };
+  return { row, agents, refresh, args };
 }
 
 // What the person typed or picked lives in `asked.draft`, so a redraw (or a refusal) keeps it
@@ -1388,7 +1434,7 @@ function needsForm(asked, t) {
     }
     const backup = fallbackRow(asked, t, agent, kindNow, () => (picker && kindNow() === "edit" ? picker.args().models : null));
     form.addEventListener("change", backup.refresh);
-    form.append(backup.row);
+    form.append(backup.row, backup.agents);
     read = () => {
       const kind = kindNow();
       const level = askEffort && asks(kind) ? askEffort.level() : "";

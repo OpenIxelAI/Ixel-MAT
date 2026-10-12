@@ -1168,6 +1168,16 @@ details.original > summary:hover { color: var(--text-2); }
 .needs .fallback-row { display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .needs .fallback-row[hidden] { display: none; }
 .needs .fallback-row input { margin: 2px 0 0; flex: none; }
+.needs .fallback-agents { display: flex; flex-wrap: wrap; gap: 6px; margin-left: 22px; font-size: 12px; }
+.needs .fallback-agents[hidden] { display: none; }
+.needs .fallback-agent {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--line);
+  border-radius: 999px; color: var(--muted); font-size: 12px; line-height: 1.4; cursor: pointer;
+}
+.needs .fallback-agent input { margin: 0; flex: none; accent-color: var(--accent-fill); }
+.needs .fallback-agent:has(input:checked) { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text); }
+.needs .fallback-agent:has(input:disabled) { opacity: 0.5; cursor: default; }
+.needs .fallback-agent:focus-within { outline: 2px solid var(--accent-line); outline-offset: 1px; }
 .needs .model-row small { color: var(--muted); font-size: 12px; }
 .needs .effort-row { display: flex; flex-direction: column; gap: 6px; }
 .needs .effort-row[hidden] { display: none; }
