@@ -1,11 +1,27 @@
 """
 One agent run: ask for an action, do it, and show its result on the next turn.
 
-Reads happen at once. Writes and commands wait for the person, unless a command is on this workspace's
-allowlist. The run stays in memory while it works, and saves its full steps and approvals after each change.
+Reads happen at once, and a reply may hold up to 5 of them (list_dir, read_file, search, load_skill): they run
+together and each is recorded as its own step, with the same 'batch' (the number of the first). A batch never
+takes the run's last step: at most as many reads run as there are steps left, less one, so the model always
+gets a turn to finish; with one step left no read runs and the model is told to use finish. Writes and
+commands wait for the person, unless a command is on this workspace's allowlist. The run stays in memory
+while it works, and saves its full steps and approvals once after each change, written in a thread.
 With Computer access on for this run, every command asks, and screenshots and opening apps, files or links
 ask too. Paths can reach the home folder and commands run without the sandbox.
 The page gets the same run with long results cut to 4 KB; the model and the saved session keep more.
+
+The run keeps itself out of ruts. One bad reply is sent back with its error (cut to 2 KB), and the count
+starts again after a good one. From 3 steps left the prompt says to finish. The same reply 3 times in a row, or
+two replies alternating, isn't run: the model is told (and the session saved), a loop that comes back after
+other work is told again, and the run ends with an error if the model goes on right after being told.
+Each step records 'ms' (the model call and running the action, not the wait for an approval) and 'tokens'
+({'input', 'output'}); the run's usage totals them as 'input_tokens', 'output_tokens' and 'ms', with the number
+of 'calls' and the 'cost'. A model call that doesn't become a step (a bad reply, a repeat warning, reads that
+had no step to run in, and the reply that ends the run) is in those totals and also in usage['retries']
+({'calls', 'input_tokens', 'output_tokens', 'ms', 'cost'}), so the totals are the steps' plus the retries'.
+In a batch the model call's tokens, usage and time are on the first step; the others have the same 'batch',
+zero tokens and no usage, and only their own read time.
 
 Pictures from view_file travel with the next model call only, and only to a model that sees pictures; the
 step's result tells any other model that it can't look at them. The files the person attached to the run are
@@ -20,6 +36,7 @@ never turns a card on: the person does that in Settings › Add-ons.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import secrets
@@ -31,7 +48,8 @@ from copy import deepcopy
 from pathlib import Path
 
 from ixel_mat.agent import addons, cards
-from ixel_mat.agent.protocol import Action, NEEDS_APPROVAL, ProtocolError, build_prompt, parse_reply
+from ixel_mat.agent.protocol import (Action, MAX_READS, NEEDS_APPROVAL, ProtocolError, Reads, build_prompt,
+                                     parse_reply, prompt_prefix)
 from ixel_mat.agent.sandbox import can_sandbox, run_command, sandbox_kind
 from ixel_mat.agent.store import AgentStore
 from ixel_mat.agent.tools import (MAX_PICTURE_BYTES_PER_CALL, MAX_PICTURES_PER_CALL, PendingWrite, Workspace,
@@ -46,9 +64,12 @@ from ixel_mat.runtime import CONNECT_TIMEOUT
 from ixel_mat.usage import Usage, call_usage
 
 # A stand-in for the model gets the prompt, pictures= as well on a turn that has pictures to send, and
-# effort= on every call of a run that has one
-Ask = Callable[..., Awaitable[tuple[str, dict | None]]]
+# effort= on every call of a run that has one. It never gets cache_prefix: the default ask works that out
+# from the prompt itself
+Ask =Callable[..., Awaitable[tuple[str, dict | None]]]
 MAX_PAGE_RESULT_BYTES = 4 * 1024
+MAX_BAD_REPLY_BYTES = 2 * 1024  # how much of a bad reply is sent back to the model with its error
+REPEATS = 3                     # the same reply this many times in a row is a loop
 _TERMINAL = ("done", "stopped", "failed")
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
 # What a command's result says about its sandbox (CommandResult.sandbox)
@@ -64,6 +85,69 @@ _SANDBOX_WORDS = {
 def clip_result(text: str) -> str:
     """A tool result for the page, at most 4 KB of UTF-8 without splitting a character."""
     return text.encode("utf-8")[:MAX_PAGE_RESULT_BYTES].decode("utf-8", errors="ignore")
+
+
+def clip_bad_reply(text: str) -> str:
+    """A bad reply as it's sent back to the model: at most 2 KB of UTF-8 without splitting a character, with
+    a note saying so when it was cut."""
+    raw = text.encode("utf-8")
+    if len(raw) <= MAX_BAD_REPLY_BYTES:
+        return text
+    shown = raw[:MAX_BAD_REPLY_BYTES].decode("utf-8", errors="ignore")
+    return f"{shown}\n[… cut: the reply was {len(raw):,} bytes and only the first {MAX_BAD_REPLY_BYTES:,} are shown]"
+
+
+def _count(value: object) -> int:
+    """A token count from a usage dict: a whole number of at least 0, or 0 for anything else."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _tokens(usage: dict | None) -> dict:
+    """{"input", "output"} for one model call's usage dict: input includes cached reads and writes. Zeros when
+    the call reported nothing."""
+    usage = usage if isinstance(usage, dict) else {}
+    return {"input": sum(_count(usage.get(key)) for key in ("input_tokens", "cache_read_tokens",
+                                                            "cache_write_tokens")),
+            "output": _count(usage.get("output_tokens"))}
+
+
+def _cost(usage: dict | None) -> float:
+    """What one model call cost, from its usage dict: its cost_usd (or cost) when that is a finite number of at
+    least 0, and 0 for anything else."""
+    cost = usage.get("cost_usd", usage.get("cost")) if isinstance(usage, dict) else None
+    ok = (isinstance(cost, (float, int)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0)
+    return cost if ok else 0.0
+
+
+def _ms(seconds: float) -> int:
+    """A time taken in whole milliseconds, never below 0."""
+    return max(0, round(seconds * 1000))
+
+
+def _signature(action: Action) -> tuple[str, str]:
+    """What makes two actions the same one: its name and its arguments, in a fixed order."""
+    return action.action, json.dumps(action.args, sort_keys=True, ensure_ascii=False)
+
+
+def _label(signature: tuple) -> str:
+    """A reply's name in a message to the model: the action, or the actions of a batch of reads."""
+    if signature and isinstance(signature[0], tuple):
+        return "reads of " + ", ".join(dict.fromkeys(name for name, _ in signature))
+    return signature[0]
+
+
+def _repeating(signatures: list[tuple]) -> str:
+    """How the newest replies repeat, in words that follow 'has' ('' when they don't): the same reply
+    REPEATS times in a row, or two different replies going back and forth (A, B, A, B)."""
+    if len(signatures) >= REPEATS and len(set(signatures[-REPEATS:])) == 1:
+        return f"asked for the same thing ({_label(signatures[-1])}) {REPEATS} times in a row"
+    if len(signatures) >= 4:
+        first, second, third, fourth = signatures[-4:]
+        if first == third and second == fourth and first != second:
+            one, two = _label(first), _label(second)
+            names = f"{one} and {two}" if one != two else f"{one}, with two sets of arguments"
+            return f"gone back and forth between two actions ({names})"
+    return ""
 
 
 def _in_workspace(cwd: object) -> bool:
@@ -84,11 +168,12 @@ def _fetch_note(args: dict) -> str:
             f"{cards.MAX_REPO_FILES:,} files). Nothing is run.")
 
 
-async def _ask_model(cfg: AgentConfig, prompt: str, pictures: tuple = (),
-                     effort: str = "") -> tuple[str, dict | None]:
+async def _ask_model(cfg: AgentConfig, prompt: str, pictures: tuple = (), effort: str = "",
+                     cache_prefix: str = "") -> tuple[str, dict | None]:
     """Ask a model with the agent's whole prompt, using the same lifecycle and usage as ixel ask. pictures go
     along only to a model that sees them (the runner says so in the step's result for any other); effort, when
-    given, is the thinking level for the call, one the model takes."""
+    given, is the thinking level for the call, one the model takes; cache_prefix, when given, is the fixed
+    start of the prompt, which a transport with prompt caching caches (the others ignore it)."""
     if not is_ready(cfg):
         raise AskError(f"{cfg.label} has no API key yet. Run: ixel setup")
     agent = create_agent(cfg)
@@ -109,6 +194,8 @@ async def _ask_model(cfg: AgentConfig, prompt: str, pictures: tuple = (),
             options["pictures"] = list(pictures)
         if effort:
             options["effort"] = effort
+        if cache_prefix:
+            options["cache_prefix"] = cache_prefix
         try:
             reply = await asyncio.wait_for(agent.send_and_receive(prompt, use_full_session=True,
                                                                   on_usage=reported.append, **options),
@@ -189,11 +276,17 @@ class AgentRun:
         self.error = ""
         self.steps: list[dict] = []
         self.pending: dict | None = None
-        self.usage: dict = {"calls": 0, "cost": 0.0}
+        # The totals of every model call and action; "retries" is the part of them that isn't in any step
+        self.usage: dict = {"calls": 0, "cost": 0.0, "input_tokens": 0, "output_tokens": 0, "ms": 0,
+                            "retries": {"calls": 0, "input_tokens": 0, "output_tokens": 0, "ms": 0, "cost": 0.0}}
         self.task: asyncio.Task | None = None
         self._ask = ask or self._default_ask
+        self._fence = f"IXEL-{secrets.token_hex(6)}"  # one marker for the whole run, so the prompt's front is stable
         self._bad_replies = 0
         self._retry: dict | None = None
+        self._signatures: list[tuple] = []  # what each good reply asked for, to spot a loop
+        self._repeat_warned = False
+        self._save_lock = asyncio.Lock()    # saves are written one at a time, in the order they were asked for
         self._approvals: list[dict] = []
         self._calls: list[dict | None] = []
         self._decision: bool | None = None
@@ -210,7 +303,8 @@ class AgentRun:
 
     async def _default_ask(self, prompt: str, pictures: tuple | list = (),
                            effort: str = "") -> tuple[str, dict | None]:
-        return await _ask_model(self.cfg, prompt, tuple(pictures), effort)
+        return await _ask_model(self.cfg, prompt, tuple(pictures), effort,
+                                cache_prefix=prompt_prefix(prompt, self._fence))
 
     def _uploads(self) -> list[dict]:
         """The run's attached files as the page shows them: {id, name, kind}."""
@@ -220,27 +314,49 @@ class AgentRun:
         except OSError:
             return []
 
-    def _snapshot(self, page: bool) -> dict:
+    def _snapshot(self, page: bool, status: str | None = None) -> dict:
+        """The run as it is now; status says what to record as its status when that isn't self.status yet (a
+        run that is about to wait is saved as waiting before it says so)."""
+        status = status or self.status
         steps = deepcopy(self.steps)
         if page:
             for step in steps:
                 step["result"] = clip_result(step["result"])
-        return {"id": self.id, "status": self.status, "goal": self.goal, "model": self.cfg.name,
+        return {"id": self.id, "status": status, "goal": self.goal, "model": self.cfg.name,
                 "workspace": str(self.workspace.root), "started": self.started, "answer": self.answer,
                 "error": self.error, "steps": steps,
-                "pending": deepcopy(self.pending) if self.status == "waiting" else None,
-                "usage": dict(self.usage), "uploads": self._uploads(), "computer": self.computer,
+                "pending": deepcopy(self.pending) if status == "waiting" else None,
+                "usage": deepcopy(self.usage), "uploads": self._uploads(), "computer": self.computer,
                 "follows": self.follows["id"] if self.follows else None}
 
     def to_dict(self) -> dict:
         """The run for the app, with the shape in AGENT_BETA.md and results clipped to 4 KB."""
         return self._snapshot(page=True)
 
-    def _save(self) -> None:
-        data = self._snapshot(page=False)
+    def _session(self, status: str | None = None) -> dict:
+        """What is saved: the run, its approvals and the model calls' usage, copied as they are now."""
+        data = self._snapshot(page=False, status=status)
         data.update(approvals=deepcopy(self._approvals), calls=deepcopy(self._calls), max_steps=self.max_steps,
                     effort=self.effort, earlier=deepcopy(self.follows))
-        self.store.save_session(data)
+        return data
+
+    def _save(self) -> None:
+        """Save now, and wait for the disk. Only for __init__, where there may be no running loop."""
+        self.store.save_session(self._session())
+
+    async def _save_async(self, status: str | None = None) -> None:
+        """Save the run once, in a thread, so the disk never holds up the loop. The copy is made here, on the
+        loop; the lock makes the writes land in the order they were asked for, and a write that is already
+        under way is let finish if this task is cancelled (a thread can't be, and an older copy must not
+        land after a newer one)."""
+        data = self._session(status)
+        async with self._save_lock:
+            write = asyncio.ensure_future(asyncio.to_thread(self.store.save_session, data))
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                await asyncio.gather(write, return_exceptions=True)
+                raise
 
     def start(self) -> asyncio.Task:
         """Start the loop in the background, or return the task already working on this run."""
@@ -250,12 +366,21 @@ class AgentRun:
 
     def _record_usage(self, usage: dict | None) -> dict:
         self._calls.append(deepcopy(usage))
-        if usage:
-            cost = usage.get("cost_usd", usage.get("cost"))
-            if (isinstance(cost, (float, int)) and not isinstance(cost, bool)
-                    and math.isfinite(cost) and cost >= 0):
-                self.usage["cost"] += cost
+        self.usage["cost"] += _cost(usage)
         return deepcopy(usage) if usage is not None else {}
+
+    def _count_retry(self, usage: dict | None, tokens: dict, model_ms: int, why: str = "") -> None:
+        """Note a model call that didn't become a step (a bad reply, a repeat warning, reads that couldn't
+        run) in usage['retries']. The run's totals already hold it, so they stay the steps' plus the
+        retries'."""
+        retries = self.usage["retries"]
+        retries["calls"] += 1
+        retries["input_tokens"] += tokens["input"]
+        retries["output_tokens"] += tokens["output"]
+        retries["ms"] += model_ms
+        retries["cost"] += _cost(usage)
+        if why:  # the last few reasons, so a slow or costly run can be explained afterwards
+            retries["reasons"] = [*retries.get("reasons", []), why[:200]][-5:]
 
     async def run(self) -> dict:
         """Keep asking until finished, stopped or failed, waiting for decide when approval is needed."""
@@ -271,18 +396,19 @@ class AgentRun:
                 if len(self.steps) >= self.max_steps:
                     self.status = "failed"
                     self.error = f"Reached the step limit ({self.max_steps}). Start another run to continue."
-                    self._save()
+                    await self._save_async()
                     break
                 history = self.steps + ([self._retry] if self._retry is not None else [])
                 try:
                     attached = self.store.list_uploads(self.id)
                 except OSError:
                     attached = []
+                steps_left = self.max_steps - len(self.steps)
                 prompt = build_prompt(self.goal, self.store.prompt_files(), self.store.skills(), history,
-                                      uploads=attached, computer=self.computer, follows=self.follows,
-                                      addon_tools=self._addon_servers.tools)
+                                      fence=self._fence, uploads=attached, computer=self.computer,
+                                      follows=self.follows, addon_tools=self._addon_servers.tools,
+                                      steps_left=steps_left)
                 self.usage["calls"] += 1
-                self._save()
                 sent = list(self._pictures)
                 # Only what this call has: a stand-in that takes the prompt alone still works without either
                 options: dict = {}
@@ -290,63 +416,160 @@ class AgentRun:
                     options["pictures"] = sent
                 if self.effort:
                     options["effort"] = self.effort
+                asked = time.monotonic()
                 try:
                     reply, usage = await self._ask(prompt, **options)
                 finally:
                     self._pictures = []  # they go with one call only, whether or not it worked
                 if self.status == "stopped":
                     break
+                model_ms = _ms(time.monotonic() - asked)
                 step_usage = self._record_usage(usage)
+                tokens = _tokens(usage)
+                self.usage["input_tokens"] += tokens["input"]
+                self.usage["output_tokens"] += tokens["output"]
+                self.usage["ms"] += model_ms
+                problem, note = "", None  # a reply that can't be used: why, and the entry that tells the model
                 try:
-                    action = parse_reply(reply, computer=self.computer)
+                    parsed = parse_reply(reply, computer=self.computer)
                 except ProtocolError as exc:
+                    shown = clip_bad_reply(reply if isinstance(reply, str) else str(reply))
+                    problem = str(exc)
+                    note = {"action": "invalid_reply", "result": f"Parse error: {exc}\nSend one corrected JSON "
+                                                                 f"action.\nYour bad reply was:\n{shown}"}
+                else:
+                    if isinstance(parsed, Reads) and steps_left <= 1:
+                        # Reads would take the last step, and the model has to have a turn to finish
+                        problem = "it asked for reads with 1 step left, and finish has to be that step"
+                        note = {"action": "reads_not_run",
+                                "result": "These reads were not run because 1 step is left, and it has to be "
+                                          "yours to finish with. Use finish now with what you have."}
+                if note is not None:  # counted like a bad reply: a second one in a row fails the run
+                    self._count_retry(usage, tokens, model_ms, problem)
                     self._bad_replies += 1
                     if self._bad_replies > 1:
                         self.status = "failed"
-                        self.error = mask_secrets(f"The model sent a second bad reply: {exc}", [self.cfg.token])
-                        self._save()
+                        self.error = mask_secrets(f"The model sent a second bad reply: {problem}", [self.cfg.token])
+                        await self._save_async()
                         break
-                    self._retry = {"n": len(self.steps) + 1, "action": "invalid_reply", "args": {},
-                                   "thought": "", "ok": False,
-                                   "result": f"Parse error: {exc}\nSend one corrected JSON action.\n"
-                                             f"Your bad reply was:\n{reply}"}
+                    self._retry = {"n": len(self.steps) + 1, "args": {}, "thought": "", "ok": False,
+                                   "retry": True, **note}
                     self._pictures = sent  # the corrected reply is the next call, and it still needs to see them
-                    self._save()
                     continue
+                self._bad_replies = 0  # one slip is forgiven at a time, wherever in the run it comes
                 self._retry = None
+                signature = (tuple(_signature(each) for each in parsed.actions) if isinstance(parsed, Reads)
+                             else _signature(parsed))
+                self._signatures.append(signature)
+                loop = _repeating(self._signatures)
+                if loop:
+                    self._count_retry(usage, tokens, model_ms, "it repeated an earlier action")
+                    if self._repeat_warned:
+                        self.status = "failed"
+                        self.error = mask_secrets(f"The run was stopped because the model kept repeating "
+                                                  f"itself: it has {loop}, even after being told.",
+                                                  [self.cfg.token])
+                        await self._save_async()
+                        break
+                    self._repeat_warned = True
+                    self._retry = {"n": len(self.steps) + 1, "action": "repeating", "args": {},
+                                   "thought": "", "ok": False, "retry": True,
+                                   "result": f"You have {loop}, so this reply was not run. Do something "
+                                             "different, or use finish with what you have."}
+                    self._pictures = sent  # the next call is this turn again, and it still needs to see them
+                    await self._save_async()  # the warning, and what the call cost, are on disk before the next
+                    continue
+                self._repeat_warned = False  # a loop that comes back after other work is warned about again
+                if isinstance(parsed, Reads):
+                    await self._read_together(parsed, model_ms, tokens, step_usage)
+                    continue
+                action = parsed
                 step = {"n": len(self.steps) + 1, "thought": action.thought, "action": action.action,
-                        "args": deepcopy(action.args), "ok": True, "result": "", "usage": step_usage}
+                        "args": deepcopy(action.args), "ok": True, "result": "", "usage": step_usage,
+                        "ms": model_ms, "tokens": tokens}
                 if action.action == "finish":
                     self.answer = action.args["answer"]
                     step["result"] = self.answer
                     self.steps.append(step)
                     self.status = "done"
-                    self._save()
+                    await self._save_async()
                     break
                 await self._act(action, step)
         except asyncio.CancelledError:
             self._command_cancel.set()
             self.status = "stopped"
             self.pending = None
-            self._save()
+            await self._save_async()
         except Exception as exc:  # noqa: BLE001 — leave a failed session the page can still inspect
             self.status = "failed"
             self.pending = None
             self.error = mask_secrets(str(exc), [self.cfg.token]) or type(exc).__name__
             with suppress(OSError):
-                self._save()
+                await self._save_async()
         finally:
             await self._addon_servers.close()
         return self.to_dict()
 
+    def _add_time(self, step: dict, began: float, waited: float = 0.0) -> None:
+        """Add the time an action took, since began and less the wait for the person, to its step and to the
+        run's total. The step already holds the model call's time."""
+        took = _ms(time.monotonic() - began - waited)
+        step["ms"] += took
+        self.usage["ms"] += took
+
+    def _read_one(self, action: Action) -> tuple[bool, str, int]:
+        """One read-only action, run in a thread: whether it worked, what it gave back (or why it didn't, with
+        any secret masked) and how long it took in ms. A refusal is a failed read, as it is for a single
+        action; anything else is raised."""
+        tool = getattr(self.store if action.action == "load_skill" else self.workspace, action.action)
+        began = time.monotonic()
+        try:
+            ok, text = True, tool(**action.args)
+        except (WorkspaceError, ValueError, KeyError, OSError) as exc:
+            ok, text = False, str(exc)
+        return ok, mask_secrets(text, [self.cfg.token]), _ms(time.monotonic() - began)
+
+    async def _read_together(self, reads: Reads, model_ms: int, tokens: dict, usage: dict) -> None:
+        """Run a reply's reads at the same time and record each as its own step, all with the 'batch' of the
+        first one's number. The model call's time, tokens and usage are on the first step only; the others have
+        the same 'batch', zero tokens, no usage and just their own read time, so the steps and usage['retries']
+        add up to the run's totals. At most min(MAX_READS, steps left - 1) reads run: the last step stays for
+        the model's finish, and the last read's result says how many didn't run. The caller has already sent
+        back a reads reply that has only one step left, so there is room for at least one."""
+        first = len(self.steps) + 1
+        room = max(self.max_steps - len(self.steps) - 1, 0)  # the last step is kept for finish
+        actions = reads.actions[:min(MAX_READS, room)]
+        outcomes = await asyncio.gather(*(asyncio.to_thread(self._read_one, action) for action in actions),
+                                        return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome  # not a refusal: the run fails with it, as it would for a single read
+        recorded = []
+        for index, (action, (ok, result, took)) in enumerate(zip(actions, outcomes)):
+            lead = index == 0
+            recorded.append({"n": first + index, "thought": action.thought, "action": action.action,
+                             "args": deepcopy(action.args), "ok": ok, "result": result,
+                             "usage": usage if lead else {}, "ms": took + (model_ms if lead else 0),
+                             "tokens": tokens if lead else {"input": 0, "output": 0}, "batch": first})
+            self.usage["ms"] += took
+        left = len(reads.actions) - len(actions)
+        if left:
+            recorded[-1]["result"] += (f"\n[{left} more read{'' if left == 1 else 's'} not run: the run's last "
+                                       f"step is kept for finish]")
+        if self.status != "stopped":
+            self.steps.extend(recorded)
+            await self._save_async()
+
     async def _act(self, action: Action, step: dict) -> None:
         """Check an action, wait if needed, then record what happened for the next model turn."""
+        began = time.monotonic()
+        waited = 0.0  # time spent waiting for the person: not the action's time
         if action.action == "view_file" and not self.cfg.sees_pictures:
             step.update(ok=False, pictures=0,
                         result=f"{self.cfg.label} can't see pictures, so view_file shows nothing. Use read_file "
                                "for a document's text, and finish by saying the picture couldn't be looked at.")
             self.steps.append(step)
-            self._save()
+            await self._save_async()
             return
         prepared = None
         opened = None
@@ -402,16 +625,22 @@ class AgentRun:
                     # An add-on is sandboxed fully or not at all: the Windows sandbox doesn't cover add-ons
                     kind = "full" if can_sandbox() else "none"
                     self.pending.update(sandbox=kind, sandboxed=kind == "full")
+                paused = time.monotonic()
+                # Saved as waiting before the run says it is, so whoever sees the status finds the card on disk
+                await self._save_async(status="waiting")
+                if self.status == "stopped":
+                    return  # stop() came while the save was under way
                 self.status = "waiting"
-                self._save()
                 await self._decision_event.wait()
+                waited = time.monotonic() - paused
                 if not self._decision:
                     step["ok"] = False
                     step["result"] = "The person denied this action. It was not run."
                     if action.action == "screenshot":
                         step["pictures"] = 0
+                    self._add_time(step, began, waited)
                     self.steps.append(step)
-                    self._save()
+                    await self._save_async()
                     return
             ok, result = await self._execute(action, prepared, opened, card)
             step.update(ok=ok, result=mask_secrets(result, [self.cfg.token]))
@@ -419,9 +648,10 @@ class AgentRun:
             step.update(ok=False, result=mask_secrets(str(exc), [self.cfg.token]))
         if action.action in ("view_file", "screenshot", "use_tool"):
             step["pictures"] = self._saw  # what goes with the next call: 0 when it showed nothing
+        self._add_time(step, began, waited)
         if self.status != "stopped":
             self.steps.append(step)
-            self._save()
+            await self._save_async()
 
     async def _execute(self, action: Action, prepared: PendingWrite | None,
                        opened: list[str] | None = None, card: cards.PendingCard | None = None) -> tuple[bool, str]:
@@ -567,21 +797,23 @@ class AgentRun:
         self._decision = approve
         self.pending = None
         self.status = "running"
-        self._save()
+        await self._save_async()
         self._decision_event.set()
         return self.to_dict()
 
     async def stop(self) -> dict:
-        """Stop this run, cancelling an outstanding model call or a command and clearing its approval."""
+        """Stop this run, cancelling an outstanding model call or a command and clearing its approval. The
+        task is cancelled in the same breath as the status changes, so it can't carry on to its clean-up
+        while the stop is being saved; the stopped run is saved before this returns."""
         if self.status in _TERMINAL:
             return self.to_dict()
         self.status = "stopped"
         self.pending = None
         self._command_cancel.set()
-        self._save()
         if self.task is not None and not self.task.done():
             self.task.cancel()
             if self.task is not asyncio.current_task():
                 with suppress(asyncio.CancelledError):
                     await self.task
+        await self._save_async()
         return self.to_dict()

@@ -58,6 +58,7 @@ jobs:
         run: >-
           python -m pytest -q -rs tests/test_agent_sandbox.py tests/test_agent_mcp_addons.py
           tests/test_agent_computer.py tests/test_agent_screenshot.py tests/test_addons.py tests/test_machines.py
+          tests/test_agent_sandbox_reads.py tests/test_agent_security_review.py
 
   agent-sandbox-linux:
     # The Agent's Linux sandbox for real: bubblewrap installed, Ubuntu's AppArmor rule applied the way the

@@ -2,12 +2,14 @@
 Running a command the person approved (or always allows), for the agent's run_command.
 
 The model never gets a shell: a command is a list of words, run as it is, with the workspace as its folder,
-a time limit, at most 64 KB of its output kept, and the environment without any keys saved in Ixel
-(child_env). On a Mac it runs under sandbox-exec and on Linux under bubblewrap (bwrap), with the network
-denied and writes allowed only in the workspace and the temp folder; on Linux the secret and browser folders
-(secret_folders) are hidden too, and so are the system and session sockets (/run, the session's runtime
-folder, the X11 and ICE socket folders) and /dev/shm is private, because denying the network doesn't cover
-Unix sockets reachable by path (the session D-Bus, systemd, ssh-agent, the X server, docker.sock).
+a time limit, its first and last 32 KB of output kept (a line says how much was left out between), and the
+environment without any keys saved in Ixel (child_env) or the ssh-agent socket. On a Mac it runs under
+sandbox-exec and on Linux under bubblewrap (bwrap), with the network denied, writes allowed only in the
+workspace and the temp folder, and the secret folders and files (secret_folders) and Ixel's config folder
+unreadable (other reads work, so programs run). On a Mac the keychain services and Apple Events are out of
+reach too. On Linux the system and session sockets (/run, the session's runtime folder, the X11 and ICE
+socket folders) are hidden and /dev/shm is private, because denying the network doesn't cover Unix sockets
+reachable by path (the session D-Bus, systemd, ssh-agent, the X server, docker.sock).
 On Windows (winsandbox.py) it runs with a low-integrity token in a job
 object: writes land only in the workspace and a private temp folder, but the network is on and reads aren't
 limited, so the secret and browser folders can be read there. CommandResult.sandbox says which of "full",
@@ -38,12 +40,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ixel_mat.agent import winsandbox
-from ixel_mat.agent.secret_folders import secret_folders
+from ixel_mat.agent.secret_folders import SECRET_HOME_FOLDERS, _homes, secret_folders
 from ixel_mat.config.secrets import child_env
 from ixel_mat.material import mask_secrets
 
 DEFAULT_TIMEOUT = 120.0
 MAX_OUTPUT_BYTES = 64 * 1024
+# The output kept is its first and last parts, half of MAX_OUTPUT_BYTES each
+_HEAD_BYTES = MAX_OUTPUT_BYTES // 2
+_TAIL_BYTES = MAX_OUTPUT_BYTES - _HEAD_BYTES
+# Extra bytes kept past each cut, so a secret across it is masked whole before the cut
+_MASK_MARGIN = 4 * 1024
+# The outermost bytes of a margin, longer than any secret's first part that no pattern matches yet
+_MASK_EDGE = 128
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 # "1" here means Ubuntu 24.04+'s AppArmor refuses user namespaces to programs without a profile (bwrap needs them)
 _APPARMOR_USERNS = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
@@ -53,6 +62,13 @@ _READ_CHUNK = 8 * 1024
 # After the command itself ended, how long the output is still read while programs it left running in the
 # background hold it open, before they're stopped too
 _DRAIN_WAIT = 2.0
+# The services that reach the keychain over IPC. A profile is (allow default), so without denying these
+# `security find-generic-password` still gets at the keychain whatever the file rules say. The trust services
+# (trustd) aren't here: HTTPS certificate checks need them.
+KEYCHAIN_MACH_SERVICES = (
+    "com.apple.SecurityServer", "com.apple.securityd", "com.apple.securityd.xpc", "com.apple.secd",
+    "com.apple.security.agent", "com.apple.security.agent.login", "com.apple.security.authhost",
+)
 
 # Where the system's and the session's Unix sockets live on Linux (/var/run is normally a link to /run)
 _RUNTIME_FOLDERS = ("/run", "/var/run")
@@ -91,10 +107,10 @@ SANDBOX_KINDS = ("full", "writes-only", "none")
 class CommandResult:
     """What a command did. returncode is None when it was stopped at the time limit. sandbox says how it was
     confined: "full" (sandbox-exec on a Mac or bubblewrap on Linux: network denied, writes only in the
-    workspace and the temp folder), "writes-only" (Windows: writes only in the workspace and a private temp
-    folder, but the network is on and reads aren't limited) or "none". sandboxed is True only for "full";
-    when sandbox is left out it follows sandboxed. started is False when the command was never started
-    because the Windows sandbox couldn't be set up."""
+    workspace and the temp folder, the secret folders unreadable), "writes-only" (Windows: writes only in the
+    workspace and a private temp folder, but the network is on and reads aren't limited) or "none". sandboxed
+    is True only for "full"; when sandbox is left out it follows sandboxed. started is False when the command
+    was never started because the Windows sandbox couldn't be set up."""
     argv: list[str]
     returncode: int | None
     output: str
@@ -175,20 +191,55 @@ def _quoted(path: str) -> str:
 
 
 def sandbox_profile(workspace: Path, *, network: bool = False, files: str = "chosen-folder",
-                    temporary: bool = True) -> str:
+                    temporary: bool = True, addon_files: Path | None = None) -> str:
     """The shared sandbox profile. Commands default to no network and workspace/temp writes; MCP cards
     pass their network/files permissions and temporary=False to allow only workspace writes, or none.
+    Reads of the secret folders (secret_folders) are denied for every profile, MCP ones too. A workspace
+    inside one of them (a fetched repo, in Ixel's config folder) is read again, when files allow it.
+    With files="none" the home folder can't be read either, except addon_files (the add-on's own installed
+    files folder); system folders stay readable so programs run, but an add-on whose program lives in the
+    home folder won't run with files="none". addon_files changes nothing for the other files modes.
+    Every profile also denies the keychain services (KEYCHAIN_MACH_SERVICES), Apple Events and the
+    ssh-agent socket named by $SSH_AUTH_SOCK, which file rules alone wouldn't stop.
     Paths are real paths, because the sandbox sees /var as /private/var."""
     if files not in ("none", "output-folder", "chosen-folder"):
         raise ValueError("unknown files permission")
-    allowed = [os.path.realpath(workspace)] if files != "none" else []
+    real = os.path.realpath(workspace)
+    allowed = [real] if files != "none" else []
     if temporary:
         allowed += [os.path.realpath(tempfile.gettempdir()), "/private/tmp"]
     subpaths = " ".join(f"(subpath {_quoted(path)})" for path in dict.fromkeys(allowed))
     devices = ' (literal "/dev/null") (regex #"^/dev/tty")' if temporary else ""
     writes = f" (allow file-write* {subpaths}{devices})" if subpaths or devices else ""
+    # With no file access the home folder is unreadable, bar the add-on's own files. The secret deny comes
+    # after, so a secret inside that folder stays denied.
+    homes = ""
+    if files == "none":
+        for path in dict.fromkeys(os.path.realpath(home) for home in _homes()):
+            homes += f" (deny file-read* (subpath {_quoted(path)}))"
+        if addon_files is not None:
+            homes += f" (allow file-read* (subpath {_quoted(os.path.realpath(addon_files))}))"
+    secret = secret_folders()
+    denied = " ".join(f"(subpath {_quoted(path)})" for path in secret)
+    # A later rule wins, so a workspace inside a denied folder is allowed again after the deny. A workspace
+    # that only contains one (the home folder, say) keeps the deny.
+    reread = ""
+    if files != "none" and any(Path(real).is_relative_to(folder) for folder in map(Path, secret)):
+        reread = f" (allow file-read* (subpath {_quoted(real)}))"
+    # The ssh-agent socket, by the path it's given as and by its real path; it sits in a readable and often
+    # writable folder (/tmp), and talking to it signs with the person's keys. These come after the re-read.
+    agent = ""
+    agent_socket = os.environ.get("SSH_AUTH_SOCK", "")
+    if agent_socket and os.path.isabs(agent_socket):
+        for path in dict.fromkeys([os.path.realpath(agent_socket), agent_socket]):
+            agent += (f" (deny file-read* file-write* (literal {_quoted(path)}))"
+                      f" (deny network-outbound (remote unix-socket (path-literal {_quoted(path)})))")
+    # Last, so nothing above can allow them again
+    keychain = " (deny mach-lookup " + " ".join(f"(global-name {_quoted(name)})"
+                                                for name in KEYCHAIN_MACH_SERVICES) + ")"
     return ("(version 1) (allow default) " + ("" if network else "(deny network*) ")
-            + "(deny file-write*)" + writes)
+            + "(deny file-write*)" + writes + homes + f" (deny file-read* {denied})" + reread + agent
+            + keychain + " (deny appleevent-send)")
 
 
 def _inside(path: str, folder: str) -> bool:
@@ -342,14 +393,16 @@ def sandbox_unavailable_reason() -> str | None:
 
 
 def sandboxed_argv(argv: list[str], workspace: Path, *, network: bool = False, files: str = "chosen-folder",
-                   temporary: bool = True) -> list[str]:
+                   temporary: bool = True, addon_files: Path | None = None) -> list[str]:
     """argv wrapped to run under the sandbox of this system (sandbox-exec on a Mac, bubblewrap on Linux),
-    with the same network, files and temporary meaning as sandbox_profile. Unchanged when can_sandbox is
+    with the same network, files, temporary and addon_files meaning as sandbox_profile (bubblewrap doesn't
+    hide the home folder for files="none", so addon_files changes nothing there). Unchanged when can_sandbox is
     False, so a caller that must not run unsandboxed checks that first."""
     if not can_sandbox():
         return list(argv)
     if sys.platform == "darwin":
-        profile = sandbox_profile(workspace, network=network, files=files, temporary=temporary)
+        profile = sandbox_profile(workspace, network=network, files=files, temporary=temporary,
+                                  addon_files=addon_files)
         return [SANDBOX_EXEC, "-p", profile, *argv]
     return bwrap_argv(workspace, argv, network=network, files=files, temporary=temporary)
 
@@ -387,11 +440,13 @@ def _kill_tree(proc: subprocess.Popen | winsandbox.LowProcess) -> None:
 
 
 class _Output:
-    """Reads a command's output as it comes, keeping the first MAX_OUTPUT_BYTES and counting the rest (it's
-    still read, so the command never stops on a full pipe)."""
+    """Reads a command's output as it comes, keeping the first and last part of the output (each with
+    _MASK_MARGIN more bytes, for masking) and counting the rest (it's still all read, so the command never
+    stops on a full pipe)."""
 
     def __init__(self, stream):
-        self.kept = bytearray()
+        self.head = bytearray()
+        self.tail = bytearray()
         self.total = 0
         self._stream = stream
         self.thread = threading.Thread(target=self._read, name="ixel-agent-output", daemon=True)
@@ -401,15 +456,36 @@ class _Output:
         with suppress(OSError, ValueError):
             while chunk := self._stream.read1(_READ_CHUNK):  # what's there now, up to a chunk
                 self.total += len(chunk)
-                room = MAX_OUTPUT_BYTES - len(self.kept)
+                room = _HEAD_BYTES + _MASK_MARGIN - len(self.head)
                 if room > 0:
-                    self.kept += chunk[:room]
+                    self.head += chunk[:room]
+                    chunk = chunk[room:]
+                if chunk:
+                    self.tail += chunk
+                    if len(self.tail) > _TAIL_BYTES + _MASK_MARGIN:
+                        del self.tail[:len(self.tail) - _TAIL_BYTES - _MASK_MARGIN]
 
     def text(self) -> str:
-        text = bytes(self.kept).decode("utf-8", errors="replace")
-        if self.total > len(self.kept):
-            text += f"\n[output cut at {MAX_OUTPUT_BYTES // 1024} KB; it was {self.total} bytes in all]"
-        return text
+        """The output with secrets masked: whole when it's within MAX_OUTPUT_BYTES, else its first and last
+        parts with a line between. Each part is masked with the margin past its cut still in, so a secret
+        across the cut is blanked out whole, and only then cut."""
+        head, tail, total = bytes(self.head), bytes(self.tail), self.total
+        if total <= MAX_OUTPUT_BYTES:
+            return mask_secrets((head + tail).decode("utf-8", errors="replace"))
+        if total == len(head) + len(tail):
+            # Every byte is here: the margin past each cut comes from the other part's bytes
+            data = head + tail
+            head, tail = data[:_HEAD_BYTES + _MASK_MARGIN], data[-(_TAIL_BYTES + _MASK_MARGIN):]
+        # A secret cut by the far edge of a margin is only part of itself there, too short to be matched. When
+        # masking shortened the margin enough that this edge falls inside what's kept, it's dropped as well.
+        masked = mask_secrets(head.decode("utf-8", errors="replace")).encode("utf-8")
+        kept_head = masked[:min(_HEAD_BYTES, max(len(masked) - _MASK_EDGE, 0))]
+        masked = mask_secrets(tail.decode("utf-8", errors="replace")).encode("utf-8")
+        kept_tail = masked[max(_MASK_EDGE, len(masked) - _TAIL_BYTES):]
+        left_out = total - _HEAD_BYTES - _TAIL_BYTES
+        marker = (f"\n[output cut at {MAX_OUTPUT_BYTES // 1024} KB: {left_out} bytes left out here, "
+                  f"of {total} in all]\n")
+        return kept_head.decode("utf-8", errors="replace") + marker + kept_tail.decode("utf-8", errors="replace")
 
 
 def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEOUT,
@@ -440,16 +516,17 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
                              sandbox=kind)
     kind = "none" if computer else sandbox_kind()
     sandboxed = kind == "full"
+    # No ssh-agent socket for the command: it would sign with the person's keys, secret folders or not
+    env = child_env(nested=False, drop_env=["SSH_AUTH_SOCK"])
     try:
         if kind == "writes-only":
-            proc = winsandbox.start(argv, folder, child_env(nested=False))
+            proc = winsandbox.start(argv, folder, env)
         else:
             command = sandboxed_argv(argv, folder) if sandboxed else argv
             options: dict = {"start_new_session": True} if os.name == "posix" else {}
             if os.name == "nt":
                 from ixel_mat.agents.launch import NO_WINDOW_FLAGS
                 options["creationflags"] = NO_WINDOW_FLAGS
-            env = child_env(nested=False)
             if sandboxed:
                 env = sandboxed_env(env)
             proc = subprocess.Popen(command, cwd=folder, env=env, stdin=subprocess.DEVNULL,
@@ -507,5 +584,5 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
         if isinstance(proc, winsandbox.LowProcess):
             proc.close()  # its private temp folder goes, and the workspace's Low label if this was the last run
     return CommandResult(argv=argv, returncode=None if timed_out else proc.returncode,
-                         output=mask_secrets(output.text()) + note, timed_out=timed_out, sandboxed=sandboxed,
+                         output=output.text() + note, timed_out=timed_out, sandboxed=sandboxed,
                          cancelled=cancelled, sandbox=kind)

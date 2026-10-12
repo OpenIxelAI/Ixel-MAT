@@ -534,7 +534,9 @@ def test_a_computer_access_command_keeps_the_session_names(places, fake_bwrap, m
     command, kwargs = popen.calls[0]
     assert command == ["ls", "-l"]
     for name in sandbox.SESSION_ENV:
-        assert kwargs["env"][name] == "ixel-fake-value"
+        if name != "SSH_AUTH_SOCK":  # dropped everywhere: the command would sign with the person's keys
+            assert kwargs["env"][name] == "ixel-fake-value"
+    assert "SSH_AUTH_SOCK" not in kwargs["env"]
     assert kwargs["env"]["IXEL_KEEP_ME"] == "1"
 
 

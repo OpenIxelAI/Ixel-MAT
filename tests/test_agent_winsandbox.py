@@ -21,6 +21,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1208,10 +1209,11 @@ def test_run_command_gives_the_commands_own_exit_code(win32, windows, work):
 
 def test_run_command_keeps_64_kb_of_the_output_and_counts_the_rest(win32, windows, work):
     win32.output = b"0123456789 abcdef\n" * 4000  # 72000 bytes
-    note = "\n[output cut at 64 KB; it was 72000 bytes in all]"
     result = sandbox.run_command(["tool"], work)
-    assert result.output.endswith(note)
-    assert len(result.output) == 64 * 1024 + len(note)
+    marker = re.search(r"\[output cut at 64 KB: (\d+) bytes left out here, of 72000 in all\]", result.output)
+    assert marker is not None and int(marker[1]) == 72000 - 64 * 1024
+    assert result.output.startswith("0123456789 abcdef\n")
+    assert result.output.endswith("0123456789 abcdef\n")
     assert result.sandbox == "writes-only"
     _assert_clean(win32, os.path.realpath(work))
 

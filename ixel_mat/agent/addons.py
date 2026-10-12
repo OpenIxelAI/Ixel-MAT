@@ -94,11 +94,13 @@ def server_parameters(card: Card, workspace: Path) -> StdioServerParameters:
     if not isinstance(card.permissions.network, bool):
         raise ValueError("network permission must be true or false")
     command = sandbox.sandboxed_argv(command, workspace, network=card.permissions.network,
-                                     files=card.permissions.files, temporary=False)
+                                     files=card.permissions.files, temporary=False,
+                                     addon_files=Path(card.dir) / "files")
     # stdio_client merges its default environment into this one. Explicit empty values prevent it
-    # restoring a saved key in any of those default names after child_env withheld it.
+    # restoring a saved key in any of those default names after child_env withheld it. No ssh-agent socket
+    # either: the add-on would sign with the person's keys.
     env = {key: "" for key in get_default_environment()}
-    env.update(child_env(nested=False))
+    env.update(child_env(nested=False, drop_env=["SSH_AUTH_SOCK"]))
     # Under bwrap the names that point at the host's sockets are dropped; stdio_client adds only its defaults
     env = sandbox.sandboxed_env(env)
     return StdioServerParameters(command=command[0], args=command[1:], env=env, cwd=str(workspace))
