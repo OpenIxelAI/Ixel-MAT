@@ -308,10 +308,10 @@ def test_the_board_offers_only_the_effort_levels_a_codex_model_takes():
     gui = gui_with(None)
     (s1, older), (s2, newer), (s3, claude), (s4, unnamed) = get(
         gui, "/api/board/levels?agent=codex&model=gpt-5.1", "/api/board/levels?agent=codex&model=gpt-5.5",
-        "/api/board/levels?agent=claude&model=claude-haiku-5-5", "/api/board/levels?agent=codex")
+        "/api/board/levels?agent=claude&model=claude-haiku-4-5", "/api/board/levels?agent=codex")
     assert (s1, s2, s3, s4) == (200, 200, 200, 200)
     assert older["levels"] == ["low", "medium", "high"] and newer["levels"] == ["low", "medium", "high", "xhigh"]
-    assert claude["levels"] == [] and isinstance(unnamed["levels"], list)  # Haiku takes no effort in Claude Code
+    assert claude["levels"] == [] and isinstance(unnamed["levels"], list)  # Haiku 4.5 takes no effort in Claude Code
 
 
 def test_a_handoff_too_old_for_the_board_says_update(project, fake):

@@ -17,7 +17,7 @@ model = "grok-4.5"
 
 [agents.short]
 preset = "claude_code"
-model = "haiku"
+model = "claude-haiku-4-5"
 
 [agents.anti]
 preset = "antigravity"
@@ -44,7 +44,7 @@ def test_each_agent_is_sent_its_own_levels_with_labels(config):
     assert agents["gpt"]["levels"][0] == {"value": "minimal", "label": "Minimal"}
     for name in ("short", "anti", "gem"):
         assert agents[name]["levels"] == [] and not agents[name]["has_effort"]
-    assert agents["short"]["effort_note"] == "Claude Code takes no effort level with haiku, so Ixel sends none."
+    assert agents["short"]["effort_note"] == "Claude Code takes no effort level with claude-haiku-4-5, so Ixel sends none."
     assert "carries its own effort" in agents["anti"]["effort_note"]
     assert "Gemini's own settings" in agents["gem"]["effort_note"]
 
@@ -67,7 +67,7 @@ def test_a_level_the_model_doesnt_take_is_refused_and_says_what_it_takes(config)
     status, data = change("agent", {"effort": "turbo"}, agent="gpt")
     assert status == 400 and "doesn't take 'turbo'" in data["error"]
     status, data = change("agent", {"effort": "high"}, agent="short")
-    assert status == 400 and data["error"] == "Claude Code takes no effort level with haiku, so Ixel sends none."
+    assert status == 400 and data["error"] == "Claude Code takes no effort level with claude-haiku-4-5, so Ixel sends none."
     status, data = change("agent", {"effort": "high"}, agent="gem")
     assert status == 400 and "Gemini's own settings" in data["error"]
     assert config.read_text(encoding="utf-8") == PROGRAMS

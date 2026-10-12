@@ -82,7 +82,7 @@ PROGRAM_RULES = {program: [(re.compile(pattern), levels) for pattern, levels in 
 
 # Claude Code 2.1.296's --model aliases, as the model each means
 CLAUDE_ALIASES = {"fable": "claude-fable-5-1", "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
-                  "haiku": "claude-haiku-4-5"}
+                  "haiku": "claude-haiku-5-5"}
 
 # Antigravity (agy 1.2.16) model ids that carry their own effort (gemini-3.8-flash-high): no --effort with those
 EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-xhigh", "-max")
@@ -97,7 +97,7 @@ OWN_PROGRAM = ("minimal", *UP_TO_MAX)
 # The model each company's "latest" and "latest-fast" mean when Ixel can't ask yet; only its levels are used
 NEWEST = {"latest": {"anthropic": "claude-opus-5-5", "openai": "gpt-6-astra", "gemini": "gemini-3.1-pro-preview",
                      "xai": "grok-4.7"},
-          "latest-fast": {"anthropic": "claude-haiku-4-5", "openai": "gpt-6.1-sol", "gemini": "gemini-3.8-flash",
+          "latest-fast": {"anthropic": "claude-haiku-5-5", "openai": "gpt-6.1-sol", "gemini": "gemini-3.8-flash",
                           "xai": "grok-4.7-fast"}}
 
 # Programs that hand the level straight to a company's API, and the model they use when given none. Ixel itself
@@ -138,11 +138,12 @@ def program_levels(program: str, model: str | None) -> tuple[str, ...]:
     """The levels a preset's program (its id) takes for model, lowest first, in its provider's own names; () when
     it takes none. No model: the program's own default."""
     if program == "claude_code":
-        # Claude Code 2.1.296: --effort low..max, as Anthropic's API takes them for the model; Haiku takes none
+        # Claude Code 2.1.296: --effort low..max, as Anthropic's API takes them for the model; Haiku 4.5 takes none
+        # (Haiku 5.5, its "haiku" now, takes low..max)
         model = CLAUDE_ALIASES.get(model or "", model)
         if not model:
             return UP_TO_MAX
-        if re.match(r"^claude-haiku", model):
+        if re.match(r"^claude-haiku-4(\D|$)", model):
             return NONE
         return tuple(level for level in model_levels("anthropic", model) if level in UP_TO_MAX)
     if program == "codex":
