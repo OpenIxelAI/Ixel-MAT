@@ -105,8 +105,9 @@ def _value_end(lines: list[str], start: int, column: int) -> tuple[int, str]:
     raise EditError("an array there never closes")
 
 
-def set_values(text: str, table: tuple[str, ...], values: dict[str, Any]) -> str:
-    """`text` with each key in `values` set in [table] (None removes it), checked by parsing."""
+def set_values(text: str, table: tuple[str, ...], values: dict[str, Any], *, drop_empty: bool = False) -> str:
+    """`text` with each key in `values` set in [table] (None removes it), checked by parsing. With drop_empty, a
+    table left with no keys (and no tables inside it) is taken out whole, header and all."""
     try:
         before = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -161,6 +162,8 @@ def set_values(text: str, table: tuple[str, ...], values: dict[str, Any]) -> str
         raise EditError(f"the edit wouldn't have been valid TOML ({exc})") from None
     if after != expected:
         raise EditError(f"[{'.'.join(table)}] is written in a way this can't edit safely")
+    if drop_empty and _table(after, table) == {}:
+        return remove_table(updated, table)
     return updated
 
 
@@ -208,14 +211,14 @@ def _table(data: dict, table: tuple[str, ...]) -> Any:
 
 
 def edit_file(path: Path, table: tuple[str, ...], values: dict[str, Any], expected_version: str | None = None,
-              *, backup: bool = True, check: Callable[[dict], None] | None = None) -> str:
+              *, backup: bool = True, check: Callable[[dict], None] | None = None, drop_empty: bool = False) -> str:
     """
     Make the edit in the file itself (the file a link points to, when it's a link). The old one is kept as
     config.toml.bak unless backup is False. check(new settings) may refuse the result by raising.
     Returns the new text.
     """
-    return change_file(path, lambda text: set_values(text, table, values), expected_version, backup=backup,
-                       check=check)
+    return change_file(path, lambda text: set_values(text, table, values, drop_empty=drop_empty), expected_version,
+                       backup=backup, check=check)
 
 
 def change_file(path: Path, change: Callable[[str], str], expected_version: str | None = None,

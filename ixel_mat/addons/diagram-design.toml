@@ -1,0 +1,30 @@
+# Diagram Design, the add-on that ships with Ixel. The format is in docs/addon-cards.md.
+# To move the pin: download the new commit, run addons.tree_hash() on its skills/diagram-design/ folder,
+# and update commit, tree_sha256 and files together.
+id = "diagram-design"
+name = "Diagram Design"
+summary = "Diagrams as one HTML file, in your brand."
+by = "Cathryn Lavery"
+license = "MIT"
+homepage = "https://github.com/cathrynlavery/diagram-design"
+kind = "skill"
+terms = "MIT: free to use, change and share; keep its copyright notice with any copy of its files."
+
+[source]
+repo = "https://github.com/cathrynlavery/diagram-design"
+commit = "7a2e22170ee838e859d8142ba825d83f8b6375e6"
+subdir = "skills/diagram-design"
+tree_sha256 = "e4adecc695f6367ce202995133e6e1fe5d18b6e4e142a06bd30926d72bfbb4a1"
+files = 279
+
+[permissions]
+files = "output-folder"
+network = false
+commands = [
+  ["python3", "{addon}/scripts/self_check.py", "{output}"],
+]
+
+[use]
+where = "ask"
+trigger = "/diagram"
+output = "html"
