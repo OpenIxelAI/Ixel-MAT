@@ -19,7 +19,7 @@ def test_board_js_is_served_with_the_agent_toggles():
 
 def test_style_css_has_the_agent_toggles():
     css = (STATIC / "style.css").read_text(encoding="utf-8")
-    assert ".needs .fallback-agents" in css and ".fallback-agent" in css
+    assert ".needs .fallback-agents {" in css and ".needs .fallback-agent {" in css
 
 
 def test_needs_form_appends_the_agent_toggles_after_the_fallback_row():
