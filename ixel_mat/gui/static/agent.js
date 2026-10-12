@@ -176,6 +176,12 @@ function duration(ms) {
   return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`;
 }
 
+// One step's own time: "350 ms" under a second, "1.2 s" under a minute, then as duration()
+function stepTime(ms) {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return ms < 60000 ? `${(ms / 1000).toFixed(1)} s` : duration(ms);
+}
+
 // ── Dialogs (the Board's pattern, in the Agent's own dialog) ──────────────
 
 function showDialog(...children) {
@@ -904,13 +910,18 @@ function stepRow(run, step) {
   const moreId = `agent-step-${String(run.id).replace(/[^\w-]/g, "")}-${step.n}`;
   const hasResult = step.result !== undefined && step.result !== null && step.result !== "";
   const pictures = Number(step.pictures) || 0;
+  const timed = typeof step.ms === "number" && Number.isFinite(step.ms) && step.ms >= 0;  // runs saved before it have none
+  const together = Number(step.batch) > 0;  // one of several reads the model asked for in one reply
   const more = el("div", { class: "agent-row-more", id: moreId, hidden: !showing },
     step.thought ? el("p", { class: "agent-row-thought" }, step.thought) : null,
     hasResult ? el("pre", { class: failed ? "failed" : "ok" }, String(step.result)) : null,
     !step.thought && !hasResult ? el("p", { class: "agent-row-thought" }, "Nothing more to show.") : null);
   const head = el("button", { type: "button", class: "agent-row-head", "aria-expanded": String(showing), "aria-controls": moreId },
     icon(failed ? "alert" : (ROW_ICONS[step.action] || "circle")),
-    el("span", { class: "agent-row-text" }, rowWords(step), pictures ? ` · ${plural(pictures, "picture")}` : ""),
+    el("span", { class: "agent-row-text" }, rowWords(step), pictures ? ` · ${plural(pictures, "picture")}` : "",
+      timed ? ` · ${stepTime(step.ms)}` : "",
+      together ? el("span", { "aria-hidden": "true" }, " · read together") : null),
+    together ? el("span", { class: "sr-only" }, " (read together with the other reads of the same reply)") : null,
     failed ? el("span", { class: "sr-only" }, " (failed)") : null);
   head.addEventListener("click", () => {
     const open = more.hidden;
