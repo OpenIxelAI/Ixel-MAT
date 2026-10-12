@@ -1121,6 +1121,81 @@ def test_board_runs_an_edit_on_any_models_at_each_ones_effort_and_shows_what_it_
     assert not errors, errors
 
 
+def test_board_answers_and_reviews_at_one_effort_the_worker_takes(gui_url, browser):
+    fake = FakeBoard()
+    fake.tasks["T-6"] = fake.task(6, "Add a parser", "open", "claude")
+    fake.tasks["T-7"] = fake.task(7, "Explain the parser", "open", "claude")
+    base = fake.detail
+
+    def detail(ref):
+        data = base(ref)
+        if ref in ("T-6", "T-7"):  # a Handoff that says what its workers take; T-7 has no edit to pick
+            kinds = ["edit", "answer", "review"] if ref == "T-6" else ["answer", "review"]
+            data["actions"][0] = {**data["actions"][0], "args": {"agent": "claude", "kind": kinds[0]}, "kinds": kinds}
+            data["task"]["workers"] = WORKERS
+        return data
+    fake.detail = detail
+    page, errors, _ = open_board(browser, fake)
+    page.goto(gui_url)
+    page.click(".rail-item[data-view=board]")
+
+    def open_run(ref):  # the Run form, fresh: the run is cleared, another card is opened and this one again
+        fake.tasks[ref]["run"] = None
+        page.click(".task-card[data-ref=T-1]")
+        page.click(f".task-card[data-ref={ref}]")
+        page.click("#task-panel .actions .btn.primary")
+
+    def approved():
+        return [args for op, args in fake.actions if op == "approve"][-1]
+
+    # An edit has its model picker, with each model's own effort; the answer's single effort isn't there
+    open_run("T-6")
+    assert page.is_visible(".model-row") and page.is_hidden("[data-key=needs-ask-effort]")
+
+    # An answer has no model to pick, and one effort: Default, then the levels the worker takes
+    page.check("input[name=needs-kind][value=answer]")
+    assert page.is_hidden(".model-row") and page.is_visible("[data-key=needs-ask-effort]")
+    assert page.input_value("[data-key=needs-ask-effort]") == ""
+    assert page.locator("[data-key=needs-ask-effort] option").all_inner_texts() == [
+        "Default effort", "Low effort", "Medium effort", "High effort", "Extra high effort", "Max effort"]
+    page.select_option("[data-key=needs-ask-effort]", "high")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = approved()
+    assert approve["kind"] == "answer" and approve["efforts"] == {"": "high"} and "models" not in approve
+
+    # A review at Default sends no effort
+    open_run("T-6")
+    page.check("input[name=needs-kind][value=review]")
+    assert page.is_visible("[data-key=needs-ask-effort]") and page.input_value("[data-key=needs-ask-effort]") == ""
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = approved()
+    assert approve["kind"] == "review" and "efforts" not in approve and "models" not in approve
+
+    # Back to an edit after picking a level for an answer: the select goes, and its level isn't sent with the edit
+    open_run("T-6")
+    page.check("input[name=needs-kind][value=answer]")
+    page.select_option("[data-key=needs-ask-effort]", "low")
+    page.check("input[name=needs-kind][value=edit]")
+    assert page.is_hidden("[data-key=needs-ask-effort]") and page.is_visible(".model-row")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = approved()
+    assert approve["kind"] == "edit" and "efforts" not in approve and "models" not in approve
+
+    # A task that only answers or reviews has no model picker, and still has the effort
+    open_run("T-7")
+    page.wait_for_selector("[data-key=needs-ask-effort]", state="visible")
+    assert page.locator(".model-row").count() == 0
+    page.select_option("[data-key=needs-ask-effort]", "medium")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = approved()
+    assert approve["kind"] == "answer" and approve["efforts"] == {"": "medium"} and approve["task"] == "T-7"
+    assert not errors, errors
+
+
 def test_board_a_refused_action_says_why_and_keeps_what_was_typed(gui_url, browser):
     fake = FakeBoard()
     fake.refuse["note"] = "Refused: that looks like an API key."

@@ -1268,6 +1268,21 @@ function runPicker(asked, agent, worker) {
   return { row, args, ready, problem };
 }
 
+// How hard an answer or a review thinks: one level from the ones the worker takes, worded as the edit picker words
+// them. What's picked lives in `asked.askEffort`, so a redraw keeps it. Returns the row and level() ("" for Default,
+// which sends nothing).
+function askEffortRow(asked, worker) {
+  const select = el("select", { id: "needs-ask-effort", "data-key": "needs-ask-effort" },
+    [["", "Default effort"], ...worker.efforts.map((l) => [l, `${EFFORT_WORDS[l] || l} effort`])]
+      .map(([value, text]) => el("option", { value }, text)));
+  if (![...select.options].some((o) => o.value === asked.askEffort)) asked.askEffort = "";
+  select.value = asked.askEffort;
+  select.addEventListener("change", () => { asked.askEffort = select.value; });
+  const row = el("div", { class: "effort-row" }, el("label", { for: "needs-ask-effort" }, "How hard should it think?"),
+    select, el("small", {}, "Higher effort thinks longer and uses more."));
+  return { row, level: () => select.value };
+}
+
 // Who takes over when a model hits its usage limit: the next best models, from Handoff's benchmark rankings, that
 // this computer has. Shown before the yes, with a switch; approve sends exactly the list shown (Handoff seals it),
 // so a run goes on with the next model, and says so, instead of stopping with nothing done. Nothing is shown by a
@@ -1362,12 +1377,23 @@ function needsForm(asked, t) {
       show();
       form.append(picker.row);
     }
+    // An answer or a review thinks at one level too (no models to pick: the worker's own, and its levels)
+    const asks = (kind) => kind === "answer" || kind === "review";
+    const askEffort = worker && worker.efforts && worker.efforts.length && kinds.some(asks) ? askEffortRow(asked, worker) : null;
+    if (askEffort) {
+      const showEffort = () => { askEffort.row.hidden = !asks(kindNow()); };
+      form.addEventListener("change", showEffort);
+      showEffort();
+      form.append(askEffort.row);
+    }
     const backup = fallbackRow(asked, t, agent, kindNow, () => (picker && kindNow() === "edit" ? picker.args().models : null));
     form.addEventListener("change", backup.refresh);
     form.append(backup.row);
     read = () => {
       const kind = kindNow();
-      return { ...(a.args || {}), kind, ...(picker && kind === "edit" ? picker.args() : {}), ...backup.args() };
+      const level = askEffort && asks(kind) ? askEffort.level() : "";
+      return { ...(a.args || {}), kind, ...(picker && kind === "edit" ? picker.args() : {}),
+        ...(level ? { efforts: { "": level } } : {}), ...backup.args() };
     };
     check = async () => {
       if (!picker || kindNow() !== "edit") { await backup.refresh(); return ""; }
