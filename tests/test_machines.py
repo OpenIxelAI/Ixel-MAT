@@ -1062,6 +1062,37 @@ def test_health_checks_ssh_and_the_terminal_then_counts_pinned_keys(fake_ssh, mo
     assert missing["terminal"].state == "warn"
 
 
+def missing_ssh_on(monkeypatch, tmp_path, system, release: bytes) -> health.Check:
+    """Health's ssh check when no ssh is found, with a fake os-release that says `release`."""
+    store.Store().save({"host": "web"})
+    monkeypatch.setattr(terminal, "find", lambda: None)
+    path = tmp_path / "os-release"
+    path.write_bytes(release)
+    monkeypatch.setattr(health, "OS_RELEASE", path)
+    checks = {c.id: c for c in health.machine_checks(False, which=lambda name: None, system=system)}
+    return checks["ssh"]
+
+
+@pytest.mark.parametrize("release, line", [
+    (b"ID=ubuntu\nID_LIKE=debian\n", "sudo apt install git openssh-client"),
+    (b"ID=fedora\n", "sudo dnf install git openssh-clients"),
+    (b"ID=manjaro\nID_LIKE=arch\n", "sudo pacman -S git openssh"),
+    (b'ID="opensuse-leap"\n', "sudo zypper install git openssh-clients"),
+    (b"ID=alpine\n", "sudo apk add git openssh-client"),
+], ids=["ubuntu", "fedora", "manjaro", "opensuse", "alpine"])
+def test_health_gives_the_line_that_installs_ssh_on_linux(fake_ssh, monkeypatch, tmp_path, release, line):
+    check = missing_ssh_on(monkeypatch, tmp_path, "linux", release)
+    assert check.state == "fail" and check.fix == line
+
+
+def test_health_has_no_line_for_ssh_on_a_linux_it_doesnt_know_or_on_a_mac(fake_ssh, monkeypatch, tmp_path):
+    check = missing_ssh_on(monkeypatch, tmp_path, "linux", b"ID=nixos\n")
+    assert check.state == "fail" and check.fix == "" and "openssh-client, or openssh" in check.detail
+    # A Mac is never asked about its os-release, even when there's one that names a distro
+    check = missing_ssh_on(monkeypatch, tmp_path, "darwin", b"ID=ubuntu\nID_LIKE=debian\n")
+    assert check.state == "fail" and check.fix == "" and "openssh-client, or openssh" in check.detail
+
+
 def test_health_names_what_to_install_when_connect_has_no_terminal(fake_ssh, monkeypatch):
     store.Store().save({"host": "web"})
     on_linux_with(monkeypatch, [])
