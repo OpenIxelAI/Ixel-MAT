@@ -28,7 +28,8 @@ def ws(tmp_path) -> Workspace:
 def _write(ws: Workspace, rel: str, text: str) -> None:
     path = ws.root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    # Exactly these bytes: read_file keeps a file's line endings, and write_text would write \r\n on Windows
+    path.write_bytes(text.encode("utf-8"))
 
 
 # ── list_dir ─────────────────────────────────────────────────────────────────

@@ -95,7 +95,7 @@ async def wait_status(client, run_id, wanted):
 
 def test_models_start_run_runs_and_files_routes(environment):
     _, workspace, store, _ = environment
-    (workspace / "note.txt").write_text("A fake project note.\n", encoding="utf-8")
+    (workspace / "note.txt").write_bytes(b"A fake project note.\n")  # write_text would end it with \r\n on Windows
     skill = store.root / "skills" / "fake-style" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: fake-style\ndescription: Short fake writing rules.\n---\nText.\n",
