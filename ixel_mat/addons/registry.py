@@ -248,7 +248,8 @@ def describe_permissions(card: Card) -> list[dict]:
     source = card.source
     owner_repo = source.repo.removeprefix("https://github.com/").strip("/")
     lines.append((f"Installing downloads {owner_repo} at commit {source.commit[:12]} from GitHub "
-                  f"({source.files} files, checked against the card's hash) into {card.files_dir}.", False))
+                  f"({source.files} {'file' if source.files == 1 else 'files'}, checked against the card's hash) "
+                  f"into {card.files_dir}.", False))
 
     permissions = card.permissions
     lines.append(_FILES_WORDS[permissions.files])
