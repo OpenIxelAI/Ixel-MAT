@@ -1,4 +1,5 @@
-"""Anthropic prompt caching: a long message gets a cache breakpoint, and cached tokens are counted at cache prices."""
+"""Anthropic prompt caching: the fixed start of a message gets a cache breakpoint (a message with no such start
+gets none), and cached tokens are counted at cache prices."""
 import asyncio
 import json
 
@@ -49,17 +50,31 @@ def _cached_reply(_request):
     return status, body, headers
 
 
-def test_a_long_message_to_claude_gets_a_cache_breakpoint_on_its_text(anthropic_to_fake):
+def test_a_long_message_to_claude_with_no_prefix_gets_no_cache_breakpoint(anthropic_to_fake):
+    # Marking the whole message would write it to the cache on every call and never read it back
     async def go():
         async with FakeProvider() as fake:
             anthropic_to_fake["port"] = fake.port
             return await _ask(fake, ANTHROPIC_URL, LONG)
 
     _, _, requests = _run(go())
+    body = requests[0].body
+    assert body["messages"][0]["content"] == LONG
+    assert "cache_control" not in json.dumps(body)
+
+
+def test_a_long_message_to_claude_gets_its_cache_breakpoint_at_the_end_of_the_prefix(anthropic_to_fake):
+    prefix = LONG[:5000]
+
+    async def go():
+        async with FakeProvider() as fake:
+            anthropic_to_fake["port"] = fake.port
+            return await _ask(fake, ANTHROPIC_URL, LONG, cache_prefix=prefix)
+
+    _, _, requests = _run(go())
     content = requests[0].body["messages"][0]["content"]
-    assert isinstance(content, list)
-    assert content[-1]["type"] == "text" and content[-1]["text"] == LONG
-    assert content[-1]["cache_control"] == CACHE
+    assert content == [{"type": "text", "text": prefix, "cache_control": CACHE},
+                       {"type": "text", "text": LONG[5000:]}]
 
 
 def test_a_short_question_to_claude_is_sent_as_before(anthropic_to_fake):
@@ -102,7 +117,9 @@ def test_a_prefix_the_message_does_not_start_with_is_ignored(anthropic_to_fake):
             return await _ask(fake, ANTHROPIC_URL, LONG, cache_prefix="Something else. " + LONG[:5000])
 
     _, _, requests = _run(go())
-    assert requests[0].body["messages"][0]["content"] == [{"type": "text", "text": LONG, "cache_control": CACHE}]
+    body = requests[0].body
+    assert body["messages"][0]["content"] == LONG  # nothing is marked, and never the whole message
+    assert "cache_control" not in json.dumps(body)
 
 
 def test_a_prefix_under_the_minimum_is_not_marked(anthropic_to_fake):
@@ -154,14 +171,15 @@ def test_cached_tokens_are_counted_on_the_streamed_path_too(anthropic_to_fake):
     async def go():
         async with FakeProvider(handler=_cached_reply) as fake:
             anthropic_to_fake["port"] = fake.port
-            return await _ask(fake, ANTHROPIC_URL, LONG, on_text=on_text)
+            return await _ask(fake, ANTHROPIC_URL, LONG, on_text=on_text, cache_prefix=LONG[:5000])
 
     answer, seen, requests = _run(go())
     assert answer == "ok" and "".join(streamed) == "ok"
     assert len(seen) == 1 and (seen[0].cache_read_tokens, seen[0].cache_write_tokens) == (4000, 1200)
     body = requests[0].body
     assert body["stream"] is True
-    assert body["messages"][0]["content"][-1] == {"type": "text", "text": LONG, "cache_control": CACHE}
+    assert body["messages"][0]["content"] == [{"type": "text", "text": LONG[:5000], "cache_control": CACHE},
+                                              {"type": "text", "text": LONG[5000:]}]
 
 
 def test_claude_gets_the_picture_then_the_marked_text(anthropic_to_fake):
@@ -170,9 +188,11 @@ def test_claude_gets_the_picture_then_the_marked_text(anthropic_to_fake):
     async def go():
         async with FakeProvider() as fake:
             anthropic_to_fake["port"] = fake.port
-            return await _ask(fake, ANTHROPIC_URL, LONG, accepts=["image"], pictures=(picture,))
+            return await _ask(fake, ANTHROPIC_URL, LONG, accepts=["image"], pictures=(picture,),
+                              cache_prefix=LONG[:5000])
 
     _, _, requests = _run(go())
     assert requests[0].body["messages"][0]["content"] == [
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": picture.base64()}},
-        {"type": "text", "text": LONG, "cache_control": CACHE}]
+        {"type": "text", "text": LONG[:5000], "cache_control": CACHE},
+        {"type": "text", "text": LONG[5000:]}]

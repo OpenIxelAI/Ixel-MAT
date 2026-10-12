@@ -16,6 +16,9 @@ of its own: one nested inside another object is never taken for the reply), repa
 trailing comma, arguments beside "action" instead of under "args", a missing thought), checks each action and
 its arguments, and returns an Action or Reads. It raises ProtocolError with a short message the runner can
 send back to the model when something's wrong.
+
+prompt_prefix gives the fixed start of a prompt (up to the goal), which the runner passes to the model's
+transport so a provider with prompt caching can cache it.
 """
 from __future__ import annotations
 
@@ -102,6 +105,8 @@ MAX_EARLIER_ANSWER_CHARS = 8_000  # the answer of the run a follow-up continues
 EARLIER_STEPS = 3                 # and its last steps, shown the way older steps are
 MAX_JSON_TRIES = 500            # '{' positions tried when looking for the reply's JSON object
 
+_GOAL_HEADING = "The goal:\n"   # the line before the goal's block: where the prompt's fixed start ends
+_GOAL_TAG = "goal"              # the tag of that block
 _TYPE_NAMES = {str: "text", int: "whole number", list: "list of text", dict: "JSON object"}
 _FRAME_KEYS = ("thought", "action", "reads")  # the keys of a reply's own frame, never an action's arguments
 
@@ -556,7 +561,8 @@ def build_prompt(goal: str, files: dict, skills: list, steps: list[dict], fence:
         parts.append("This run continues an earlier one with the person: the goal below is their next message. "
                      "What they asked then, what you answered and your last steps:\n" + _earlier_run(follows, fence))
 
-    parts.append("The goal:\n" + _fenced(fence, "goal", _clip(_unfenced(str(goal or ""), fence), MAX_GOAL_CHARS)))
+    parts.append(_GOAL_HEADING
+                 + _fenced(fence, _GOAL_TAG, _clip(_unfenced(str(goal or ""), fence), MAX_GOAL_CHARS)))
 
     steps = list(steps or [])
     if steps:
@@ -571,3 +577,13 @@ def build_prompt(goal: str, files: dict, skills: list, steps: list[dict], fence:
 
     parts.append(f"Your reply (one JSON object: one action, or up to {MAX_READS} reads together):")
     return "\n\n".join(parts)
+
+
+def prompt_prefix(prompt: str, fence: str) -> str:
+    """The fixed start of a prompt that build_prompt made with this fence: everything before the goal and the
+    steps, up to and including the opening tag of the goal's block. It's the same text on every call of a
+    run (until its files change), which is what a model's prompt cache needs to be given. '' when the
+    prompt has no such place (it wasn't made with this fence)."""
+    opening = f"{_GOAL_HEADING}<{fence} {_GOAL_TAG}>\n"
+    at = prompt.find(opening)
+    return prompt[:at + len(opening)] if at != -1 else ""

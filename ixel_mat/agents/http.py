@@ -8,7 +8,8 @@ HTTP adapter for direct API agents — no gateway needed.
 Pictures attached to a question go along as image parts when the agent sees pictures
 (AgentConfig.sees_pictures). If the API refuses them (a model that only reads text), the call
 is made again without them, and the model is told it can't see them.
-An Anthropic call with a long message gets a prompt-cache breakpoint, so the stable start of the prompt is cached.
+An Anthropic call that is given the fixed start of its message (cache_prefix=) gets a prompt-cache breakpoint at
+the end of that start, so it is cached; a call with no such start is sent with no breakpoint at all.
 """
 from __future__ import annotations
 
@@ -92,20 +93,22 @@ def _openai_content(message: str, pictures) -> str | list[dict]:
 
 def _anthropic_content(message: str, pictures, cache_prefix: str = "") -> str | list[dict]:
     """
-    The content of an Anthropic message: pictures as image blocks, then the text. A long message gets a cache
-    breakpoint (a cache_control of {'type': 'ephemeral'}, a fresh dict each time) on its text block. cache_prefix
-    is the fixed start of the message when the caller knows it: the breakpoint then ends there, so a call whose
-    end differs still reads the start from the cache.
+    The content of an Anthropic message: pictures as image blocks, then the text. cache_prefix is the fixed
+    start of the message when the caller knows it; the cache breakpoint (a cache_control of
+    {'type': 'ephemeral'}, a fresh dict each time) goes at the end of it, so a call whose end differs still
+    reads the start from the cache. It only goes there when the message starts with the prefix, the prefix is at
+    least MIN_CACHEABLE_CHARS long and the message goes on after it. Otherwise nothing is marked, and never the
+    whole message: its end changes every call, so it would be written to the cache and never read back.
     """
-    lead = cache_prefix if cache_prefix and message.startswith(cache_prefix) else message
-    if len(lead) < MIN_CACHEABLE_CHARS:
-        texts = [{"type": "text", "text": message}]
-    else:
-        texts = [{"type": "text", "text": lead, "cache_control": {"type": "ephemeral"}}]
-        if message[len(lead):]:
-            texts.append({"type": "text", "text": message[len(lead):]})
-    if not pictures and len(texts) == 1 and "cache_control" not in texts[0]:
+    cached = (len(cache_prefix) >= MIN_CACHEABLE_CHARS and len(cache_prefix) < len(message)
+              and message.startswith(cache_prefix))
+    if cached:
+        texts = [{"type": "text", "text": cache_prefix, "cache_control": {"type": "ephemeral"}},
+                 {"type": "text", "text": message[len(cache_prefix):]}]
+    elif not pictures:
         return message
+    else:
+        texts = [{"type": "text", "text": message}]
     return [*({"type": "image", "source": {"type": "base64", "media_type": p.media_type, "data": p.base64()}}
               for p in pictures),
             *texts]
@@ -149,7 +152,8 @@ async def _read_chat_stream(resp: aiohttp.ClientResponse, on_text: OnText,
 ANTHROPIC_DEEP_MAX_TOKENS = 64000
 # Anthropic keeps everything up to a cache breakpoint for a few minutes, and a later call that starts the same way
 # reads it back at about a tenth of the input price (writing it costs a quarter more). Under about 1,024 tokens
-# (roughly 4,096 characters) a breakpoint does nothing, so a shorter message is sent unmarked, exactly as before.
+# (roughly 4,096 characters) a breakpoint does nothing, so a call whose fixed start is shorter than this, or that
+# has none, is sent unmarked.
 MIN_CACHEABLE_CHARS = 4096
 MAX_RETRIES = 2
 # Providers known to accept stream_options (a streamed reply then ends with its token counts);
