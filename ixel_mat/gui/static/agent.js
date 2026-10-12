@@ -45,6 +45,10 @@ let computer = false;  // only ever true once you've confirmed the warning
 let effort = "";
 let uploads = [];      // files attached to the next message: { id, name, kind } (no id while it uploads)
 
+// The / menu: the commands it lists right now, and which of them is highlighted
+let slashList = [];
+let slashAt = 0;
+
 // The conversation on screen: its runs oldest first (the last one is the one followed while it's live),
 // and notes the page added in between (what /help says, say)
 let thread = [];
@@ -62,10 +66,16 @@ export function start() {
   $("#agent-stop").addEventListener("click", (e) => stopRun(e.currentTarget));
   $("#agent-history-button").addEventListener("click", () => showHistory($("#agent-history").hidden));
   $("#agent-memory-button").addEventListener("click", () => showMemory($("#agent-memory").hidden));
-  $("#agent-composer").addEventListener("submit", (e) => { e.preventDefault(); send(); });
+  $("#agent-composer").addEventListener("submit", (e) => { e.preventDefault(); submitBox(); });
   const box = $("#agent-box");
+  box.setAttribute("aria-controls", "agent-slash");
+  box.setAttribute("aria-expanded", "false");
   box.addEventListener("keydown", onBoxKeydown);
-  box.addEventListener("input", grow);
+  box.addEventListener("input", () => { grow(); updateSlash(); });
+  box.addEventListener("click", updateSlash);  // the caret may have moved off the command's word
+  box.addEventListener("blur", closeSlash);
+  // A click or a drag on the menu (its scrollbar too) must not take the focus from the box
+  $("#agent-slash").addEventListener("mousedown", (e) => e.preventDefault());
   $("#agent-attach").addEventListener("click", openPicker);
   $("#agent-upload-input").addEventListener("change", (e) => {
     addUploads([...e.currentTarget.files]);
@@ -267,6 +277,7 @@ function setFast(on) {
 // The effort passed to the model on every call of the next run; "" (or "default") leaves it to the model
 function setEffort(level) {
   const value = String(level || "").trim();
+  if (!value) { addNote("Type the level after /effort, like /effort low. /effort default leaves it to the model."); return; }
   effort = value.toLowerCase() === "default" ? "" : value;
   addNote(effort ? `The next message runs at ${effort} effort.` : "The next message runs at the model's own effort.");
 }
@@ -368,12 +379,172 @@ function listenForDrops() {
 
 // ── The composer ──────────────────────────────────────────────────────────
 
-// Enter sends, Shift+Enter is a new line
+// While the / menu is open the arrows move through it, Enter or Tab picks and Escape closes it. Otherwise Enter
+// sends and Shift+Enter is a new line.
 function onBoxKeydown(e) {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-    e.preventDefault();
-    send();
+  if (e.isComposing) return;
+  if (slashList.length) {
+    const step = { ArrowDown: 1, ArrowUp: -1 }[e.key];
+    if (step) {
+      e.preventDefault();
+      moveSlash(step);
+      return;
+    }
+    if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
+      e.preventDefault();
+      pickSlash(slashList[slashAt]);
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeSlash();
+      return;
+    }
   }
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    submitBox();
+  }
+}
+
+// Enter or the send button: a /command at the start of the box runs here, anything else goes to the agent
+function submitBox() {
+  if (!runTyped()) send();
+}
+
+// ── The / menu ────────────────────────────────────────────────────────────
+
+// The commands. What's typed after a name reaches run() as `rest`. takesArg means it can't do anything without one:
+// picking it from the menu leaves "/name " in the box to finish, where the others run at once.
+const COMMANDS = [
+  { name: "/new", args: "", hint: "start a new conversation", takesArg: false, run: () => newConversation() },
+  { name: "/model", args: "NAME", hint: "use this model", takesArg: true, run: (rest) => setModel(rest) },
+  { name: "/folder", args: "PATH", hint: "work in this folder", takesArg: true, run: (rest) => setFolder(rest) },
+  { name: "/fast", args: "on|off", hint: "turn Fast on or off", takesArg: false,
+    run: (rest) => setFast(onOff(rest, fast)) },
+  { name: "/effort", args: "LEVEL", hint: "how hard the model thinks", takesArg: true, run: (rest) => setEffort(rest) },
+  { name: "/computer", args: "on|off", hint: "let it work outside the folder, after a warning", takesArg: false,
+    run: (rest) => setComputer(onOff(rest, computer)) },
+  { name: "/attach", args: "", hint: "attach files to your message", takesArg: false, run: () => openPicker() },
+  { name: "/memory", args: "", hint: "open Memory and skills", takesArg: false, run: () => showMemory(true) },
+  { name: "/stop", args: "", hint: "stop the run", takesArg: false, run: () => stopRun() },
+  { name: "/help", args: "", hint: "list these commands", takesArg: false, run: () => addNote(helpText()) },
+];
+
+// "on" or "off" as typed; with neither, the opposite of what it is now
+const onOff = (rest, now) => {
+  const word = String(rest || "").trim().toLowerCase();
+  return word === "on" ? true : word === "off" ? false : !now;
+};
+
+// "/model NAME": the command as you'd type it
+const commandUsage = (cmd) => (cmd.args ? `${cmd.name} ${cmd.args}` : cmd.name);
+
+function helpText() {
+  return ["These work at the start of the box:", ...COMMANDS.map((c) => `${commandUsage(c)} — ${c.hint}`)].join("\n");
+}
+
+// Runs the command on the first line of the box and takes that line out; false when the box is a message.
+// A word that looks like a command but isn't one is said so, and stays in the box to fix.
+function runTyped() {
+  const box = $("#agent-box");
+  const first = box.value.split("\n")[0];
+  const word = first.split(/\s/)[0];
+  if (!/^\/[a-z]*$/i.test(word)) return false;  // "/home/x/notes.md is odd" is a message, not a command
+  closeSlash();
+  const cmd = COMMANDS.find((c) => c.name === word.toLowerCase());
+  if (!cmd) {
+    addNote(`Unknown command: ${word}. Type /help to see them.`);
+    return true;
+  }
+  clearCommandLine();
+  cmd.run(first.slice(word.length).trim());
+  return true;
+}
+
+// The box without its first line: anything typed under a command stays as the message being written
+function clearCommandLine() {
+  const box = $("#agent-box");
+  const at = box.value.indexOf("\n");
+  box.value = at < 0 ? "" : box.value.slice(at + 1);
+  grow();
+}
+
+// Opens the menu with the commands that start like the word being typed, or closes it when there's no such word
+function updateSlash() {
+  const box = $("#agent-box");
+  const first = box.value.split("\n")[0];
+  // Only while the command's own word is being typed: once a space follows it, what comes next is its argument
+  const typing = /^\/\S*$/.test(first) && box.selectionStart <= first.length;
+  const word = first.toLowerCase();
+  const matches = typing ? COMMANDS.filter((c) => c.name.startsWith(word)) : [];
+  if (!matches.length) {
+    closeSlash();
+    return;
+  }
+  const same = matches.length === slashList.length && matches.every((c, i) => c === slashList[i]);
+  if (same) return;
+  slashList = matches;
+  slashAt = 0;
+  renderSlash();
+}
+
+function renderSlash() {
+  const menu = $("#agent-slash");
+  menu.replaceChildren(...slashList.map((cmd, i) => {
+    const option = el("div", { class: "agent-slash-option", role: "option", id: `agent-slash-${i}`, "aria-selected": "false" },
+      el("span", { class: "agent-slash-name" }, commandUsage(cmd)),
+      el("span", { class: "agent-slash-hint" }, cmd.hint));
+    option.addEventListener("click", () => pickSlash(cmd));
+    return option;
+  }));
+  menu.hidden = false;
+  $("#agent-box").setAttribute("aria-expanded", "true");
+  highlightSlash();
+}
+
+// The highlighted option is the one the arrows are on; the box points at it for screen readers
+function highlightSlash() {
+  const menu = $("#agent-slash");
+  [...menu.children].forEach((option, i) => option.setAttribute("aria-selected", String(i === slashAt)));
+  $("#agent-box").setAttribute("aria-activedescendant", `agent-slash-${slashAt}`);
+}
+
+function moveSlash(step) {
+  slashAt = (slashAt + step + slashList.length) % slashList.length;
+  highlightSlash();
+  $("#agent-slash").children[slashAt].scrollIntoView({ block: "nearest" });
+}
+
+// The menu leaves the page with its options, so nothing is left listening
+function closeSlash() {
+  slashList = [];
+  slashAt = 0;
+  const menu = $("#agent-slash");
+  if (menu.hidden) return;
+  menu.replaceChildren();
+  menu.hidden = true;
+  const box = $("#agent-box");
+  box.setAttribute("aria-expanded", "false");
+  box.removeAttribute("aria-activedescendant");
+}
+
+// A command that takes something waits in the box for it; the others run at once
+function pickSlash(cmd) {
+  if (!cmd) return;
+  const box = $("#agent-box");
+  closeSlash();
+  box.focus();
+  if (!cmd.takesArg) {
+    clearCommandLine();
+    cmd.run("");
+    return;
+  }
+  const typed = `${cmd.name} `;
+  const at = box.value.indexOf("\n");
+  box.value = typed + (at < 0 ? "" : box.value.slice(at));
+  box.setSelectionRange(typed.length, typed.length);
+  grow();
 }
 
 // The box grows with what you type, up to a part of the window
