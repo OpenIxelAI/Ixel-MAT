@@ -14,6 +14,9 @@ Security model
   styles, no inline code, no third-party anything. Model output is
   rendered with textContent only, never as HTML.
 - Only a fixed list of static files is served. One review at a time.
+- A diagram the Diagram Design add-on made is served at /diagram/<id> (a
+  random id, only from this server's memory) with a CSP of its own: a
+  sandbox with its inline code and nothing else, framed only by the page.
 - Ask's conversations come back after a reload from this server's memory
   (/api/conversations), never from the browser's storage, which Edge and
   Chrome may write into a profile folder. They're gone when Ixel stops.
@@ -48,7 +51,7 @@ from typing import Any, Awaitable, Callable, Sequence
 import aiohttp
 from aiohttp import web
 
-from ixel_mat import __version__, pictures, sound, stats
+from ixel_mat import __version__, addons, pictures, sound, stats
 from ixel_mat.agents.base import needs_api_key
 from ixel_mat.agent.store import AgentStore
 from ixel_mat.gui import agent_api
@@ -90,8 +93,15 @@ STATIC_FILES = {
 }
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src blob:; "
-       "connect-src 'self'; "
+       "connect-src 'self'; frame-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+
+# A diagram (GET /diagram/<id>): a model's HTML, shown in a sandboxed frame of the page. Its own inline code
+# runs, in an opaque origin that can't reach the page, this server or anywhere else
+DIAGRAM_CSP = ("sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+               "img-src data: blob:; font-src data:; connect-src 'none'; frame-ancestors 'self'; base-uri 'none'; "
+               "form-action 'none'")
+DIAGRAM_ID = re.compile(r"[0-9a-f]{32}")
 
 SECURITY_HEADERS = {
     "Content-Security-Policy": CSP,
@@ -283,6 +293,8 @@ class GuiServer:
         self.agent_runs = self.agent.runs  # live runs by id; each also saves itself as a session
         self.pictures = pictures.PictureStore()  # attached to questions: in memory only, gone when Ixel stops
         self.conversations = Conversations()     # Ask's, for a reload: in memory only, too
+        self.diagrams = addons.DiagramStore()    # the diagrams made here, by the id the page shows each under
+        self._diagram_lock = asyncio.Lock()      # one diagram being made at a time
         from ixel_mat.gui import handoff_api
         self._handoff_command = handoff_command or handoff_api.handoff_command
         self._board_watch = handoff_api.BoardWatch()
@@ -315,6 +327,10 @@ class GuiServer:
         app.router.add_get("/api/health", self._health)
         app.router.add_get("/api/presence", self._presence)
         app.router.add_post("/api/review", self._review)
+        app.router.add_post("/api/diagram", self._diagram)
+        app.router.add_post("/api/diagram/open", self._diagram_open)
+        app.router.add_post("/api/diagram/reveal", self._diagram_reveal)
+        app.router.add_get("/diagram/{id}", self._diagram_file)
         app.router.add_post(PICTURES_PATH, self._add_picture)
         app.router.add_post(SOUND_PATH, self._sound)
         app.router.add_post(DOCUMENTS_PATH, self._read_document)
@@ -357,6 +373,8 @@ class GuiServer:
         app.router.add_post("/api/settings/key", self._settings_key)
         app.router.add_post("/api/settings/servers", self._settings_servers)
         app.router.add_post("/api/settings/servers/pull", self._settings_pull)
+        app.router.add_get("/api/addons", self._addons)
+        app.router.add_post("/api/addons", self._addons_change)
         app.router.add_get("/api/appearance", self._appearance)
         app.router.add_post("/api/appearance", self._appearance_change)
         app.router.add_post("/api/docs", self._docs)
@@ -439,9 +457,10 @@ class GuiServer:
         self._stopping = True
 
     async def _forget_what_was_asked(self, app: web.Application) -> None:
-        # Pictures and conversations are only ever in memory: they go with the server
+        # Pictures, conversations and where diagrams are are only ever in memory: they go with the server
         self.pictures.clear()
         self.conversations.clear()
+        self.diagrams.clear()
 
     async def _stop_runs(self, app: web.Application) -> None:
         # Commands still running on your machines stop with Ixel
@@ -469,6 +488,15 @@ class GuiServer:
         saver_configs = settings.saver_configs()
         verifier = settings.verifier
         triage = settings.active_triage
+        diagram = addons.diagram_card()
+        diagram_models = []
+        if diagram is not None:
+            from ixel_mat.ask import is_ready
+            choices = addons.diagram_choices([cfg for cfg in settings.panel_configs().values() if is_ready(cfg)],
+                                             settings.pricing)
+            default = addons.default_choice(choices)
+            diagram_models = [{**c.to_dict(), "default": default is not None and c.id == default.id}
+                              for c in choices]
         return web.json_response(_clean({
             "version": __version__,
             "agents": agents[:MAX_PANEL],
@@ -490,6 +518,10 @@ class GuiServer:
                 "official": triage.enabled and triage.official,
             },
             "sound": _sound_now(settings.config),
+            # Ask offers its Diagram button while Diagram Design is on
+            "addons": {"diagram": diagram is not None},
+            # The models Diagram can use, with the one it picks by itself marked default
+            "diagram_models": diagram_models,
             "warnings": settings.warnings,
         }))
 
@@ -639,6 +671,17 @@ class GuiServer:
                     work.cancel()  # closes the connection to Ollama, which stops its download
                 await asyncio.gather(work, watch, return_exceptions=True)
             return response
+
+    # Add-ons: other people's skills, off until switched on in Settings (see addons.py)
+
+    async def _addons(self, request: web.Request) -> web.Response:
+        from ixel_mat.gui import settings_api
+        settings = await asyncio.to_thread(self._load_settings)
+        return web.json_response(_clean(await asyncio.to_thread(settings_api.addons_list, settings)))
+
+    async def _addons_change(self, request: web.Request) -> web.Response:
+        from ixel_mat.gui import settings_api
+        return await self._settings_write(request, settings_api.set_addon)
 
     # Appearance: System, Light or Dark (see appearance.py)
 
@@ -1412,6 +1455,169 @@ class GuiServer:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
             await self._disconnect(agents)
+
+    # Diagram: one model draws the question as one HTML file, with the Diagram Design add-on (see addons.py)
+
+    async def _diagram(self, request: web.Request) -> web.StreamResponse:
+        """Make a diagram; streams NDJSON: start, model, check, retry, then final (with the id it's shown under)
+        or error. Closing the page cancels the model call."""
+        import dataclasses
+        from ixel_mat.ask import is_ready
+        body = await self._handoff_body(request)
+        if isinstance(body, web.Response):
+            return body
+        question, wanted, model = body.get("question"), body.get("agent"), body.get("model")
+        if not isinstance(question, str) or not question.strip():
+            return _json_error(400, "Say what to draw.")
+        if len(question) > MAX_QUESTION_CHARS:
+            return _json_error(400, f"The question is longer than {MAX_QUESTION_CHARS:,} characters.")
+        if wanted is not None and not isinstance(wanted, str):
+            return _json_error(400, "agent must be a model's name.")
+        if model is not None and not isinstance(model, str):
+            return _json_error(400, "model must be a model's name.")
+        settings = await asyncio.to_thread(self._load_settings)
+        card = await asyncio.to_thread(addons.diagram_card)
+        if card is None:
+            return web.json_response({"error": "Diagram Design is off. Turn it on in Settings, under Add-ons.",
+                                      "code": "addon_off"}, status=409)
+        try:
+            await asyncio.to_thread(addons.check_installed, card)  # exactly the files approved, or none of them
+        except addons.AddonError as exc:
+            return web.json_response({"error": str(exc), "code": exc.code}, status=exc.status)
+        ready = [cfg for cfg in settings.panel_configs().values() if is_ready(cfg)]
+        choices = addons.diagram_choices(ready, settings.pricing)
+        if not choices:
+            return _json_error(409, "None of the models on your panel is ready to ask. Add one in Settings, or "
+                                    "run ixel setup.")
+        if wanted:
+            choice = addons.find_choice(choices, wanted, model)
+            if choice is None:
+                if not any(c.agent == wanted for c in choices):
+                    return _json_error(409, f"{wanted} isn't a model on your panel that's ready to ask. "
+                                            "Pick another.")
+                return _json_error(409, f"{wanted} can't run {model} for diagrams. Pick another.")
+        else:
+            choice = addons.default_choice(choices)
+        chosen = next(cfg for cfg in ready if cfg.name == choice.agent)
+        if choice.model:
+            chosen = dataclasses.replace(chosen, model=choice.model)
+        if self._diagram_lock.locked():
+            return _json_error(409, "A diagram is already being made.")
+        async with self._diagram_lock:
+            response = web.StreamResponse(headers={"Content-Type": "application/x-ndjson; charset=utf-8"})
+            await response.prepare(request)
+            await self._stream_diagram(request, response, chosen, question.strip(), card.files_dir)
+            return response
+
+    async def _stream_diagram(self, request: web.Request, response: web.StreamResponse, cfg,
+                              question: str, folder: Path) -> None:
+        from ixel_mat.ask import AskError
+        make_task: asyncio.Task | None = None
+        watchdog: asyncio.Task | None = None
+        gone = False
+
+        def page_gone() -> None:
+            # The page closed or pressed Stop: stop paying for the model call
+            nonlocal gone
+            gone = True
+            if make_task is not None and not make_task.done():
+                make_task.cancel()
+
+        async def watch_connection() -> None:
+            # A model can take minutes to draw: notice a closed tab without waiting for the next event
+            while True:
+                await asyncio.sleep(0.25)
+                transport = request.transport
+                if transport is None or transport.is_closing():
+                    page_gone()
+                    return
+
+        async def send(kind: str, data: dict) -> None:
+            if gone:
+                return
+            try:
+                await response.write((json.dumps({"kind": kind, "data": _clean(data)}) + "\n").encode())
+            except (ConnectionError, RuntimeError):
+                page_gone()
+
+        async def on_event(kind: str, data: dict) -> None:
+            if kind == "start":
+                data = {**data, "model": cfg.model or ""}
+            await send(kind, data)
+
+        watchdog = asyncio.create_task(watch_connection())
+        self._reviews.add(page_gone)  # stopped with Ixel, as a review is
+        try:
+            # No timeout here: make_diagram gives a model on your own computer longer
+            make_task = asyncio.create_task(addons.make_diagram(cfg, question, folder, on_event=on_event))
+            try:
+                result = await make_task
+            except asyncio.CancelledError:
+                if not gone:  # we were cancelled, not the page
+                    raise
+                return
+            await send("final", {"diagram": {**result.to_dict(), "id": self.diagrams.add(result.path)}})
+        except AskError as exc:
+            await send("error", {"message": str(exc), "code": "ask"})
+        except addons.AddonError as exc:
+            await send("error", {"message": str(exc), "code": exc.code})
+        except Exception as exc:  # noqa: BLE001 — report, don't leave the page hanging
+            logger.exception("diagram failed")
+            await send("error", {"message": f"Something went wrong: {exc}", "code": "failed"})
+        finally:
+            self._reviews.discard(page_gone)
+            for task in (watchdog, make_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    async def _diagram_file(self, request: web.Request) -> web.Response:
+        """A diagram made here, for the page's sandboxed frame. Its own headers: its inline code runs (the page's
+        never does), sandboxed, and only this server's page may frame it."""
+        wanted = request.match_info.get("id", "")
+        path = self.diagrams.get(wanted) if DIAGRAM_ID.fullmatch(wanted) else None
+        if path is None:
+            return web.Response(status=404, text="No such diagram.")
+        try:
+            data = await asyncio.to_thread(path.read_bytes)
+        except OSError:
+            return web.Response(status=404, text="That diagram's file isn't there any more.")
+        return web.Response(body=data, headers={"Content-Type": "text/html; charset=utf-8",
+                                                "Content-Security-Policy": DIAGRAM_CSP,
+                                                "X-Frame-Options": "SAMEORIGIN", "Cache-Control": "no-store"})
+
+    async def _diagram_path(self, request: web.Request) -> tuple[str, Path] | web.Response:
+        """The id the body names and its diagram's file, or the response saying why not."""
+        body = await self._handoff_body(request)
+        if isinstance(body, web.Response):
+            return body
+        wanted = body.get("id")
+        path = self.diagrams.get(wanted) if isinstance(wanted, str) and DIAGRAM_ID.fullmatch(wanted) else None
+        if path is None:
+            return _json_error(404, "Ixel doesn't know that diagram any more. Make it again.")
+        return wanted, path
+
+    async def _diagram_open(self, request: web.Request) -> web.Response:
+        """Open: the diagram in your own browser, served from here under the frame's sandbox and CSP. As a file:
+        URL its inline code would run with none of them."""
+        from ixel_mat import docs
+        picked = await self._diagram_path(request)
+        if isinstance(picked, web.Response):
+            return picked
+        key, path = picked
+        opened = False
+        if docs.can_open_browser():
+            opened = await asyncio.to_thread(docs.open_in_browser, f"http://127.0.0.1:{self.port}/diagram/{key}")
+        return web.json_response(_clean({"opened": bool(opened), "file": str(path)}))
+
+    async def _diagram_reveal(self, request: web.Request) -> web.Response:
+        """Show in folder: the diagram's folder, with the file picked where the system can."""
+        picked = await self._diagram_path(request)
+        if isinstance(picked, web.Response):
+            return picked
+        _, path = picked
+        shown = await asyncio.to_thread(addons.show_in_folder, path)
+        return web.json_response(_clean({"shown": bool(shown), "folder": str(path.parent)}))
 
 
 async def _start(port: int) -> tuple[GuiServer, web.AppRunner]:

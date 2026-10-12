@@ -16,6 +16,7 @@ secrets._ENV_DIR, secrets._ENV_FILE, secrets._KEYS_FILE = _NOWHERE, _NOWHERE / "
 import pytest  # noqa: E402
 
 from ixel_mat import conversation, forget, stats, update  # noqa: E402
+from ixel_mat.addons import paths as addon_paths  # noqa: E402
 from ixel_mat.agents import leftovers, websocket  # noqa: E402
 from ixel_mat.config import loader  # noqa: E402
 from ixel_mat.config import setup as wizard  # noqa: E402
@@ -56,6 +57,10 @@ USER_FILES = [
     (machines_ssh, "PINS_FILE", "machines_known_hosts"),
     (machines_log, "LOG_FILE", "machines.log"),
     (appearance, "APP_FILE", "app.json"),
+    # Add-ons (their cards, files and state.json) and the diagrams Diagram Design makes: ~/.ixel/addons and
+    # ~/.ixel/diagrams in a real run
+    (addon_paths, "ADDONS_DIR", "addons"),
+    (addon_paths, "DIAGRAMS_DIR", "diagrams"),
 ]
 
 
