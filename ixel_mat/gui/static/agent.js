@@ -594,7 +594,9 @@ function updateButtons() {
   $("#agent-send").disabled = live || sending;
   $("#agent-stop").hidden = !live;
   const last = lastRun();
-  $("#agent-sub").textContent = last ? [STATUS_WORDS[last.status] || last.status, modelName(last.model)].filter(Boolean).join(" · ") : "";
+  const sub = $("#agent-sub");  // a status line: it's read out when the run's state changes, so only write a change
+  const words = last ? [STATUS_WORDS[last.status] || last.status, modelName(last.model)].filter(Boolean).join(" · ") : "";
+  if (sub.textContent !== words) sub.textContent = words;
 }
 
 const modelName = (name) => {
@@ -696,6 +698,7 @@ async function refresh() {
 }
 
 function replaceLast(run, before) {
+  if (!lastRun() || lastRun().id !== run.id) return;  // the conversation changed while the reply was on its way
   if (LIVE.has(before) && !LIVE.has(run.status) && !finishedAt.has(run.id)) finishedAt.set(run.id, Date.now());
   thread[thread.length - 1] = run;
   renderConversation();
