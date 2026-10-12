@@ -293,6 +293,10 @@ verifier_effort = "low"       # checking is easier than writing (left out: the v
 # [updates]
 # check = false
 
+# Add-ons the app's Settings page switches on (it downloads a pinned release and saves this)
+# [addons]
+# diagram_design = true
+
 # ── Prices (optional) ─────────────────────────────────────────────────────────
 # What an API-key call costs, in $ per million tokens. Claude's list prices are
 # built in; add the models you use from other providers, from their price lists.
