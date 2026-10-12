@@ -242,6 +242,146 @@ def test_keys_in_plain_text_because_the_keychain_refused_say_so(keychain):
     assert check["state"] == "warn" and check["detail"] == said[:health.MAX_DETAIL]  # a Mac's temp folder is long
 
 
+# Who can open keys.enc: on Windows icacls says (whoami names the account), elsewhere it's the file's mode
+SID = "S-1-5-21-1-2-3-1001"
+WHO = ("desktop-abc\\me", SID)  # what whoami prints; icacls shows the same account as DESKTOP-ABC\Me
+ME = "DESKTOP-ABC\\Me"
+YOURS = [f"{ME}:(F)"]
+YOURS_FOLDER = [f"{ME}:(OI)(CI)(F)"]
+
+
+def icacls_text(path, *entries):
+    """`icacls <path>`'s output: the path and the first entry, the others indented under it, a blank line, and
+    a summary."""
+    pad = " " * (len(str(path)) + 1)
+    lines = [f"{path} {entries[0]}", *(pad + entry for entry in entries[1:])]
+    return "\r\n".join(lines) + "\r\n\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n\r\n"
+
+
+def on_windows(monkeypatch, file=YOURS, folder=YOURS_FOLDER, who=WHO):
+    """Health as it runs on Windows: whoami says who (None: it couldn't), and icacls lists these entries for keys.enc
+    and for its folder (None: it couldn't be run). No program runs. Gives keys.enc's path."""
+    from ixel_mat.config import secrets
+    keys = secrets.get_keys_file_path()
+    said = {keys: file, keys.parent: folder}
+
+    def read_acl(path):
+        if said[path] is None:
+            return None, "icacls failed"
+        return secrets.parse_icacls(icacls_text(path, *said[path]), path), ""
+
+    def refuse(argv):
+        raise AssertionError(f"a program was run: {argv}")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(secrets, "user_sid", lambda: who)
+    monkeypatch.setattr(secrets, "read_acl", read_acl)
+    monkeypatch.setattr(secrets, "_run_tool", refuse)
+    return keys
+
+
+def saved_keys_check():
+    return checks_of(run_report(settings_with(CLOUD), False, Calls()))["keys-file"]
+
+
+@pytest.mark.parametrize("file", [YOURS, [f"{SID}:(F)"]], ids=["by-name", "by-sid"])
+def test_keys_only_you_can_open_are_ok_on_windows(keychain, monkeypatch, file):
+    from ixel_mat.config import secrets
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    on_windows(monkeypatch, file=file)
+    report = run_report(settings_with(CLOUD), False, Calls())
+    check = checks_of(report)["keys-file"]
+    assert check["state"] == "ok" and check["fix"] == ""
+    assert KEY not in json.dumps(report)
+
+
+def test_keys_that_inherit_their_folders_access_are_flagged_with_the_line_that_fixes_it(keychain, monkeypatch):
+    from ixel_mat.config import secrets
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    keys = on_windows(monkeypatch, file=["NT AUTHORITY\\SYSTEM:(I)(F)", "BUILTIN\\Administrators:(I)(F)",
+                                         f"{ME}:(I)(F)"])
+    report = run_report(settings_with(CLOUD), False, Calls())
+    check = checks_of(report)["keys-file"]
+    assert check["state"] == "warn" and "lets in whoever" in check["detail"]
+    assert check["fix"] == secrets.owner_only_fix(keys, SID, False, [])
+    assert check["fix"].startswith('icacls "')
+    assert KEY not in json.dumps(report)
+
+
+def test_keys_other_accounts_can_open_are_flagged_by_name_and_taken_off_in_the_fix(keychain, monkeypatch):
+    from ixel_mat.config import secrets
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    keys = on_windows(monkeypatch, file=[*YOURS, "DESKTOP-ABC\\Other:(R)"])
+    report = run_report(settings_with(CLOUD), False, Calls())
+    check = checks_of(report)["keys-file"]
+    assert check["state"] == "warn" and "DESKTOP-ABC\\Other" in check["detail"]
+    assert check["fix"] == secrets.owner_only_fix(keys, SID, False, ["DESKTOP-ABC\\Other"])
+    assert check["fix"].startswith('icacls "') and '/remove:g "DESKTOP-ABC\\Other"' in check["fix"]
+    assert KEY not in json.dumps(report)
+
+
+def test_a_folder_that_lets_others_in_is_flagged_with_a_fix_for_the_folder(keychain, monkeypatch):
+    from ixel_mat.config import secrets
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    keys = on_windows(monkeypatch, folder=[f"{ME}:(OI)(CI)(F)", "BUILTIN\\Users:(I)(OI)(CI)(RX)"])
+    check = saved_keys_check()
+    assert check["state"] == "warn"
+    assert check["fix"] == secrets.owner_only_fix(keys.parent, SID, True, [])
+    assert check["fix"].startswith('icacls "') and "(OI)(CI)F" in check["fix"]
+
+
+@pytest.mark.parametrize("said", [{"file": None}, {"folder": None}, {"who": None}],
+                         ids=["file-unreadable", "folder-unreadable", "account-unknown"])
+def test_keys_that_cant_be_checked_are_a_warning_with_no_line_to_run(keychain, monkeypatch, said):
+    from ixel_mat.config import secrets
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    on_windows(monkeypatch, **said)
+    check = saved_keys_check()
+    assert check["state"] == "warn" and check["fix"] == "" and "couldn't check" in check["detail"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="file modes")
+def test_a_keys_enc_others_can_read_is_flagged(keychain):
+    from ixel_mat.config import secrets
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    keys = secrets.get_keys_file_path()
+    keys.chmod(0o644)
+    check = saved_keys_check()
+    assert check["state"] == "warn" and check["fix"] == f"chmod 600 '{keys}'" and "644" in check["detail"]
+    assert keys.stat().st_mode & 0o077 == 0  # opening it reset the mode, as the line says
+    keys.chmod(0o600)
+    assert saved_keys_check()["state"] == "ok"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows access lists")
+def test_on_windows_the_real_access_list_is_owner_only_and_health_sees_it_change(keychain):
+    from ixel_mat.config import secrets
+    secrets.save_secret("OPENAI_API_KEY", KEY)
+    keys = secrets.get_keys_file_path()
+    assert health.keys_check().state == "ok"
+    account, sid = secrets.user_sid()
+    entries, why = secrets.read_acl(keys)  # icacls itself
+    assert entries, why
+    assert secrets.acl_problems(entries, account, sid) == (False, [])
+    assert any(who.lower() in {account.lower(), sid.lower()} for who, _ in entries)
+
+    # Someone else is let in (BUILTIN\Users): Health says so, and the fix puts it right
+    icacls = secrets._system_tool("icacls.exe")
+    done = subprocess.run([icacls, str(keys), "/grant", "*S-1-5-32-545:R"], capture_output=True,
+                          stdin=subprocess.DEVNULL, timeout=30)
+    assert done.returncode == 0, done.stdout
+    check = health.keys_check()
+    assert check.state == "warn" and "/remove:g" in check.fix
+    extras = secrets.acl_problems(secrets.read_acl(keys)[0], account, sid)[1]
+    assert extras and check.fix == secrets.owner_only_fix(keys, sid, False, extras)
+    argv = secrets.owner_only_argv(keys, sid)  # the fix, as an argv: it's never given to a shell
+    for name in extras:
+        argv += ["/remove:g", f"*{name}" if name.upper().startswith("S-1-") else name]
+    done = subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+    assert done.returncode == 0, done.stdout
+    assert health.keys_check().state == "ok"
+
+
 def test_the_ixel_checks_run_off_the_event_loop(monkeypatch):
     """Where the saved keys are may mean asking the keychain, which can wait for a password."""
     import threading

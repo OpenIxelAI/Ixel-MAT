@@ -4,8 +4,9 @@ the one line that fixes it.
 
 Each check is ok, warn (works, but something's off), fail (won't work), off (optional and not set up)
 or unchecked (needs a network call or a program run: the page's "Check now", `ixel doctor --check`).
-Without probe nothing goes over the network and no program runs, so the page opens at once. Nothing
-here ever returns a key: only whether one is set.
+Without probe nothing goes over the network and no program runs, so the page opens at once. The one
+exception is on Windows, where `icacls` (a quick local program, run by its full path) reads who can open
+the saved keys. Nothing here ever returns a key: only whether one is set.
 """
 from __future__ import annotations
 
@@ -147,8 +148,51 @@ def keys_check(wait: bool = True) -> Check:
         return Check("keys-file", "Saved keys", "fail", f"Ixel can't read the keys saved in it: {exc}")
 
 
+def _mode_of(path: Path) -> int:
+    """path's mode bits, or 0 where there are none to read (Windows) or no such file."""
+    if os.name != "posix":
+        return 0
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return 0
+
+
+def _keys_access(secrets, keys: Path, mode: int) -> Check | None:
+    """A warning when someone besides you may be able to open keys.enc, or when that couldn't be checked,
+    else None. mode is keys.enc's, as it was found. On Windows its access list is read, then its folder's:
+    what's made in a folder that lets others in is open to them too."""
+    if sys.platform != "win32":
+        if mode & 0o077:
+            return Check("keys-file", "Saved keys", "warn", f"{keys} is encrypted, but other people on this "
+                         f"computer could read it ({mode:o}). Ixel resets it to 600 when it opens it",
+                         f"chmod 600 '{keys}'")
+        return None
+    who = secrets.user_sid()
+    if who is None:
+        return Check("keys-file", "Saved keys", "warn", "Ixel couldn't check who can open the file your keys "
+                     "are saved in: it couldn't tell which Windows account this is")
+    account, sid = who
+    for path, folder in ((keys, False), (keys.parent, True)):
+        entries, why = secrets.read_acl(path)
+        if entries is None:
+            return Check("keys-file", "Saved keys", "warn", f"Ixel couldn't check who can open {path} ({why})")
+        inherited, extras = secrets.acl_problems(entries, account, sid)
+        if inherited:
+            detail = (f"{path} also lets in whoever its folder lets in, so other people on this computer may be "
+                      "able to open it")
+        elif extras:
+            detail = f"{path} can also be opened by other accounts on this computer: {', '.join(extras)}"
+        else:
+            continue
+        return Check("keys-file", "Saved keys", "warn", detail, secrets.owner_only_fix(path, sid, folder, extras))
+    return None
+
+
 def _keys_check(wait: bool = True) -> Check:
     from ixel_mat.config import secrets
+    keys = secrets.get_keys_file_path()
+    keys_mode = _mode_of(keys)  # before where_keys_are: opening keys.enc resets a loose mode to 0600
     store = secrets.where_keys_are(wait)
     plain = secrets.get_env_file_path()
     if plain.exists() and os.name == "posix":  # a .env left with keys, or the only place there is
@@ -160,6 +204,10 @@ def _keys_check(wait: bool = True) -> Check:
         return Check("keys-file", "Saved keys", "fail", store.problem, "ixel setup")
     if store.kind == "unavailable":
         return Check("keys-file", "Saved keys", "warn", store.problem)
+    if keys.exists():
+        access = _keys_access(secrets, keys, keys_mode)
+        if access is not None:
+            return access
     some = bool(secrets.saved_names())
     if store.kind == "keychain":
         what = "Encrypted" if some else "None yet. Keys you save are encrypted"
