@@ -18,6 +18,7 @@
     <img src="/mark.svg" alt="" class="mark rail-mark" width="24" height="24">
     <button type="button" class="rail-item" data-view="ask"><i data-icon="message"></i><span>Ask</span><b class="rail-dot rec" id="rec-dot" title="Recording" hidden></b></button>
     <button type="button" class="rail-item" data-view="board"><i data-icon="board"></i><span>Board</span><b class="rail-dot" hidden></b></button>
+    <button type="button" class="rail-item" data-view="agent"><i data-icon="zap"></i><span>Agent</span></button>
     <button type="button" class="rail-item" data-view="machines"><i data-icon="server"></i><span>Machines</span></button>
     <button type="button" class="rail-item" data-view="health"><i data-icon="pulse"></i><span>Health</span><b class="rail-dot" hidden></b></button>
     <button type="button" class="rail-item" data-view="settings"><i data-icon="sliders"></i><span>Settings</span></button>
@@ -170,6 +171,47 @@
     <div class="board-main" id="board-main"></div>
     <aside class="task-panel" id="task-panel" aria-labelledby="task-title" hidden></aside>
     <dialog class="board-dialog" id="board-dialog" aria-label="Board"></dialog>
+  </section>
+
+  <section class="view page agent-view" id="view-agent" data-view="agent" aria-labelledby="agent-title" hidden>
+    <header class="topbar">
+      <h1 class="page-title" id="agent-title" tabindex="-1">Agent</h1>
+      <small class="beta">Beta</small>
+      <span class="page-sub" id="agent-sub" role="status"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn danger" id="agent-stop" hidden><i data-icon="stop"></i><span>Stop</span></button>
+      <button type="button" class="btn" id="agent-history-button" aria-label="History" aria-expanded="false" aria-controls="agent-history"><i data-icon="menu"></i><span>History</span></button>
+      <button type="button" class="btn" id="agent-memory-button" aria-label="Memory and skills" aria-expanded="false" aria-controls="agent-memory"><i data-icon="book"></i><span>Memory and skills</span></button>
+    </header>
+    <div class="scroller">
+      <div class="agent-column">
+        <div class="agent-status" id="agent-status" hidden></div>
+        <section class="agent-history" id="agent-history" aria-label="History" hidden></section>
+        <section class="agent-memory" id="agent-memory" aria-label="Memory and skills" hidden></section>
+        <div class="agent-conversation" id="agent-conversation"></div>
+      </div>
+    </div>
+    <div class="agent-dock">
+      <form class="agent-composer" id="agent-composer" aria-label="Message the agent">
+        <ul class="agent-attachments" id="agent-attachments" aria-label="Attached files" hidden></ul>
+        <div class="agent-slash" id="agent-slash" role="listbox" aria-label="Commands" hidden></div>
+        <textarea id="agent-box" rows="1" spellcheck="false" autocomplete="off" writingsuggestions="false"
+          aria-label="Message" placeholder="Ask the agent to do something…"></textarea>
+        <input type="file" multiple id="agent-upload-input" aria-label="Files to attach" hidden>
+        <div class="agent-bar">
+          <button type="button" class="icon-btn agent-attach" id="agent-attach" aria-label="Attach files" title="Attach files"><i data-icon="plus"></i></button>
+          <div class="agent-chips" id="agent-chips" role="group" aria-label="Run options">
+            <button type="button" class="agent-chip" id="agent-chip-folder" aria-label="Folder" title="The folder it works in"><i data-icon="folder"></i><span>Pick a folder</span></button>
+            <button type="button" class="agent-chip" id="agent-chip-model" aria-label="Model" title="The model it uses"><i data-icon="zap"></i><span>Pick a model</span></button>
+            <button type="button" class="agent-chip" id="agent-chip-fast" aria-pressed="false" title="At most 10 steps, at the model's lowest effort"><span>Fast</span></button>
+            <button type="button" class="agent-chip agent-chip-computer" id="agent-chip-computer" aria-pressed="false" title="Lets it work outside the folder, after a warning"><span>Computer access</span></button>
+          </div>
+          <span class="spacer"></span>
+          <button type="submit" class="agent-send" id="agent-send" aria-label="Send" title="Send (Enter)"><i data-icon="arrowUp"></i></button>
+        </div>
+      </form>
+    </div>
+    <dialog class="board-dialog" id="agent-dialog" aria-label="Agent"></dialog>
   </section>
 
   <section class="view page machines-view" id="view-machines" data-view="machines" aria-labelledby="machines-title" hidden>

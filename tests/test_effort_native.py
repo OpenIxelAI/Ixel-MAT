@@ -53,7 +53,7 @@ def test_codex_sends_ultra_to_a_model_that_takes_it_and_the_nearest_to_one_that_
 
 
 def test_claude_code_knows_its_aliases_and_haiku_takes_none():
-    assert native_levels("claude_code", "haiku") == []
+    assert native_levels("claude_code", "haiku")  # Haiku 5.5, Claude Code's "haiku" now, takes effort
     assert native_levels("claude_code", "claude-haiku-4-5") == []
     assert program_levels("claude_code", "opus") == UP_TO_MAX
     assert program_levels("claude_code", "fable") == UP_TO_MAX
@@ -66,7 +66,7 @@ def test_claude_code_knows_its_aliases_and_haiku_takes_none():
         cmd, _ = OneShotAgent(_preset("claude_code", **extra))._build_command("q", effort=effort)
         return cmd[cmd.index("--effort") + 1] if "--effort" in cmd else None
 
-    assert flags("high", model="haiku") is None
+    assert flags("high", model="claude-haiku-4-5") is None
     assert flags("high", model="opus") == "high"
 
 

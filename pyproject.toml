@@ -35,7 +35,8 @@ version = { attr = "ixel_mat.__version__" }
 include = ["ixel_mat*"]
 
 [tool.setuptools.package-data]
-ixel_mat = ["assets/*.txt", "assets/*.ico", "assets/*.icns", "assets/*.png", "addons/*.toml", "gui/static/*"]
+ixel_mat = ["assets/*.txt", "assets/*.ico", "assets/*.icns", "assets/*.png", "addons/*.toml", "gui/static/*",
+            "agent/starter/*.md", "agent/starter/skills/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

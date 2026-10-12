@@ -47,6 +47,9 @@ with pipx or uv, see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Use it
 
 - **App:** **Ixel** in the Start Menu, Applications or your app menu, or `ixel app`.
+- **Agent (beta):** an **Agent** page in the app: a personal agent that works in a folder you pick, one
+  step at a time, and asks you before it writes a file or runs a command. It can take photos, video and any
+  file, and a Computer access switch (off until you turn it on) lets it work outside that folder.
 - **Terminal:** `ixel`, then type a question. `/review`, `/saver` and the rest are in [the terminal guide](https://ixelai.com/docs/terminal/).
 - **Plugin** for Claude Desktop, Claude Code, Codex and Cursor: `ixel mcp --setup`, then ask your app for "a
   second opinion from the Ixel panel".
