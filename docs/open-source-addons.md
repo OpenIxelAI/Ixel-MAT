@@ -79,6 +79,8 @@ stop, missing REA, and the cost line.
 
 ## 2. Diagram Design (Settings switch + Ask toggle)
 
+Add-ons are now described by cards; the format, state and Python API are in [addon-cards.md](addon-cards.md).
+
 Files: `ixel_mat/addons.py` (install/remove/locate, prompt building, HTML extraction, self-check),
 routes in `ixel_mat/gui/settings_api.py` / `server.py`, UI in `settings.js` and `ask.js`.
 Tests in `tests/test_addons.py`.
