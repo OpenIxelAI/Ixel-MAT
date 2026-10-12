@@ -289,12 +289,14 @@ your computer waits for you.
   command, become a pending approval: you see the diff, or the exact command, before anything
   happens. "Always allow" adds a command's argv to an allowlist for that workspace, and never a shell
   or an interpreter running `-c`.
-- **Commands are sandboxed on macOS.** An approved command runs as a list of arguments, never a
+- **Commands are sandboxed on macOS and Linux.** An approved command runs as a list of arguments, never a
   shell string, with the workspace as its folder, a 120-second limit and 64 KB of output kept. On
-  macOS it runs under `sandbox-exec` with network access denied and writes allowed only in the
-  workspace and the temp folder. The sandbox doesn't limit reads: a sandboxed command can still read
-  any file your user can, and print it into the run. On other systems the approval card says it is not
-  sandboxed. Computer access (below) is the exception.
+  macOS it runs under `sandbox-exec`, and on Linux under `bwrap` (bubblewrap, which has to be installed
+  and allowed to start), with network access denied and writes allowed only in the workspace and the
+  temp folder. The sandbox doesn't limit reads: a sandboxed command can still read any file your user
+  can, and print it into the run, except that on Linux your SSH, cloud and browser folders and Ixel's
+  own config folder are hidden from it. On other systems, or on Linux without a working `bwrap`, the
+  approval card says it is not sandboxed. Computer access (below) is the exception.
 - **None of your keys.** A command runs with the environment Ixel gives it, without any key saved
   in Ixel.
 - **Files and pictures.** `read_file` also reads documents Ixel already knows (PDF, Word, Excel,

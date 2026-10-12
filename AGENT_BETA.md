@@ -54,9 +54,17 @@ machine), cron jobs and sub-agents.
 - Writes are atomic (temp file then replace) and refuse binary files and files over 1 MB.
 - `run_command` takes an argv list, never a shell string, runs with the workspace as its folder, a
   120-second limit, at most 64 KB of output kept, and **the environment without any keys saved in Ixel**
-  (`child_env`). On macOS it runs under `sandbox-exec` with network access denied and writes allowed only
-  in the workspace and the temp folder. Reads aren't limited: a sandboxed command can still read any file
-  your user can. Elsewhere the approval card says it is not sandboxed.
+  (`child_env`). On macOS it runs under `sandbox-exec`, and on Linux under `bwrap` (bubblewrap), with
+  network access denied and writes allowed only in the workspace and the temp folder. Reads aren't limited:
+  a sandboxed command can still read any file your user can, except that on Linux the secret and browser
+  folders (`~/.ssh`, `~/.aws`, `~/.gnupg`, browser profiles, and Ixel's own config folder) are hidden from it.
+  Where there is no sandbox (Windows for now, or Linux without a working `bwrap`) the approval card says it is
+  not sandboxed.
+- On Linux the sandbox needs `bwrap` on the PATH and permission for it to start. If it's missing, install it
+  (Debian/Ubuntu: `sudo apt install bubblewrap`; Fedora: `sudo dnf install bubblewrap`; Arch:
+  `sudo pacman -S bubblewrap`). Ubuntu 24.04+ also blocks it through AppArmor until it's allowed:
+  `echo 'abi <abi/4.0>, profile bwrap /usr/bin/bwrap flags=(unconfined) { userns, }' | sudo tee /etc/apparmor.d/bwrap && sudo apparmor_parser -r /etc/apparmor.d/bwrap`
+  (use the real path of `bwrap`, from `realpath $(which bwrap)`).
 - The allowlist holds exact argv prefixes you approved with "Always allow" (for example `["pytest"]`),
   per workspace. It never matches shells or interpreters with `-c` (`sh`, `bash`, `zsh`, `python -c`,
   `node -e`), which always ask.
@@ -151,8 +159,8 @@ confirm:
 With it on, for that run only:
 - Paths may be absolute or start with `~`, anywhere under the home folder. Secret files (the spec's list,
   plus `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/Library/Keychains`, browser profiles) are still refused.
-- `run_command` runs without `sandbox-exec`, with the network; still the key-free environment; still an
-  approval every time (the allowlist doesn't apply).
+- `run_command` runs without the sandbox (`sandbox-exec` or `bwrap`), with the network; still the key-free
+  environment; still an approval every time (the allowlist doesn't apply).
 - New action `screenshot` (no args): after approval, a picture of the screen (`screencapture -x` on macOS;
   PowerShell with `System.Drawing` on Windows; `grim` on Wayland or the first of `gnome-screenshot`, `scrot`
   and ImageMagick's `import` on X11), given to the model like `view_file`. Without a display or a capture
@@ -213,7 +221,7 @@ New actions (they work with or without Computer access):
 - `tree_hash` (`repo`: the scratch name, `subdir`): the card spec's `tree_sha256` and `files` for that
   folder, computed by Ixel (never by the model).
 - `run_command` takes an optional `cwd`: `scratch:<owner>-<repo>` runs the approved command in that scratch
-  copy (sandboxed on macOS; the network only with Computer access), to try the tool.
+  copy (sandboxed on macOS and Linux; the network only with Computer access), to try the tool.
 - `write_addon_card` (`id`, `card`: the TOML text): Ixel checks the card against every rule in the spec
   (unknown keys, ids, kinds, the commit and hash shapes, the repo URL, subdir, commands and placeholders)
   and that `[source]`'s `commit`, `tree_sha256` and `files` match what `fetch_repo`/`tree_hash` computed for
@@ -233,8 +241,9 @@ New actions (they work with or without Computer access):
 - New action `use_tool` (`addon`, `tool`, `arguments`): calls that tool over MCP stdio and returns its text
   (pictures it returns go to the model like `view_file`'s). The server is started from the card's one
   `commands` entry as an argv list, never a shell, `{addon}` filled with the card's installed files and
-  `{output}` with the run's workspace; with the key-free environment; under `sandbox-exec` on macOS with the
-  network allowed only when the card says `network = true`, and writes only in the workspace (`files =
-  "output-folder"` or `"chosen-folder"`) or nowhere (`"none"`); reads aren't limited. The first call to each add-on in a run asks
+  `{output}` with the run's workspace; with the key-free environment; under `sandbox-exec` on macOS or `bwrap`
+  on Linux with the network allowed only when the card says `network = true`, and writes only in the
+  workspace (`files = "output-folder"` or `"chosen-folder"`) or nowhere (`"none"`); reads aren't limited (on
+  Linux the secret folders are hidden). Where there's no sandbox, the approval card says so. The first call to each add-on in a run asks
   for approval (showing the add-on, the tool and its arguments); "Always allow" covers that add-on for the
   rest of the run. Servers are stopped when the run ends.

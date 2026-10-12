@@ -39,9 +39,11 @@ Build), with no API key.
   at a step limit (25 by default). The beta has no cron jobs and no messaging channels. The Board's Merge pushes
   nothing.
 - The Agent's sandbox has limits. A command it runs has no network and can write only in the workspace and the
-  temp folder, but only on macOS and only while Computer access is off; it can still read your files. Elsewhere,
-  or with Computer access on, an approved command runs as you and can do anything you can. The approval card says
-  which.
+  temp folder, but only on macOS (`sandbox-exec`) and on Linux (bubblewrap, which has to be installed and allowed
+  to start), and only while Computer access is off. It can still read your files, except that on Linux your SSH,
+  cloud and browser folders and Ixel's own config folder are hidden from it. On Windows, on Linux without a
+  working bubblewrap, or with Computer access on, an approved command runs as you and can do anything you can.
+  The approval card says which.
 
 ## Install
 
@@ -75,8 +77,8 @@ with pipx or uv, see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Agent (beta):** a personal agent that works in a folder you pick, one step at a time. It asks you before it
   edits a file or runs a command, and, with Computer access on, before it takes a screenshot or opens a file, link
   or app. A command you approved with "Always allow" runs again without asking, but only while Computer access is
-  off. You can give it a photo, a video or any file. **Computer access** is off by default. On macOS its commands
-  run in a sandbox with no network, unless Computer access is on. See [AGENT_BETA.md](AGENT_BETA.md).
+  off. You can give it a photo, a video or any file. **Computer access** is off by default. On macOS and Linux its
+  commands run in a sandbox with no network, unless Computer access is on. See [AGENT_BETA.md](AGENT_BETA.md).
 - **Machines:** your servers over SSH: connect to one, or run one command on several.
 - **Health:** whether each part of Ixel is ready, and the one line that fixes what isn't.
 - **Settings:** which models are on the panel and how each one thinks, the default mode, and your keys.

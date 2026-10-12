@@ -429,8 +429,8 @@ class AgentRun:
             if action.action == "run_command":
                 folder = self.workspace.root
                 if not _in_workspace(action.args.get("cwd")):
-                    # Looked at again: the folder is the copy as it is now, and sandboxed on a Mac unless
-                    # Computer access is on (which is also the only time it has the network)
+                    # Looked at again: the folder is the copy as it is now, and sandboxed (on a Mac or on
+                    # Linux) unless Computer access is on (which is also the only time it has the network)
                     folder, name = self.workspace.scratch_cwd(action.args["cwd"])
                     where = f"; ran in scratch:{name}"
                 result = await asyncio.to_thread(run_command, action.args["argv"], folder,

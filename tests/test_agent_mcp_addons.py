@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -221,6 +223,7 @@ def test_card_permissions_reach_sandbox_profile(fake_addons, monkeypatch, networ
     fake_addons.card.dir = Path("/home/x/addon")
     fake_addons.card.permissions.network = network
     fake_addons.card.permissions.files = files
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(sandbox, "can_sandbox", lambda: True)
     original = sandbox.sandbox_profile
     seen = []
@@ -236,6 +239,41 @@ def test_card_permissions_reach_sandbox_profile(fake_addons, monkeypatch, networ
     # The paths as the code builds them (on Windows: a drive and backslashes, escaped in the profile)
     assert (sandbox._quoted(os.path.realpath(workspace)) in params.args[1]) is (files != "none")
     assert "/private/tmp" not in params.args[1]
+    assert str(Path("/home/x/addon") / "files") + "/server.py" in params.args
+
+
+@pytest.mark.parametrize("network", [False, True])
+@pytest.mark.parametrize("files", ["none", "output-folder", "chosen-folder"])
+def test_card_permissions_reach_bwrap_command(fake_addons, monkeypatch, network, files):
+    fake_addons.card.dir = Path("/home/x/addon")
+    fake_addons.card.permissions.network = network
+    fake_addons.card.permissions.files = files
+    which = shutil.which
+    monkeypatch.setattr(shutil, "which",
+                        lambda name, *args, **kwargs: "/usr/bin/bwrap" if name == "bwrap"
+                        else which(name, *args, **kwargs))
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sandbox, "can_sandbox", lambda: True)
+    workspace = Path("/home/x/workspace")
+    params = addons.server_parameters(fake_addons.card, workspace)
+    args = [params.command, *params.args]
+
+    def has(*words: str) -> bool:
+        return any(args[i:i + len(words)] == list(words) for i in range(len(args) - len(words) + 1))
+
+    assert params.command == "/usr/bin/bwrap"
+    assert ("--unshare-net" in params.args) is not network
+    # The paths as the code builds them (on Windows: a drive and backslashes)
+    ws = os.path.realpath(workspace)
+    assert has("--bind", ws, ws) is (files != "none")
+    assert has("--ro-bind", ws, ws) is (files == "none")
+    # Only the workspace is written (or nothing): the temp folders are each a private empty one
+    temps = [path for path in dict.fromkeys([os.path.realpath(tempfile.gettempdir()), os.path.realpath("/tmp")])
+             if os.path.exists(path)]
+    assert temps
+    for path in temps:
+        assert has("--tmpfs", path)
+        assert not has("--bind", path, path)
     assert str(Path("/home/x/addon") / "files") + "/server.py" in params.args
 
 
