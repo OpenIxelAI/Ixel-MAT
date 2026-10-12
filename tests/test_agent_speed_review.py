@@ -92,12 +92,12 @@ def test_only_the_newest_of_two_batches_is_sent_whole():
 
 def test_a_newest_result_over_the_limit_keeps_its_first_and_last_16_kb_with_a_note():
     half = MAX_RECENT_RESULT_CHARS // 2
-    assert half == 16_384
-    result = _result("newest", 40_000)
+    assert half == 32_768
+    result = _result("newest", 80_000)
     prompt = _prompt([_step(1, result)])
     assert result[:half] in prompt and result[-half:] in prompt
     assert "newest-MIDDLE" not in prompt
-    assert f"{40_000 - 2 * half} {CUT} of this result" in prompt
+    assert f"{80_000 - 2 * half} {CUT} of this result" in prompt
     assert "start and end" in prompt[prompt.index(CUT):]  # a cut read says how to read the rest in ranges
 
 
@@ -130,7 +130,7 @@ def test_a_trailing_retry_note_after_a_single_step_keeps_that_step_whole():
 def test_the_read_file_description_promises_400_lines_and_what_the_prompt_really_shows():
     prompt = _prompt([])
     line = next(line for line in prompt.splitlines() if line.startswith("- read_file:"))
-    assert "without start and end, the first 400 lines" in line
+    assert "without start and end, the first 1500 lines" in line
     assert "secrets masked" in line
     assert "200 KB" not in line
     assert f"first and last {MAX_RECENT_RESULT_CHARS // 2 // 1024} KB" in line
@@ -450,7 +450,7 @@ def test_a_bad_reply_is_counted_in_retries_and_the_totals_are_the_steps_plus_ret
         assert page["status"] == "done" and len(ask.prompts) == 3 and len(page["steps"]) == 2
         usage = page["usage"]
         _adds_up(usage, page["steps"])
-        assert usage["retries"] == {"calls": 1, "input_tokens": 100, "output_tokens": 20, "ms": EACH_MS,
+        assert {k: v for k, v in usage["retries"].items() if k != "reasons"} == {"calls": 1, "input_tokens": 100, "output_tokens": 20, "ms": EACH_MS,
                                     "cost": 0.25}
         assert usage["calls"] == 3 and usage["input_tokens"] == 300 and usage["cost"] == pytest.approx(0.75)
         assert usage["ms"] == 4 * EACH_MS  # three model calls and the list_dir

@@ -292,11 +292,11 @@ def test_read_file_refuses_a_file_that_is_not_text_past_line_400(ws: Workspace) 
 
 
 def test_read_file_of_a_long_text_file_still_gives_400_lines_and_a_note(ws: Workspace) -> None:
-    _write(ws, "long.txt", "".join(f"line {n}\n" for n in range(1, 1001)))
+    _write(ws, "long.txt", "".join(f"line {n}\n" for n in range(1, 2001)))
     text = ws.read_file("long.txt")
     lines = text.splitlines()
-    assert "line 400" in lines and "line 401" not in lines
-    assert "1000 lines in all" in text
+    assert "line 1500" in lines and "line 1501" not in lines
+    assert "2000 lines in all" in text
 
 
 # ── Heavy folders only at the top of the workspace ───────────────────────────

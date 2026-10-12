@@ -32,12 +32,12 @@ def _step(n: int, result: str) -> dict:
 # ── read_file and the prompt ─────────────────────────────────────────────────
 
 def test_read_file_without_a_range_gives_the_first_400_lines(ws):
-    _write(ws, "long.txt", "".join(f"line {n}\n" for n in range(1, 1001)))
+    _write(ws, "long.txt", "".join(f"line {n}\n" for n in range(1, 2001)))
     text = ws.read_file("long.txt")
     lines = text.splitlines()
-    assert "line 400" in lines
-    assert "line 401" not in lines
-    assert "1000 lines in all; use start and end for more" in text
+    assert "line 1500" in lines
+    assert "line 1501" not in lines
+    assert "2000 lines in all; use start and end for more" in text
 
 
 def test_read_file_returns_a_file_of_400_lines_or_fewer_whole(ws):
@@ -49,7 +49,7 @@ def test_read_file_returns_a_file_of_400_lines_or_fewer_whole(ws):
 
 
 def test_read_file_with_a_range_past_line_400(ws):
-    _write(ws, "long.txt", "".join(f"line {n}\n" for n in range(1, 1001)))
+    _write(ws, "long.txt", "".join(f"line {n}\n" for n in range(1, 2001)))
     assert ws.read_file("long.txt", start=401, end=402) == "line 401\nline 402\n"
 
 

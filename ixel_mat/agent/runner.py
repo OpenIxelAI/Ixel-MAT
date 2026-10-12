@@ -361,7 +361,7 @@ class AgentRun:
         self.usage["cost"] += _cost(usage)
         return deepcopy(usage) if usage is not None else {}
 
-    def _count_retry(self, usage: dict | None, tokens: dict, model_ms: int) -> None:
+    def _count_retry(self, usage: dict | None, tokens: dict, model_ms: int, why: str = "") -> None:
         """Note a model call that didn't become a step (a bad reply, a repeat warning, reads that couldn't
         run) in usage['retries']. The run's totals already hold it, so they stay the steps' plus the
         retries'."""
@@ -371,6 +371,8 @@ class AgentRun:
         retries["output_tokens"] += tokens["output"]
         retries["ms"] += model_ms
         retries["cost"] += _cost(usage)
+        if why:  # the last few reasons, so a slow or costly run can be explained afterwards
+            retries["reasons"] = [*retries.get("reasons", []), why[:200]][-5:]
 
     async def run(self) -> dict:
         """Keep asking until finished, stopped or failed, waiting for decide when approval is needed."""
@@ -435,7 +437,7 @@ class AgentRun:
                                 "result": "These reads were not run because 1 step is left, and it has to be "
                                           "yours to finish with. Use finish now with what you have."}
                 if note is not None:  # counted like a bad reply: a second one in a row fails the run
-                    self._count_retry(usage, tokens, model_ms)
+                    self._count_retry(usage, tokens, model_ms, problem)
                     self._bad_replies += 1
                     if self._bad_replies > 1:
                         self.status = "failed"
@@ -453,7 +455,7 @@ class AgentRun:
                 self._signatures.append(signature)
                 loop = _repeating(self._signatures)
                 if loop:
-                    self._count_retry(usage, tokens, model_ms)
+                    self._count_retry(usage, tokens, model_ms, "it repeated an earlier action")
                     if self._repeat_warned:
                         self.status = "failed"
                         self.error = mask_secrets(f"The run was stopped because the model kept repeating "

@@ -37,8 +37,8 @@ ACTIONS: dict[str, dict[str, Any]] = {
                           ".venv, dist, build and similar folders unless you name one as path"},
     "read_file": {"required": {"path": str}, "optional": {"start": int, "end": int},
                   "about": "read a text file, or a document (PDF, Word, Excel, PowerPoint, RTF, ODF, HTML) as "
-                           "text, or lines start to end (1-based); without start and end, the first 400 lines; "
-                           "secrets masked; a long result is shown to you as its first and last 16 KB, so read "
+                           "text, or lines start to end (1-based); without start and end, the first 1500 lines; "
+                           "secrets masked; a long result is shown to you as its first and last 32 KB, so read "
                            "long files in ranges with start and end"},
     "view_file": {"required": {"path": str}, "optional": {},
                   "about": "look at a picture (PNG or JPEG), up to 6 frames of a video (when ffmpeg is "
@@ -99,7 +99,7 @@ MAX_GOAL_CHARS = 20_000
 MAX_ARGS_CHARS = 2_000          # a step's arguments as shown in its header (a write's content can be long)
 MAX_THOUGHT_CHARS = 1_000
 MAX_UPLOAD_NAME_SHOWN = 200     # an attached file's name as listed in the prompt
-MAX_RECENT_RESULT_CHARS = 32 * 1024  # a newest-reply result, whole up to this; longer, its first and last half
+MAX_RECENT_RESULT_CHARS = 64 * 1024  # a newest-reply result, whole up to this; longer, its first and last half
 MAX_OLDER_RESULT_CHARS = 2_000     # an older result is sent as its head and its tail, this long each
 MAX_EARLIER_ANSWER_CHARS = 8_000  # the answer of the run a follow-up continues
 EARLIER_STEPS = 3                 # and its last steps, shown the way older steps are

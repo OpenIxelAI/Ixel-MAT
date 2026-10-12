@@ -46,7 +46,7 @@ from ixel_mat.pictures import Picture
 
 MAX_LIST_ENTRIES = 500
 MAX_READ_BYTES = 200 * 1024
-MAX_READ_LINES = 400           # read_file with no start and end gives this many lines, then says how many there are
+MAX_READ_LINES = 1500          # read_file with no start and end gives this many lines, then says how many there are
 MAX_SEARCH_LINES = 200
 MAX_SEARCH_FILE_BYTES = 1024 * 1024
 MAX_SEARCH_FILES = 20_000      # a search stops looking after this many files, so a huge folder can't hang it
@@ -565,7 +565,7 @@ class Workspace:
     def read_file(self, path: str, start: int | None = None, end: int | None = None) -> str:
         """A text file's contents, or lines start to end (1-based, both included), with secrets masked.
 
-        With no start and end, the first 400 lines come back (of a document's text too), and a last line says
+        With no start and end, the first MAX_READ_LINES (1500) lines come back (of a document's text too), and a last line says
         how many lines there are in all. At most 200 KB: a bigger file is only read a line range at a time.
         Files that aren't text (a NUL byte near the start, or more than a few bytes that aren't UTF-8) are refused.
 
