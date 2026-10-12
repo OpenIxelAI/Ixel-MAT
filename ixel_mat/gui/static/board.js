@@ -41,8 +41,17 @@ const WORKER_MODELS = {
     one: "gpt-5.5", chain: [] },
 };
 const MAX_MODELS = 4;  // a planner and up to three models for its steps (Handoff's approvals.MAX_MODELS)
-const EFFORT_WORDS = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max",
-  ultra: "Ultra" };
+const EFFORT_WORDS = { none: "No thinking", off: "No thinking", minimal: "Minimal", low: "Low", medium: "Medium",
+  high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra", adaptive: "Adaptive" };
+// What each worker can reach, as Handoff says (its `workers`' access), in a sentence for the picker
+const ACCESS_WORDS = {
+  sandbox: "Works in a sandbox on its own branch: it can run your tests, with no network.",
+  "edit-only": "Edits files on its own branch only: no commands, no web.",
+  files: "Uses file tools only, with no commands, but they can read files outside the project.",
+  full: "Runs with its own permissions: it can run commands as you, with the network.",
+};
+// Model names Handoff's claude and codex take are lowercase; other agents' keep their case (Qwen/Qwen3-Coder)
+const LOWERCASE_MODELS = new Set(["claude", "codex"]);
 function modelName(id) {
   const found = CLAUDE_MODELS.find(([m]) => m === id);
   return found ? found[1] : id;
@@ -1117,20 +1126,22 @@ function closeNeeds() {
 // effort the worker takes (and, where Ixel knows them, the model takes). What's picked lives in `asked.run`, so a
 // redraw keeps it. Returns the row and args(), the approve args it makes ({} for the worker's own model, as it is).
 function runPicker(asked, agent, worker) {
-  const names = WORKER_MODELS[agent] || { suggest: [], one: "", chain: [] };
+  const names = WORKER_MODELS[agent] || { suggest: [], one: worker.default_model || "", chain: [] };
+  const tidy = (model) => (LOWERCASE_MODELS.has(agent) ? (model || "").trim().toLowerCase() : (model || "").trim());
   const state = asked.run || (asked.run = { mode: "own", rows: [{ model: "", effort: "" }] });
   const levels = new Map();  // model -> the levels it takes, once the server has said
   const asking = new Map();  // model -> the server's answer on its way
   const listId = `needs-models-${agent}`;
   const rows = el("div", { class: "pick-rows" });
   const mode = el("select", { id: "needs-run-mode", "data-key": "needs-run-mode" },
-    el("option", { value: "own" }, `${agent}'s own model`), el("option", { value: "one" }, "One model"),
+    el("option", { value: "own" }, worker.local ? "The server's first model" : `${agent}'s own model`),
+    el("option", { value: "one" }, "One model"),
     worker.chain ? el("option", { value: "chain" }, "A chain of models, biggest first") : null);
   mode.value = state.mode;
   const hint = el("small", {});
 
   const allowed = (model) => {
-    const takes = levels.get((model || "").trim().toLowerCase());
+    const takes = levels.get(tidy(model));
     return takes ? worker.efforts.filter((l) => takes.includes(l)) : worker.efforts;
   };
   const effortSelect = (row, i) => {
@@ -1145,8 +1156,8 @@ function runPicker(asked, agent, worker) {
     return select;
   };
   const ask = (row, i) => {  // the levels this model takes, where Ixel knows its company's
-    const model = (row.model || "").trim().toLowerCase();
-    if (!model || levels.has(model)) return;
+    const model = tidy(row.model);
+    if (!model || levels.has(model) || !LOWERCASE_MODELS.has(agent)) return;  // (other workers' levels are their own)
     if (!asking.has(model)) {
       asking.set(model, getJSON(`/api/board/levels?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`)
         .then((found) => { if (Array.isArray(found.levels)) levels.set(model, found.levels); })
@@ -1171,7 +1182,7 @@ function runPicker(asked, agent, worker) {
       if (state.mode !== "own") {
         parts.push(el("span", { class: "pick-role" }, state.mode === "chain" ? (i === 0 ? "Plans" : `Step model ${i}`) : "Model"));
         const box = el("input", { type: "text", list: listId, value: row.model, spellcheck: "false", autocomplete: "off",
-          maxlength: "64", placeholder: "a model name", "aria-label": state.mode === "chain" && i === 0 ? "Planning model" : "Model",
+          maxlength: "80", placeholder: "a model name", "aria-label": state.mode === "chain" && i === 0 ? "Planning model" : "Model",
           "data-key": `needs-model-${i}` });
         box.addEventListener("input", () => { row.model = box.value; });
         box.addEventListener("change", () => ask(row, i));
@@ -1198,10 +1209,43 @@ function runPicker(asked, agent, worker) {
   };
   mode.addEventListener("change", draw);
   draw();
+  const list = el("datalist", { id: listId }, names.suggest.map(([id, name]) => el("option", { value: id }, name)));
+  if (!WORKER_MODELS[agent]) {  // the models this worker lists (a local server's, OpenCode's), from Handoff
+    getJSON(`/api/board/models?project=${encodeURIComponent(board.project)}&agent=${encodeURIComponent(agent)}`)
+      .then((found) => {
+        const models = Array.isArray(found.models) ? found.models.slice(0, 300) : [];
+        // Free ones first: OpenCode's …-free models, and everything on this computer
+        models.sort((x, y) => (/-free$/.test(y) ? 1 : 0) - (/-free$/.test(x) ? 1 : 0));
+        list.replaceChildren(...models.map((m) => el("option", { value: m }, /-free$/.test(m) ? `${m} (free)` : m)));
+        if (!names.one && found.default) names.one = found.default;
+      })
+      .catch(() => { /* any name can still be typed */ });
+  }
+  // What it can reach, and for one that runs with its own permissions, the person's yes before it can
+  const about = el("small", { class: "worker-access" },
+    `${ACCESS_WORDS[worker.access] || ""}${worker.local ? " Free: it runs on your computer." : ""}`);
+  const enable = el("div", { class: "worker-enable" });
+  const drawEnable = () => {
+    if (!worker.needs_ok || worker.enabled) { enable.replaceChildren(); return; }
+    const button = el("button", { type: "button", class: "btn", "data-key": "needs-enable" }, `Let ${worker.label || agent} change files`);
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await postJSON("/api/board/action", { project: board.project, op: "agents.enable", args: { agent, on: true } });
+        worker.enabled = true;
+      } catch (e) {
+        button.disabled = false;
+        button.title = e.message || String(e);
+      }
+      drawEnable();
+    });
+    enable.replaceChildren(el("small", {}, `${worker.label || agent} waits for your yes before it changes files here.`), button);
+  };
+  drawEnable();
   const row = el("div", { class: "model-row" }, el("label", { for: "needs-run-mode" }, "Which model?"), mode, rows, hint,
-    el("datalist", { id: listId }, names.suggest.map(([id, name]) => el("option", { value: id }, name))));
+    about, enable, list);
   const args = () => {
-    const typed = state.rows.map((r) => ({ model: (r.model || "").trim().toLowerCase(), effort: r.effort }));
+    const typed = state.rows.map((r) => ({ model: tidy(r.model), effort: r.effort }));
     if (state.mode === "own") return typed[0].effort ? { efforts: { "": typed[0].effort } } : {};
     // A blank row, or a model named twice, would only come back refused: leave them out
     const picked = typed.filter((r, i) => r.model && typed.findIndex((o) => o.model === r.model) === i);
@@ -1217,8 +1261,10 @@ function runPicker(asked, agent, worker) {
     state.rows.forEach((r, i) => ask(r, i));
     await Promise.all([...asking.values()]);
   };
-  const problem = () => state.mode !== "own" && !args().models.length
-    ? `Name a model to run it on, or pick ${agent}'s own model.` : "";
+  const problem = () => {
+    if (worker.needs_ok && !worker.enabled) return `Let ${worker.label || agent} change files first (the button above), or pick another agent.`;
+    return state.mode !== "own" && !args().models.length ? `Name a model to run it on, or pick ${agent}'s own model.` : "";
+  };
   return { row, args, ready, problem };
 }
 

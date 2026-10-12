@@ -333,6 +333,7 @@ class GuiServer:
         app.router.add_get("/api/board/output", self._board_output)
         app.router.add_get("/api/board/agents", self._board_agents)
         app.router.add_get("/api/board/levels", self._board_levels)
+        app.router.add_get("/api/board/models", self._board_models)
         app.router.add_post("/api/board/action", self._board_action)
         app.router.add_get("/api/connections", self._connections)
         app.router.add_post("/api/connections/host", self._connections_host)
@@ -769,6 +770,20 @@ class GuiServer:
         if program is None or (program == "claude_code" and model is None):
             return web.json_response({"levels": None})  # the worker's own list stands
         return web.json_response({"levels": list(effort.program_levels(program, model))})
+
+    async def _board_models(self, request: web.Request) -> web.Response:
+        """The models a Handoff worker lists (a model server on this computer, OpenCode's), for the Board to suggest;
+        none from a Handoff that can't say, and any name can still be typed."""
+        from ixel_mat.gui import handoff_api
+        agent = request.query.get("agent", "").strip()[:40]
+        try:
+            root = handoff_api.check_project(request.query.get("project"))
+            data = await self._handoff_call("models", root, {"agent": agent})
+        except handoff_api.HandoffApiError:
+            return web.json_response({"models": [], "default": None})
+        models = [m for m in data.get("models") or [] if isinstance(m, str)][:300]
+        default = data.get("default") if isinstance(data.get("default"), str) else None
+        return web.json_response(_clean({"models": models, "default": default}))
 
     async def _board_projects(self, request: web.Request) -> web.Response:
         """Git repositories on this computer, for the Board to offer before a project is picked."""
