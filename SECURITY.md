@@ -270,6 +270,62 @@ its flags, so when a preset is tightened, updating Ixel is enough to get the cha
 protections. An agent's own `env` adds to the preset's, and can't replace OpenCode's locked-down agent or
 its catalog setting.
 
+### Agent (beta)
+
+The Agent page lets one model work in a folder you pick. **The model never gets a shell or a file
+handle.** It asks for one action at a time, Ixel does the action itself, and anything that changes
+your computer waits for you.
+
+- **One action at a time.** The model answers with a single JSON object naming the action it wants
+  (`list_dir`, `read_file`, `search`, `load_skill`, `remember`, `write_file`, `edit_file`,
+  `run_command`, `finish`). Ixel runs it and gives the model the result as text.
+- **Paths stay in the workspace.** Every path is resolved inside the folder you picked, unless Computer
+  access is on for that run (below). `..`, absolute paths and symlinks that lead outside it are refused,
+  and so is anything in `.git/`.
+- **Secret files are refused.** Files that look like secrets (`.env*`, `*.pem`, `*.key`, `id_rsa*`,
+  `.netrc`, Ixel's own config folder) can be neither read nor written.
+- **Reads run at once; changes wait for you.** Listing a folder, reading a file, searching, loading a
+  skill and remembering to `MEMORY.md` run as asked. Writing or editing a file, and running a
+  command, become a pending approval: you see the diff, or the exact command, before anything
+  happens. "Always allow" adds a command's argv to an allowlist for that workspace, and never a shell
+  or an interpreter running `-c`.
+- **Commands are sandboxed on macOS.** An approved command runs as a list of arguments, never a
+  shell string, with the workspace as its folder, a 120-second limit and 64 KB of output kept. On
+  macOS it runs under `sandbox-exec` with network access denied and writes allowed only in the
+  workspace and the temp folder; on other systems the approval card says it is not sandboxed. Computer
+  access (below) is the exception.
+- **None of your keys.** A command runs with the environment Ixel gives it, without any key saved
+  in Ixel.
+- **Files and pictures.** `read_file` also reads documents Ixel already knows (PDF, Word, Excel,
+  PowerPoint, RTF, ODF and the rest) and returns their text, saying how many pictures they hold.
+  `view_file` sends a picture to the model with its next call, cleaned the way Ask cleans pictures. A
+  video gives up to 6 frames when `ffmpeg` is installed, and otherwise only its size and length. A PDF
+  or slide deck gives its first pictures. A model that can't see pictures is told so, and nothing is
+  sent. At most 8 pictures per call, 20 MB in all.
+- **Uploads stay outside the workspace.** Files you attach for a run are kept in the agent's own folder
+  under `uploads/<run id>/`, never in the folder you picked. The agent reads them as `upload:NAME`.
+  50 MB per file, 10 files per run.
+- **Computer access is off by default.** A switch on the composer, or `/computer on|off`, turns it on
+  for that run only, after you confirm this warning:
+
+  > Computer access lets the agent work outside the folder you picked: read and change files anywhere in
+  > your home folder, run commands without the sandbox and with the network, take screenshots and open apps,
+  > files and links. Every change, command, screenshot and open still waits for your Approve, but an approved
+  > command can do anything you can. Turn it on only for a model and a goal you trust.
+
+  With it on, a path may be absolute or start with `~`, anywhere under your home folder. Secret files are
+  still refused, and so are `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/Library/Keychains` and browser profiles.
+  An approved command runs without the sandbox and with the network, still without any key saved in Ixel.
+  The allowlist does not apply, so every command asks again. A screenshot, and opening an app, a file or
+  a link, wait for approval too. Every change, command, screenshot and open still needs your approval.
+  An approved command can do anything you can.
+- **What a tool returns is fenced.** Every tool result goes into the prompt inside a random fence,
+  with the note that it's data, not instructions — the same fencing `ixel ask` uses.
+
+**How it's checked:** `tests/test_agent_*.py` includes the attacks: a file that tells the agent to
+read `~/.ssh`, path traversal, a symlink escape, a secret file, and a command that reaches the
+network.
+
 ### Model output
 
 - **Terminal:** control characters and escape sequences (colors, cursor moves, OSC 8 links, OSC 52
@@ -581,8 +637,8 @@ scripted panels. End-to-end runs check that only the question and the anonymous 
 
 ## Deliberately not supported (yet)
 
-- **Letting panel models change files or run commands.** Useful, but it needs per-action approval
-  and a real sandbox first. See [ROADMAP.md](ROADMAP.md).
+- **Letting panel models change files or run commands.** Only the Agent (beta) page does, one approved
+  action at a time (see "Agent (beta)" above); the panel, reviews and `ixel ask` stay answer-only.
 - **A network-reachable server** (for example, for ChatGPT's internet-only connectors). Ixel stays local.
 - **Cursor's and Cline's CLIs.** Cline auto-approves every tool by default, and we haven't yet been
   able to prove either can be locked down the way the presets above are. Once a live test like the others

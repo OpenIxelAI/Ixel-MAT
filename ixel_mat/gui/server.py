@@ -50,6 +50,9 @@ from aiohttp import web
 
 from ixel_mat import __version__, pictures, sound, stats
 from ixel_mat.agents.base import needs_api_key
+from ixel_mat.agent.store import AgentStore
+from ixel_mat.gui import agent_api
+from ixel_mat.gui.agent_api import AgentApi, AgentApiError, Ask
 from ixel_mat.modes.review import MAX_EARLIER_TURNS, MAX_PANEL, EarlierTurn, run_review
 from ixel_mat.runtime import (MODE_CHOICES, choose_mode, connect_agents, disconnect_agents, load_settings,
                               local_agent_names)
@@ -80,6 +83,7 @@ STATIC_FILES = {
     "/sound.js": ("sound.js", "text/javascript; charset=utf-8"),
     "/video.js": ("video.js", "text/javascript; charset=utf-8"),
     "/machines.js": ("machines.js", "text/javascript; charset=utf-8"),
+    "/agent.js": ("agent.js", "text/javascript; charset=utf-8"),
     "/markdown.js": ("markdown.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/mark.svg": ("mark.svg", "image/svg+xml"),
@@ -233,6 +237,7 @@ PICTURE_TYPES = ("image/png", "image/jpeg")
 PICTURES_PATH = "/api/pictures"
 SOUND_PATH = "/api/sound"  # sound to write out: sent as it is, whatever kind (sound.py checks)
 DOCUMENTS_PATH = "/api/documents"  # a document to read into text (Word, PDF…): sent as it is (documents.py reads it)
+AGENT_UPLOAD_PATH = "/api/agent/upload"  # a file attached to an agent run: multipart, one file in the field "file"
 # Pictures from one document sent back to the page, which makes each smaller before it's attached
 MAX_DOCUMENT_PICTURE_BYTES = 64 * 1024 * 1024
 TOO_BIG = f"That picture is over {pictures.megabytes(pictures.MAX_BYTES)}, even made smaller."
@@ -255,6 +260,8 @@ class GuiServer:
         disconnect: Callable[..., Awaitable[None]] = disconnect_agents,
         health_report: Callable[[bool], Awaitable[dict]] | None = None,
         handoff_command: Callable[[], list[str] | None] | None = None,
+        agent_store: AgentStore | None = None,
+        agent_ask: Ask | None = None,
     ):
         self.port = port
         self.token = token or secrets.token_urlsafe(32)
@@ -271,6 +278,9 @@ class GuiServer:
         self._machines_lock = asyncio.Lock()  # Machines changes its files one at a time
         from ixel_mat.gui import machines_api
         self.machines = machines_api.Machines()
+        self.agent = AgentApi(agent_store, agent_ask)
+        self.agent_store = self.agent.store
+        self.agent_runs = self.agent.runs  # live runs by id; each also saves itself as a session
         self.pictures = pictures.PictureStore()  # attached to questions: in memory only, gone when Ixel stops
         self.conversations = Conversations()     # Ask's, for a reload: in memory only, too
         from ixel_mat.gui import handoff_api
@@ -293,6 +303,7 @@ class GuiServer:
         app.on_response_prepare.append(self._add_security_headers)
         app.on_shutdown.append(self._end_presence)
         app.on_shutdown.append(self._stop_runs)
+        app.on_shutdown.append(self._stop_agent_runs)
         app.on_shutdown.append(self._stop_reviews)
         app.on_cleanup.append(self._forget_what_was_asked)
         for path in STATIC_FILES:
@@ -310,6 +321,15 @@ class GuiServer:
         app.router.add_get("/api/handoff", self._handoff_info)
         app.router.add_post("/api/handoff/plan", self._handoff_plan)
         app.router.add_post("/api/handoff/run", self._handoff_run)
+        app.router.add_get("/api/agent/models", self._agent_models)
+        app.router.add_post("/api/agent/start", self._agent_start)
+        app.router.add_post(AGENT_UPLOAD_PATH, self._agent_upload)
+        app.router.add_get("/api/agent/run", self._agent_run)
+        app.router.add_post("/api/agent/decide", self._agent_decide)
+        app.router.add_post("/api/agent/stop", self._agent_stop)
+        app.router.add_get("/api/agent/runs", self._agent_runs)
+        app.router.add_get("/api/agent/files", self._agent_files)
+        app.router.add_put("/api/agent/files", self._agent_set_file)
         app.router.add_get("/api/board/hello", self._board_hello_route)
         app.router.add_get("/api/board", self._board)
         app.router.add_get("/api/board/projects", self._board_projects)
@@ -371,6 +391,9 @@ class GuiServer:
                     # (aiohttp calls a request with no Content-Type octet-stream too: the page always says)
                     if "Content-Type" not in request.headers or request.content_type != "application/octet-stream":
                         return _json_error(415, "Expected the file as application/octet-stream.")
+                elif request.path == AGENT_UPLOAD_PATH:
+                    if request.content_type != "multipart/form-data":
+                        return _json_error(415, "Expected the file as multipart/form-data, in the field file.")
                 elif request.content_type != "application/json":
                     return _json_error(415, "Expected application/json.")
         return await handler(request)
@@ -429,6 +452,9 @@ class GuiServer:
         # the server would otherwise wait for it to finish before stopping
         for stop in list(self._reviews):
             stop()
+
+    async def _stop_agent_runs(self, app: web.Application) -> None:
+        await self.agent.close()
 
     async def _panel(self, request: web.Request) -> web.Response:
         settings = self._load_settings()
@@ -645,6 +671,122 @@ class GuiServer:
         from ixel_mat.forget import forget
         found = await asyncio.to_thread(forget, window=False)
         return web.json_response(_clean({"forgotten": [item.to_dict() for item in found]}))
+
+    # Agent: one action at a time, with changes waiting for approval (see agent_api.py)
+
+    @staticmethod
+    def _agent_error(exc: AgentApiError | OSError) -> web.Response:
+        if isinstance(exc, AgentApiError):
+            return _json_error(exc.status, _clean(str(exc)))
+        return _json_error(500, _clean(f"Couldn't read or save the agent's files: "
+                                     f"{exc.strerror or type(exc).__name__}"))
+
+    async def _agent_body(self, request: web.Request) -> dict | web.Response:
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return _json_error(400, "Body must be JSON.")
+        return body if isinstance(body, dict) else _json_error(400, "Body must be a JSON object.")
+
+    async def _agent_models(self, request: web.Request) -> web.Response:
+        try:
+            settings = await asyncio.to_thread(self._load_settings)
+            return web.json_response(_clean(self.agent.models(settings)))
+        except (AgentApiError, OSError) as exc:
+            return self._agent_error(exc)
+
+    async def _agent_start(self, request: web.Request) -> web.Response:
+        body = await self._agent_body(request)
+        if isinstance(body, web.Response):
+            return body
+        try:
+            settings = await asyncio.to_thread(self._load_settings)
+            return web.json_response(_clean(await self.agent.start(settings, body)))
+        except (AgentApiError, OSError) as exc:
+            return self._agent_error(exc)
+
+    async def _agent_upload(self, request: web.Request) -> web.Response:
+        """One file attached in the Agent page's composer, read in pieces up to the limit and kept until a
+        start names it → {id, name, kind, size}."""
+        cap = agent_api.MAX_UPLOAD_BYTES  # read here, so a test can lower it
+        too_big = f"That file is over {pictures.megabytes(cap)}, more than the agent takes."
+        # A multipart body is a little longer than its file: the Content-Length check leaves room for that
+        if request.content_length is not None and request.content_length > cap + 64 * 1024:
+            return _json_error(413, too_big)
+        try:
+            reader = await request.multipart()
+            part = await reader.next()
+            if not isinstance(part, aiohttp.BodyPartReader) or part.name != "file":
+                return _json_error(400, "Send one file, in the multipart field file.")
+            name = part.filename or "file"
+            data = bytearray()
+            while chunk := await part.read_chunk(64 * 1024):
+                data += chunk
+                if len(data) > cap:
+                    return _json_error(413, too_big)
+            # aiohttp's reader raises instead of showing the part after one it was fed in pieces, and a body
+            # with a second part is one of those: either way there is more than the one file the page sends
+            try:
+                another = await reader.next() is not None
+            except (ValueError, aiohttp.http_exceptions.BadHttpMessage):
+                another = True
+            if another:
+                return _json_error(400, "Send one file per request.")
+        except (ValueError, aiohttp.http_exceptions.BadHttpMessage):  # a malformed multipart body
+            return _json_error(400, "The upload isn't a readable multipart body.")
+        try:
+            return web.json_response(_clean(await asyncio.to_thread(self.agent.save_upload, name, bytes(data))))
+        except (AgentApiError, OSError) as exc:
+            return self._agent_error(exc)
+
+    async def _agent_run(self, request: web.Request) -> web.Response:
+        try:
+            run_id = request.query.get("id")
+            data = self.agent.run(run_id) if run_id in self.agent_runs else \
+                await asyncio.to_thread(self.agent.run, run_id)
+            return web.json_response(_clean(data))
+        except (AgentApiError, OSError) as exc:
+            return self._agent_error(exc)
+
+    async def _agent_decide(self, request: web.Request) -> web.Response:
+        body = await self._agent_body(request)
+        if isinstance(body, web.Response):
+            return body
+        try:
+            return web.json_response(_clean(await self.agent.decide(body)))
+        except (AgentApiError, OSError) as exc:
+            return self._agent_error(exc)
+
+    async def _agent_stop(self, request: web.Request) -> web.Response:
+        body = await self._agent_body(request)
+        if isinstance(body, web.Response):
+            return body
+        try:
+            return web.json_response(_clean(await self.agent.stop(body)))
+        except (AgentApiError, OSError) as exc:
+            return self._agent_error(exc)
+
+    async def _agent_runs(self, request: web.Request) -> web.Response:
+        try:
+            saved = await asyncio.to_thread(self.agent.saved_runs)
+            return web.json_response(_clean(self.agent.list_runs(saved)))
+        except (AgentApiError, OSError) as exc:
+            return self._agent_error(exc)
+
+    async def _agent_files(self, request: web.Request) -> web.Response:
+        try:
+            return web.json_response(_clean(await asyncio.to_thread(self.agent.files)))
+        except (AgentApiError, OSError) as exc:
+            return self._agent_error(exc)
+
+    async def _agent_set_file(self, request: web.Request) -> web.Response:
+        body = await self._agent_body(request)
+        if isinstance(body, web.Response):
+            return body
+        try:
+            return web.json_response(_clean(await asyncio.to_thread(self.agent.set_file, body)))
+        except (AgentApiError, OSError) as exc:
+            return self._agent_error(exc)
 
     # /handoff: one request split across agents, through Handoff (see handoff.py)
 

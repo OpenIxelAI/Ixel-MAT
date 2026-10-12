@@ -1,8 +1,9 @@
-// The Ixel window: a rail of views (Ask, Board, Machines, Health, Settings) and the page each one shows.
+// The Ixel window: a rail of views (Ask, Board, Agent, Machines, Health, Settings) and the page each one shows.
 // Every view stays in the page while another is on screen, so a question keeps streaming while you
 // look at the Board. A view's module may export shown() and hidden(), called as it comes and goes.
 
 import { $, $$, stayPresent } from "./common.js";
+import * as agent from "./agent.js";
 import * as appearance from "./appearance.js";
 import * as ask from "./ask.js";
 import * as board from "./board.js";
@@ -13,6 +14,7 @@ import * as settings from "./settings.js";
 const VIEWS = {
   ask: { title: "Ask", module: ask },
   board: { title: "Board", module: board },
+  agent: { title: "Agent", module: agent },
   machines: { title: "Machines", module: machines },
   health: { title: "Health", module: health },
   settings: { title: "Settings", module: settings },
@@ -59,5 +61,6 @@ board.start({ dot: $(".rail-item[data-view=board] .rail-dot") });
 settings.start({ changed: ask.settingsChanged });
 appearance.start();
 machines.start();
+agent.start();
 show(wanted(), false);
 stayPresent();

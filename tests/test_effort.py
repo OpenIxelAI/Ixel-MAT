@@ -24,7 +24,7 @@ from ixel_mat.presets import PRESETS_BY_ID
     ("anthropic", "claude-fable-5-1", UP_TO_MAX),
     ("anthropic", "claude-opus-6", UP_TO_MAX),          # one that isn't out yet
     ("anthropic", "latest", UP_TO_MAX),
-    ("anthropic", "latest-fast", NONE),                 # Haiku
+    ("anthropic", "latest-fast", UP_TO_MAX),            # Haiku 5.5
     ("anthropic", "", UP_TO_MAX),
     # OpenAI: GPT-6 low to max (no minimal), GPT-5 minimal to high, none on the chat-only models
     ("openai", "gpt-6-astra", UP_TO_MAX),

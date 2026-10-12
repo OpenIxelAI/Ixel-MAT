@@ -69,7 +69,7 @@ class Price:
 
 # Anthropic's first-party API prices (also Microsoft Foundry), as of PRICES_AS_OF. Other
 # providers change prices often and aren't listed: add yours under [pricing] in your config.
-PRICES_AS_OF = "June 2026"
+PRICES_AS_OF = "October 2026"
 PRICES: dict[str, Price] = {
     "claude-fable-5-1": Price(10.0, 50.0, cache_read=0.25),
     "claude-fable-5": Price(10.0, 50.0),
@@ -78,8 +78,11 @@ PRICES: dict[str, Price] = {
     "claude-opus-4-8": Price(5.0, 25.0),
     "claude-opus-4-7": Price(5.0, 25.0),
     "claude-opus-4-6": Price(5.0, 25.0),
+    "claude-sonnet-5-5": Price(2.0, 10.0, cache_read=0.20),
     "claude-sonnet-5": Price(2.0, 10.0),
     "claude-sonnet-4-6": Price(3.0, 15.0),
+    # Haiku 5.5's price for prompts up to 100K tokens; past that it's $0.50 / $2.50, which this undercounts
+    "claude-haiku-5-5": Price(0.10, 0.50),
     "claude-haiku-4-5": Price(1.0, 5.0),
 }
 
