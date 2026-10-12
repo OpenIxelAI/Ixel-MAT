@@ -272,7 +272,8 @@ class BaseAgent(ABC):
         and must otherwise ignore: effort= (thinking level for this call), on_text= (async; gets
         the reply as it's written), on_usage= (gets a usage.Usage with the call's tokens,
         when the model reports them) and pictures= (pictures.Picture objects to send along, given
-        only to agents whose config sees_pictures).
+        only to agents whose config sees_pictures) and cache_prefix= (the fixed start of the message, for
+        transports with prompt caching; the others ignore it).
         """
         ...
 

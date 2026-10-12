@@ -8,6 +8,7 @@ HTTP adapter for direct API agents — no gateway needed.
 Pictures attached to a question go along as image parts when the agent sees pictures
 (AgentConfig.sees_pictures). If the API refuses them (a model that only reads text), the call
 is made again without them, and the model is told it can't see them.
+An Anthropic call with a long message gets a prompt-cache breakpoint, so the stable start of the prompt is cached.
 """
 from __future__ import annotations
 
@@ -89,12 +90,25 @@ def _openai_content(message: str, pictures) -> str | list[dict]:
             *({"type": "image_url", "image_url": {"url": p.data_url()}} for p in pictures)]
 
 
-def _anthropic_content(message: str, pictures) -> str | list[dict]:
-    if not pictures:
+def _anthropic_content(message: str, pictures, cache_prefix: str = "") -> str | list[dict]:
+    """
+    The content of an Anthropic message: pictures as image blocks, then the text. A long message gets a cache
+    breakpoint (a cache_control of {'type': 'ephemeral'}, a fresh dict each time) on its text block. cache_prefix
+    is the fixed start of the message when the caller knows it: the breakpoint then ends there, so a call whose
+    end differs still reads the start from the cache.
+    """
+    lead = cache_prefix if cache_prefix and message.startswith(cache_prefix) else message
+    if len(lead) < MIN_CACHEABLE_CHARS:
+        texts = [{"type": "text", "text": message}]
+    else:
+        texts = [{"type": "text", "text": lead, "cache_control": {"type": "ephemeral"}}]
+        if message[len(lead):]:
+            texts.append({"type": "text", "text": message[len(lead):]})
+    if not pictures and len(texts) == 1 and "cache_control" not in texts[0]:
         return message
     return [*({"type": "image", "source": {"type": "base64", "media_type": p.media_type, "data": p.base64()}}
               for p in pictures),
-            {"type": "text", "text": message}]
+            *texts]
 
 
 async def _read_chat_stream(resp: aiohttp.ClientResponse, on_text: OnText,
@@ -133,6 +147,10 @@ async def _read_chat_stream(resp: aiohttp.ClientResponse, on_text: OnText,
 # At xhigh and max Claude thinks at length: room for that plus the answer, so it isn't cut off (such a long
 # reply is always streamed, which the SDK requires of one this size)
 ANTHROPIC_DEEP_MAX_TOKENS = 64000
+# Anthropic keeps everything up to a cache breakpoint for a few minutes, and a later call that starts the same way
+# reads it back at about a tenth of the input price (writing it costs a quarter more). Under about 1,024 tokens
+# (roughly 4,096 characters) a breakpoint does nothing, so a shorter message is sent unmarked, exactly as before.
+MIN_CACHEABLE_CHARS = 4096
 MAX_RETRIES = 2
 # Providers known to accept stream_options (a streamed reply then ends with its token counts);
 # a local or custom server might reject a field it doesn't know
@@ -274,17 +292,21 @@ class HttpAgent(BaseAgent):
         on_text = kwargs.get("on_text")  # streams the reply to it as it's written
         on_usage = kwargs.get("on_usage")  # gets the call's token counts
         pictures = tuple(kwargs.get("pictures") or ()) if self.config.sees_pictures else ()
+        cache_prefix = str(kwargs.get("cache_prefix") or "")  # the fixed start of the message, for prompt caching
         call = self._call_anthropic if self._anthropic is not None else self._call_openai_compat
         try:
             if pictures and not self._pictures_refused:
                 try:
-                    return await call(message, model, effort, on_text, on_usage, pictures)
+                    return await call(message, model, effort, on_text, on_usage, pictures, cache_prefix)
                 except PicturesRefused as exc:
                     logger.info("'%s' wouldn't take pictures (%s); asking without them", self.name, exc)
                     self._pictures_refused = True
             if pictures:
-                message = PICTURES_REFUSED.format(n=_pictures_word(len(pictures))) + message
-            return await call(message, model, effort, on_text, on_usage)
+                note = PICTURES_REFUSED.format(n=_pictures_word(len(pictures)))
+                message = note + message
+                if cache_prefix:  # the prefix still has to match the start of the message
+                    cache_prefix = note + cache_prefix
+            return await call(message, model, effort, on_text, on_usage, (), cache_prefix)
         except anthropic.APIStatusError as exc:
             # The SDK has already retried a 429; credits that ran out come back as a 400
             if isinstance(exc, anthropic.RateLimitError) or out_of_usage(str(exc)):
@@ -293,8 +315,11 @@ class HttpAgent(BaseAgent):
 
     async def _call_openai_compat(self, message: str, model: str, effort: str | None = None,
                                   on_text: OnText | None = None, on_usage: OnUsage | None = None,
-                                  pictures=()) -> str:
-        """OpenAI-compatible chat completions (OpenAI, xAI, Gemini, local servers)."""
+                                  pictures=(), cache_prefix: str = "") -> str:
+        """
+        OpenAI-compatible chat completions (OpenAI, xAI, Gemini, local servers). cache_prefix is for Anthropic's
+        prompt caching: it's ignored here, and nothing about the request changes.
+        """
         if self._session is None:
             raise RuntimeError(f"Agent '{self.name}' not connected")
         headers = {"Content-Type": "application/json"}
@@ -357,13 +382,13 @@ class HttpAgent(BaseAgent):
 
     async def _call_anthropic(self, message: str, model: str, effort: str | None = None,
                               on_text: OnText | None = None, on_usage: OnUsage | None = None,
-                              pictures=()) -> str:
+                              pictures=(), cache_prefix: str = "") -> str:
         """Anthropic Messages API through the official SDK."""
         assert self._anthropic is not None
         params = {
             "model": model,
             "max_tokens": ANTHROPIC_DEEP_MAX_TOKENS if effort in ("xhigh", "max") else ANTHROPIC_MAX_TOKENS,
-            "messages": [{"role": "user", "content": _anthropic_content(message, pictures)}],
+            "messages": [{"role": "user", "content": _anthropic_content(message, pictures, cache_prefix)}],
         }
         if effort:
             params["output_config"] = {"effort": effort}
