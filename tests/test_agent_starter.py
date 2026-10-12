@@ -20,6 +20,18 @@ def test_the_example_skill_is_copied_once_and_listed(tmp_path):
     assert "my own" in mine.read_text(encoding="utf-8")
 
 
-def test_a_skills_folder_you_already_have_gets_no_examples(tmp_path):
-    (tmp_path / "agent" / "skills").mkdir(parents=True)
+def test_a_skills_folder_of_your_own_gets_no_examples(tmp_path):
+    (tmp_path / "agent" / "skills" / "mine").mkdir(parents=True)
     assert AgentStore(tmp_path / "agent").skills() == []
+
+
+def test_an_older_ixels_skills_folder_gets_each_new_example_once(tmp_path):
+    import shutil
+    skills = tmp_path / "agent" / "skills"
+    (skills / "summarize-folder").mkdir(parents=True)  # what an older Ixel copied in
+    (skills / "summarize-folder" / "SKILL.md").write_bytes(
+        (agent_store.STARTER / "skills" / "summarize-folder" / "SKILL.md").read_bytes())
+    names = {k["name"] for k in AgentStore(tmp_path / "agent").skills()}
+    assert {"summarize-folder", "describe-photos", "add-tool-from-github"} <= names
+    shutil.rmtree(skills / "describe-photos")  # you deleted one: it stays deleted
+    assert "describe-photos" not in {k["name"] for k in AgentStore(tmp_path / "agent").skills()}

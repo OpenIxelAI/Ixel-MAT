@@ -52,6 +52,7 @@ MAX_UPLOAD_SUFFIX_CHARS = 16     # a longer "suffix" is part of the name, not an
 # The starter files a new agent folder begins with (ixel_mat/agent/starter/, written by a small local model
 # and checked by hand): SOUL.md, USER.md, MEMORY.md, and the example skills under skills/
 STARTER = Path(__file__).parent / "starter"
+OFFERED_FILE = ".offered"  # in skills/: the example skills already offered, one name a line
 
 
 def _starter(name: str) -> str:
@@ -168,24 +169,42 @@ class AgentStore:
     def _ensure(self) -> None:
         """The agent's folder and its skills/, sessions/ and uploads/, made on first use, private where the
         system allows (0700)."""
+        fresh = not (self.root / "skills").is_dir()
         for folder in (self.root, self.root / "skills", self.root / "sessions", self.root / "uploads"):
             if not folder.is_dir():
                 folder.mkdir(parents=True, exist_ok=True, mode=0o700)
                 if os.name == "posix":
                     with suppress(OSError):
                         os.chmod(folder, 0o700)
-                if folder.name == "skills":
-                    self._copy_starter_skills(folder)
+        self._copy_starter_skills(self.root / "skills", fresh)
 
     @staticmethod
-    def _copy_starter_skills(skills: Path) -> None:
-        """The example skills, into a skills/ folder made just now (never over one you have)."""
+    def _copy_starter_skills(skills: Path, fresh: bool) -> None:
+        """Each example skill once: into skills/ the first time Ixel has it (a newer Ixel brings new ones), never
+        over a skill you have, and never again once offered, so one you deleted stays deleted. What was offered
+        is listed in skills/.offered. A skills/ folder that was there already and holds none of them (one of your
+        own) gets none."""
+        offered_file = skills / OFFERED_FILE
         with suppress(OSError):
+            try:
+                offered = set(offered_file.read_text(encoding="utf-8").split())
+            except FileNotFoundError:
+                offered = set()
+                starters = {s.name for s in (STARTER / "skills").iterdir()}
+                if not fresh and not any((skills / name).exists() for name in starters):
+                    return
+            new = []
             for skill in sorted((STARTER / "skills").iterdir()):
                 text = skill / "SKILL.md"
-                if skill.is_dir() and text.is_file() and not (skills / skill.name).exists():
+                if not skill.is_dir() or not text.is_file() or skill.name in offered:
+                    continue
+                new.append(skill.name)
+                if not (skills / skill.name).exists():
                     (skills / skill.name).mkdir(mode=0o700)
                     write_private_file(skills / skill.name / "SKILL.md", text.read_bytes())
+            if new:
+                write_private_file(offered_file, "".join(f"{name}\n" for name in sorted(offered | set(new)))
+                                   .encode("utf-8"))
 
     # ── SOUL.md, USER.md, MEMORY.md ─────────────────────────────────────────
 
