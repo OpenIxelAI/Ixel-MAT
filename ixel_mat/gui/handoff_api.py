@@ -29,7 +29,7 @@ from ixel_mat.sanitize import sanitize_terminal_text
 SCHEMA = 1
 TIMEOUT = 30.0
 SLOW_TIMEOUT = 120.0  # agents asks Ixel MAT who it knows; run.start checks the agent's CLI starts
-SLOW_OPS = ("agents", "run.start")
+SLOW_OPS = ("agents", "run.start", "fallbacks")  # (fallbacks for an answer asks Ixel MAT who it knows too)
 WRITE_OPS = ("init", "add", "assign", "note", "review", "status", "delete", "approve", "revoke", "run.start", "merge",
              "agents.enable")
 MAX_REPLY_BYTES = 8 * 1024 * 1024

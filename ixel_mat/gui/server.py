@@ -318,6 +318,7 @@ class GuiServer:
         app.router.add_get("/api/board/agents", self._board_agents)
         app.router.add_get("/api/board/levels", self._board_levels)
         app.router.add_get("/api/board/models", self._board_models)
+        app.router.add_get("/api/board/fallbacks", self._board_fallbacks)
         app.router.add_post("/api/board/action", self._board_action)
         app.router.add_get("/api/connections", self._connections)
         app.router.add_post("/api/connections/host", self._connections_host)
@@ -752,6 +753,24 @@ class GuiServer:
         models = [m for m in data.get("models") or [] if isinstance(m, str)][:300]
         default = data.get("default") if isinstance(data.get("default"), str) else None
         return web.json_response(_clean({"models": models, "default": default}))
+
+    async def _board_fallbacks(self, request: web.Request) -> web.Response:
+        """Who takes over a run when a model hits its usage limit (the next best models, from Handoff's benchmark
+        rankings, that this computer has), for the Board to show before the person approves; the Board sends back
+        what it showed. None from a Handoff that can't say: the run then stops at a limit, as it always did."""
+        from ixel_mat.gui import handoff_api
+        agent = request.query.get("agent", "").strip()[:40]
+        kind = request.query.get("kind", "edit").strip()[:10]
+        models = [m.strip()[:80] for m in request.query.get("models", "").split(",") if m.strip()][:4]
+        try:
+            root = handoff_api.check_project(request.query.get("project"))
+            data = await self._handoff_call("fallbacks", root, {"agent": agent, "kind": kind,
+                                                                **({"models": models} if models else {})})
+        except handoff_api.HandoffApiError:
+            return web.json_response({"fallbacks": [], "words": ""})
+        found = [f for f in data.get("fallbacks") or [] if isinstance(f, str)][:5]
+        words = data.get("words") if isinstance(data.get("words"), str) and found else ""
+        return web.json_response(_clean({"fallbacks": found, "words": words[:500]}))
 
     async def _board_projects(self, request: web.Request) -> web.Response:
         """Git repositories on this computer, for the Board to offer before a project is picked."""
