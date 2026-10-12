@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -211,6 +212,31 @@ def test_a_file_system_without_locks_doesnt_block_updates(checkout, monkeypatch)
     assert not update._still_installing()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows locks through install.ps1")
+def test_an_install_sh_without_flock_holds_a_folder_that_counts_as_installing(tmp_path, monkeypatch):
+    """macOS has no flock command: install.sh makes install.lock.d beside install.lock and removes it when it's
+    done, so a fresh one is an install running now, and one over half an hour old was left by an install that died."""
+    monkeypatch.setattr(update, "INSTALL_INFO", tmp_path / "install.json")
+    folder = tmp_path / "install.lock.d"
+    assert not update._still_installing()
+    folder.mkdir()
+    assert update._still_installing()
+    old = time.time() - 31 * 60
+    os.utime(folder, (old, old))
+    assert not update._still_installing()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows locks through install.ps1")
+def test_an_update_waits_for_an_install_sh_that_holds_its_folder(checkout, monkeypatch):
+    upstream, clone = checkout
+    commit(upstream, "two")
+    update.INSTALL_INFO.with_name("install.lock.d").mkdir()
+    monkeypatch.setattr(update, "_reinstall", lambda info, say: pytest.fail("installed meanwhile"))
+    said = []
+    assert update.run_update([], say=said.append) == 0 and "still installing" in said[-1]
+    assert not (clone / "two").exists()
+
+
 def test_commits_of_your_own_with_nothing_new_still_update(checkout, monkeypatch):
     """They're only in the way of something new to bring in on top."""
     upstream, clone = checkout
@@ -408,6 +434,7 @@ def test_background_check_never_asks_for_credentials(checkout, tmp_path, monkeyp
 
 def test_reinstall_runs_the_installer_it_came_from(tmp_path, monkeypatch):
     info = {"source": str(tmp_path), "install_root": str(tmp_path / "root"), "bin_dir": str(tmp_path / "bin")}
+    monkeypatch.delenv("IXEL_INSTALL_LOCK_HELD", raising=False)
     calls = []
     if os.name == "nt":
         # python.exe (or ixel.exe) can't be replaced while it runs: a new window waits for this process to exit
@@ -417,12 +444,14 @@ def test_reinstall_runs_the_installer_it_came_from(tmp_path, monkeypatch):
         assert cmd[cmd.index("-File") + 1] == str(tmp_path / "install.ps1")
         assert cmd[cmd.index("-WaitForPid") + 1] == str(os.getpid()) and "-PauseAtEnd" in cmd
         assert kw["creationflags"] & update.subprocess.CREATE_NEW_CONSOLE
+        assert "IXEL_INSTALL_LOCK_HELD" not in kw["env"]  # install.ps1 takes its own lock
     else:
         monkeypatch.setattr(update.subprocess, "run",
                             lambda cmd, **kw: calls.append((cmd, kw)) or subprocess.CompletedProcess(cmd, 0))
         assert update._reinstall(info, say=lambda line: None) == 0
         cmd, kw = calls[0]
         assert os.path.basename(cmd[0]) == "bash" and os.path.isabs(cmd[0]) and cmd[1:] == [str(tmp_path / "install.sh")]
+        assert kw["env"]["IXEL_INSTALL_LOCK_HELD"] == "1"  # run_update holds install.lock: install.sh needn't
     env = kw["env"]
     assert (env["IXEL_INSTALL_ROOT"], env["IXEL_BIN_DIR"], env["IXEL_SKIP_PATH_UPDATE"]) == (
         info["install_root"], info["bin_dir"], "1")
