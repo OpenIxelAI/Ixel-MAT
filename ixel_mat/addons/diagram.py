@@ -39,7 +39,7 @@ __all__ = ["DIAGRAM_ID", "diagram_card", "HAIKU_MODEL", "haiku_model_for", "Diag
            "default_choice", "find_choice", "LOCAL_DIAGRAM_TIMEOUT", "CONTEXT_TOKENS", "is_local",
            "diagram_timeout", "context_note", "DIAGRAM_TYPES", "TYPE_WORDS", "available_types", "pick_type",
            "diagram_material", "diagram_question", "extract_html", "slug", "save_diagram", "CheckResult",
-           "self_check", "DiagramResult", "make_diagram", "show_in_folder", "DiagramStore"]
+           "CHECK_ENV", "check_env", "self_check", "DiagramResult", "make_diagram", "show_in_folder", "DiagramStore"]
 
 DIAGRAM_ID = "diagram-design"
 
@@ -310,17 +310,26 @@ class CheckResult:
         return {"ok": self.ok, "messages": list(self.messages), "ran": self.ran}
 
 
+# All the check gets from the environment: what Python needs to start, and no keys from your shell
+CHECK_ENV = ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
+
+
+def check_env() -> dict[str, str]:
+    return {name: value for name, value in os.environ.items() if name.upper() in CHECK_ENV}
+
+
 def self_check(folder: Path, file: Path, timeout: float = 60) -> CheckResult:
     """Run the add-on's scripts/self_check.py on file, in its own isolated Python (-I: no
-    environment variables, user site or script folder on its path); never imported here."""
+    PYTHON* variables, user site or script folder on its path) with a bare environment
+    (check_env); never imported here. The route checked the files against the card's tree
+    hash before the diagram began (check_installed)."""
     script = folder / "scripts" / "self_check.py"
     if not script.is_file():
         return CheckResult(True, ["The add-on has no self_check.py, so the diagram wasn't checked."], False)
     try:
         done = subprocess.run([sys.executable, "-I", str(script), str(file)], capture_output=True, text=True,
                               encoding="utf-8", errors="replace", cwd=str(file.parent), timeout=timeout,
-                              stdin=subprocess.DEVNULL, env=child_env(nested=False),
-                              creationflags=NO_WINDOW_FLAGS)
+                              stdin=subprocess.DEVNULL, env=check_env(), creationflags=NO_WINDOW_FLAGS)
     except subprocess.TimeoutExpired:
         return CheckResult(False, [f"The check took more than {timeout:g} seconds."], True)
     except (OSError, subprocess.SubprocessError) as exc:

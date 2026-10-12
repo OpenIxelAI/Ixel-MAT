@@ -1338,6 +1338,10 @@ class GuiServer:
         if card is None:
             return web.json_response({"error": "Diagram Design is off. Turn it on in Settings, under Add-ons.",
                                       "code": "addon_off"}, status=409)
+        try:
+            await asyncio.to_thread(addons.check_installed, card)  # exactly the files approved, or none of them
+        except addons.AddonError as exc:
+            return web.json_response({"error": str(exc), "code": exc.code}, status=exc.status)
         ready = [cfg for cfg in settings.panel_configs().values() if is_ready(cfg)]
         choices = addons.diagram_choices(ready, settings.pricing)
         if not choices:
@@ -1440,8 +1444,8 @@ class GuiServer:
                                                 "Content-Security-Policy": DIAGRAM_CSP,
                                                 "X-Frame-Options": "SAMEORIGIN", "Cache-Control": "no-store"})
 
-    async def _diagram_path(self, request: web.Request) -> Path | web.Response:
-        """The file of the diagram the body's id names, or the response saying why not."""
+    async def _diagram_path(self, request: web.Request) -> tuple[str, Path] | web.Response:
+        """The id the body names and its diagram's file, or the response saying why not."""
         body = await self._handoff_body(request)
         if isinstance(body, web.Response):
             return body
@@ -1449,24 +1453,27 @@ class GuiServer:
         path = self.diagrams.get(wanted) if isinstance(wanted, str) and DIAGRAM_ID.fullmatch(wanted) else None
         if path is None:
             return _json_error(404, "Ixel doesn't know that diagram any more. Make it again.")
-        return path
+        return wanted, path
 
     async def _diagram_open(self, request: web.Request) -> web.Response:
-        """Open: the diagram in your own browser, as the file it is."""
+        """Open: the diagram in your own browser, served from here under the frame's sandbox and CSP. As a file:
+        URL its inline code would run with none of them."""
         from ixel_mat import docs
-        path = await self._diagram_path(request)
-        if isinstance(path, web.Response):
-            return path
+        picked = await self._diagram_path(request)
+        if isinstance(picked, web.Response):
+            return picked
+        key, path = picked
         opened = False
         if docs.can_open_browser():
-            opened = await asyncio.to_thread(docs.open_in_browser, path.as_uri())
+            opened = await asyncio.to_thread(docs.open_in_browser, f"http://127.0.0.1:{self.port}/diagram/{key}")
         return web.json_response(_clean({"opened": bool(opened), "file": str(path)}))
 
     async def _diagram_reveal(self, request: web.Request) -> web.Response:
         """Show in folder: the diagram's folder, with the file picked where the system can."""
-        path = await self._diagram_path(request)
-        if isinstance(path, web.Response):
-            return path
+        picked = await self._diagram_path(request)
+        if isinstance(picked, web.Response):
+            return picked
+        _, path = picked
         shown = await asyncio.to_thread(addons.show_in_folder, path)
         return web.json_response(_clean({"shown": bool(shown), "folder": str(path.parent)}))
 

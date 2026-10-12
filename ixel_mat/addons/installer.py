@@ -32,7 +32,8 @@ if TYPE_CHECKING:
     from ixel_mat.addons.cards import Card
 
 __all__ = ["AddonError", "MAX_TARBALL_BYTES", "MAX_FILE_BYTES", "DOWNLOAD_TIMEOUT", "tarball_url", "download",
-           "extract", "tree_hash", "installed", "install", "ensure_installed", "remove", "remove_legacy"]
+           "extract", "tree_hash", "installed", "check_installed", "install", "ensure_installed", "remove",
+           "remove_legacy"]
 
 MAX_TARBALL_BYTES = 50 * 1024 * 1024
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -72,6 +73,15 @@ def installed(card: Card) -> bool:
         return any(files.iterdir())
     except OSError:
         return False
+
+
+def check_installed(card: Card) -> None:
+    """Before Ixel reads or runs an add-on's files: they must still be exactly the files the
+    card pins (its tree hash and file count), so nothing changed under ~/.ixel/addons since
+    the approval is ever used. AddonError (409, "changed") otherwise."""
+    if not installed(card) or tree_hash(card.files_dir) != (card.source.files, card.source.tree_sha256):
+        raise AddonError(f"{card.name}'s files changed since you approved them, so Ixel won't use them. Switch it "
+                         "off and on again in Settings, under Add-ons, to install them fresh.", 409, "changed")
 
 
 def _https(url: str) -> bool:

@@ -98,7 +98,8 @@ Only the Settings approval route writes it. A card counts as **enabled** only wh
 its current file's sha256 equals `approved_card_sha256`, its `tree_sha256` equals
 `approved_tree_sha256`, and its files are installed. Any edit to a card file, even a single byte, means
 it needs approving again: it shows as "changed since you approved it" and stays off until approved.
-The installed files' tree hash is checked when installing and when the switch is turned on.
+The installed files' tree hash is checked when installing, when the switch is turned on, and again each time
+Ixel is about to read or run them (`check_installed`), so files changed after the approval are never used.
 
 ## Python API (for the agent and the rest of the app)
 
@@ -113,6 +114,8 @@ The installed files' tree hash is checked when installing and when the switch is
   writes `state.json`. Overwriting a card changes its sha256, so it needs approving again.
 - `fill_command(card: Card, argv: list[str], *, input: str | None = None, output: str | None = None) -> list[str]`:
   fill `{addon}`, `{input}` and `{output}`. Refuses a placeholder the call didn't supply.
+- `check_installed(card: Card) -> None`: call it before reading or running an enabled card's files;
+  `AddonError` (code `"changed"`) when they no longer match the card's tree hash and file count.
 
 `Card` fields: `id`, `name`, `summary`, `by`, `license`, `homepage`, `kind`, `builtin` (bool),
 `card_path` (the toml), `dir` (`~/.ixel/addons/<id>/`, for built-in cards too), `files_dir`

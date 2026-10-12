@@ -1069,6 +1069,19 @@ def test_a_check_that_says_a_great_deal_is_cut_down(skill, tmp_path):
     assert not result.ok and len(result.messages) == 40 and all(len(m) == 500 for m in result.messages)
 
 
+def test_the_check_sees_no_keys_from_your_shell(skill, tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-the-shell")
+    monkeypatch.setenv("SOME_TOKEN", "from-the-shell")
+    write_check(skill, "import os, sys\nprint('names:', *sorted(os.environ))\nsys.exit(1)\n")
+    page = tmp_path / "made.html"
+    page.write_text(GOOD, encoding="utf-8")
+    result = addons.self_check(skill, page)
+    assert result.ran and result.messages[0].startswith("names:")
+    names = set(result.messages[0].split()[1:])
+    assert "OPENAI_API_KEY" not in names and "SOME_TOKEN" not in names
+    assert {name.upper() for name in names} <= set(addons.CHECK_ENV)
+
+
 # ── Making a diagram ─────────────────────────────────────────────────────────
 
 def fenced(html: str) -> str:
@@ -1677,6 +1690,24 @@ def test_asking_for_a_diagram_with_the_card_off_is_refused(config, builtin):
     assert status == 409 and data["code"] == "addon_off"
 
 
+def test_files_changed_since_the_approval_are_never_used(config, diagram_on, monkeypatch):
+    asked = fake_diagram(monkeypatch)
+    addons.check_installed(diagram_on)  # as installed: exactly the files approved
+    script = diagram_on.files_dir / "scripts" / "self_check.py"
+    script.write_bytes(script.read_bytes() + b"\nimport os\n")
+    assert addons.card_by_id(DIAGRAM).enabled  # still on and approved: only the files changed
+    with pytest.raises(addons.AddonError) as caught:
+        addons.check_installed(diagram_on)
+    assert caught.value.code == "changed" and caught.value.status == 409
+    status, data = post_diagram(gui(), {"question": "Draw the release steps"})
+    assert status == 409 and data["code"] == "changed" and "Settings" in data["error"]
+    assert asked == []  # no model was asked and nothing ran
+    (diagram_on.files_dir / "extra.md").write_text("more\n", encoding="utf-8")
+    script.write_bytes(SELF_CHECK.encode("utf-8"))  # put back, but with a file the card never listed
+    with pytest.raises(addons.AddonError):
+        addons.check_installed(diagram_on)
+
+
 @pytest.mark.parametrize("body, status", [
     ({"question": "   "}, 400),
     ({"question": 5}, 400),
@@ -1879,7 +1910,8 @@ def test_open_and_show_in_folder_work_from_the_id_alone(tmp_path, monkeypatch):
     got = run_with_client(server, scenario)
     assert got["open"] == (200, {"opened": True, "file": str(page)})
     assert got["reveal"] == (200, {"shown": True, "folder": str(page.parent)})
-    assert opened == [page.as_uri()] and shown == [page]  # and nothing for the ids it didn't know
+    # Open shows it from this server, under the frame's sandbox and CSP, never as a file: URL
+    assert opened == [f"http://127.0.0.1:{server.port}/diagram/{key}"] and shown == [page]  # and nothing else
     assert all(status == 404 and data["error"] for status, data in got["unknown"])
 
 

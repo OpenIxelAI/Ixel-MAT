@@ -127,6 +127,10 @@ from a reply, self-check pass/fail/retry with a fake model, toggle on/off throug
 - The diagram is shown from `GET /diagram/<id>` in a sandboxed iframe (`sandbox="allow-scripts"`, its
   own CSP, no same-origin) rather than via `srcdoc`, because a `srcdoc` frame inherits the page's CSP
   and would block the diagram's own scripts.
+- **Open** shows the diagram from that same route in your browser, under the same sandbox and CSP, rather than as a
+  `file:` URL, where its inline code would run unrestricted. Show in folder gives you the file itself.
+- Before each diagram, the installed files are checked against the card's tree hash, and the self-check runs with a
+  bare environment (no keys from your shell).
 - The release is pinned in the card, `ixel_mat/addons/diagram-design.toml` (`[source]` `commit`,
   `tree_sha256` and `files`). To move the pin: download the new commit, compute `addons.tree_hash()` of its
   `skills/diagram-design/` folder, and update all three. Anyone who had it on approves it again, since the card
