@@ -3,11 +3,12 @@ Add-ons: other people's skills that Ixel can fetch and use, off until you switch
 
 There is one so far, Diagram Design (Cathryn Lavery's MIT-licensed skill for making a
 diagram as one HTML file, in your brand). Switching it on downloads the GitHub tarball of
-one pinned commit, checks its sha256 against the one this Ixel ships with, and unpacks
-only skills/diagram-design/ into ~/.ixel/addons/diagram-design. Nothing else in the
-archive is ever written, and an archive with anything odd in it (an absolute path, '..',
-a link, a device, an oversized file) is refused whole, before a single file is written.
-Switching it off removes the folder. Diagrams it makes are saved in ~/.ixel/diagrams.
+one pinned commit and unpacks only skills/diagram-design/ into ~/.ixel/addons/diagram-design.
+Nothing else in the archive is ever written, and an archive with anything odd in it (an
+absolute path, '..', a link, a device, an oversized file) is refused whole, before a single
+file is written. The extracted files are checked against the pinned tree hash this Ixel
+ships with (the tarball's own bytes aren't stable enough to pin) before they replace what
+was there. Switching it off removes the folder. Diagrams it makes are saved in ~/.ixel/diagrams.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import io
 import os
 import posixpath
 import shutil
+import stat
 import tarfile
 import urllib.error
 import urllib.parse
@@ -29,9 +31,11 @@ DIAGRAMS_DIR = Path.home() / ".ixel" / "diagrams"
 MAX_TARBALL_BYTES = 50 * 1024 * 1024
 MAX_FILE_BYTES = 20 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 120
-# Filled in by a person (the recipe is in the plan): until then install() refuses
-PINNED_COMMIT = ""
-PINNED_SHA256 = ""
+# Filled in by a person (the recipe is in the plan): while either is empty install() refuses.
+# The tree hash is tree_hash() of the extracted subdir, not of the tarball bytes
+PINNED_COMMIT = "7a2e22170ee838e859d8142ba825d83f8b6375e6"
+PINNED_TREE_SHA256 = "e4adecc695f6367ce202995133e6e1fe5d18b6e4e142a06bd30926d72bfbb4a1"
+PINNED_TREE_FILES = 279
 
 _CHUNK = 64 * 1024
 # A small gzip can unpack to a great deal: caps on what one archive may hold and write
@@ -49,14 +53,15 @@ class Addon:
     license: str
     repo: str
     commit: str
-    sha256: str
+    tree_sha256: str
+    files: int
     subdir: str
     setting: str
 
 
 DIAGRAM_DESIGN = Addon("diagram-design", "Diagram Design", "diagrams as one HTML file, in your brand",
-                       "Cathryn Lavery", "MIT", "cathrynlavery/diagram-design", PINNED_COMMIT, PINNED_SHA256,
-                       "skills/diagram-design", "diagram_design")
+                       "Cathryn Lavery", "MIT", "cathrynlavery/diagram-design", PINNED_COMMIT, PINNED_TREE_SHA256,
+                       PINNED_TREE_FILES, "skills/diagram-design", "diagram_design")
 ADDONS = {DIAGRAM_DESIGN.name: DIAGRAM_DESIGN}
 
 
@@ -97,10 +102,11 @@ def _open_https(url: str, timeout: float):
     return urllib.request.build_opener(_HttpsOnlyRedirects).open(url, timeout=timeout)
 
 
-def download(url: str, expected_sha256: str, *, opener=None, max_bytes: int = MAX_TARBALL_BYTES) -> bytes:
-    """The bytes at url (https only), at most max_bytes, and only when their sha256 is
-    expected_sha256. Nothing is written to disk. opener(url, timeout) returns something
-    with .read(n); the default is urllib's, which refuses redirects away from https."""
+def download(url: str, *, opener=None, max_bytes: int = MAX_TARBALL_BYTES) -> bytes:
+    """The bytes at url (https only), at most max_bytes. Nothing is written to disk, and
+    nothing is checked here: extract() checks the unpacked files against the pin.
+    opener(url, timeout) returns something with .read(n); the default is urllib's, which
+    refuses redirects away from https."""
     if not _https(url):
         raise AddonError("Add-ons are only downloaded over https.", 400, "not_https")
     try:
@@ -127,11 +133,7 @@ def download(url: str, expected_sha256: str, *, opener=None, max_bytes: int = MA
         close = getattr(response, "close", None)
         if callable(close):
             close()
-    data = b"".join(chunks)
-    if hashlib.sha256(data).hexdigest() != expected_sha256.strip().lower():
-        raise AddonError("The download isn't the release this Ixel was made for (its sha256 doesn't match), "
-                         "so nothing was installed.", 409, "sha_mismatch")
-    return data
+    return b"".join(chunks)
 
 
 def _unsafe(name: str, why: str) -> AddonError:
@@ -164,12 +166,41 @@ def _clear(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_FILE_BYTES) -> int:
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while chunk := source.read(_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tree_hash(root: Path) -> tuple[int, str]:
+    """(how many regular files, sha256 hex) of the tree under root: the sha256 of the
+    UTF-8 of f"{rel}\\0{sha}\\n" for every regular file, sorted by rel, where rel is its
+    path under root with '/' separators and sha its own sha256 hex. Links are never
+    followed, and only regular files count."""
+    entries: list[tuple[str, str]] = []
+    for here, _dirs, names in os.walk(root, followlinks=False):
+        for each in names:
+            path = os.path.join(here, each)
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                continue
+            rel = Path(path).relative_to(root).as_posix()
+            entries.append((rel, _file_sha256(path)))
+    entries.sort()
+    joined = "".join(f"{rel}\0{sha}\n" for rel, sha in entries)
+    return len(entries), hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_FILE_BYTES,
+            expect: tuple[int, str] | None = None) -> int:
     """Unpack <topfolder>/<subdir>/... of a .tar.gz into dest, replacing what was there, and
     return how many files were written. Every member is checked before anything is written:
     one unsafe member anywhere refuses the whole archive. Files are copied out one by one
     (never TarFile.extract/extractall) into a .part folder that then takes dest's place;
-    the archive's own modes are ignored (files 0o644, folders 0o755)."""
+    the archive's own modes are ignored (files 0o644, folders 0o755). With expect, a
+    (file count, tree_hash hex) pair, the .part folder must match it or it is removed and
+    dest is left as it was."""
     sub = [p for p in subdir.strip("/").split("/") if p and p != "."]
     if not sub or ".." in sub:
         raise AddonError(f"{subdir!r} isn't a folder inside the archive.", 400, "unsafe")
@@ -225,6 +256,11 @@ def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_F
                 os.chmod(root, 0o755)
                 for each in names:
                     os.chmod(os.path.join(root, each), 0o644)
+            if expect is not None:
+                count, digest = tree_hash(part)
+                if count != expect[0] or digest != expect[1].strip().lower():
+                    raise AddonError("The download isn't the release this Ixel was made for (its files don't "
+                                     "match the pinned ones), so nothing was installed.", 409, "tree_mismatch")
         except AddonError:
             _clear(part)
             raise
@@ -249,12 +285,13 @@ def extract(data: bytes, subdir: str, dest: Path, *, max_file_bytes: int = MAX_F
 
 def install(addon: Addon, *, fetch=None) -> Path:
     """Download the pinned release of addon and unpack its subdir into folder(addon).
-    fetch(url, sha256) -> bytes stands in for download in tests."""
-    if not addon.commit or not addon.sha256:
+    The unpacked files must match addon's pinned tree hash and file count, or nothing is
+    installed. fetch(url) -> bytes stands in for download in tests."""
+    if not addon.commit or not addon.tree_sha256:
         raise AddonError(f"This Ixel has no pinned release of {addon.label} yet.", 409, "unpinned")
-    data = (fetch or download)(tarball_url(addon), addon.sha256)
+    data = (fetch or download)(tarball_url(addon))
     ADDONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    extract(data, addon.subdir, folder(addon))
+    extract(data, addon.subdir, folder(addon), expect=(addon.files, addon.tree_sha256))
     return folder(addon)
 
 
