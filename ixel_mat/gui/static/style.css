@@ -1514,8 +1514,11 @@ code.set-sub { font-family: var(--mono); }
 
 /* Which model draws the diagram: a compact select beside the Diagram button, the height of the buttons around it */
 #diagram-model[hidden] { display: none; }
+/* With the model choice showing, the bar's buttons go icon-only and the bar may wrap, so nothing is pushed out */
+.composer-bar:has(.diagram-model:not([hidden])) { flex-wrap: wrap; }
+.composer-bar:has(.diagram-model:not([hidden])) .attach-toggle span { display: none; }
 .diagram-model {
-  box-sizing: border-box; height: 29px; min-width: 0; max-width: 220px; padding: 0 6px;
+  box-sizing: border-box; flex: 0 1 auto; height: 29px; min-width: 120px; max-width: 220px; padding: 0 6px;
   border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); color: var(--text-2);
   font: inherit; font-size: 12.5px; font-weight: 500; text-overflow: ellipsis; cursor: pointer;
 }
