@@ -2909,7 +2909,37 @@ def test_board_lets_the_person_untick_single_agents_on_the_fallback_line(gui_url
     approve = [args for op, args in fake.actions if op == "approve"][-1]
     assert approve["fallbacks"] == ["claude:claude-sonnet-5-5"]
 
-    # Every agent unticked reads as the switch off: nothing is sent
+    # Every agent unticked reads as the switch off: the line says the run stops, and nothing is sent
+    fake.tasks["T-6"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    page.wait_for_selector(".fallback-row:not([hidden])")
+    page.uncheck('[data-key="needs-fallback-agent:codex"]')
+    page.uncheck('[data-key="needs-fallback-agent:claude"]')
+    wait_until(page, "document.querySelector('.fallback-row').innerText.trim() === "
+                     "'If a model hits its usage limit, the run stops there'")
+    assert not page.is_checked("#needs-fallback")
+    assert page.is_disabled('[data-key="needs-fallback-agent:codex"]')
+    assert page.is_disabled('[data-key="needs-fallback-agent:claude"]')
+
+    # Switching on again brings every agent back
+    page.check("#needs-fallback")
+    wait_until(page, "document.querySelector('.fallback-row').innerText.trim() === "
+                     "'If a model hits its usage limit, go on with codex:gpt-6-astra, then claude:claude-sonnet-5-5, "
+                     "then codex:gpt-5.1'")
+    assert page.is_checked('[data-key="needs-fallback-agent:codex"]')
+    assert page.is_checked('[data-key="needs-fallback-agent:claude"]')
+    assert page.is_enabled('[data-key="needs-fallback-agent:codex"]')
+    assert page.is_enabled('[data-key="needs-fallback-agent:claude"]')
+    page.uncheck('[data-key="needs-fallback-agent:codex"]')
+    page.uncheck('[data-key="needs-fallback-agent:claude"]')
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert "fallbacks" not in approve
+
+    # A new pick starts the choice over: codex is on again for the answer's agents, and the switch comes back on
     fake.tasks["T-6"]["run"] = None
     page.click(".task-card[data-ref=T-1]")
     page.click(".task-card[data-ref=T-6]")
@@ -2918,20 +2948,10 @@ def test_board_lets_the_person_untick_single_agents_on_the_fallback_line(gui_url
     page.uncheck('[data-key="needs-fallback-agent:codex"]')
     page.uncheck('[data-key="needs-fallback-agent:claude"]')
     assert not page.is_checked("#needs-fallback")
-    page.click(".needs button[type=submit]")
-    wait_until(page, "!document.querySelector('.needs')")
-    approve = [args for op, args in fake.actions if op == "approve"][-1]
-    assert "fallbacks" not in approve
-
-    # A new pick starts the choice over: codex is on again for the answer's agents
-    fake.tasks["T-6"]["run"] = None
-    page.click(".task-card[data-ref=T-1]")
-    page.click(".task-card[data-ref=T-6]")
-    page.click("#task-panel .actions .btn.primary")
-    page.wait_for_selector(".fallback-row:not([hidden])")
-    page.uncheck('[data-key="needs-fallback-agent:codex"]')
     page.check("input[name=needs-kind][value=answer]")
     wait_until(page, "document.querySelector('.fallback-row').innerText.includes('codex, then gemini')")
+    assert page.is_checked("#needs-fallback")
     assert page.is_checked('[data-key="needs-fallback-agent:codex"]')
+    assert page.is_enabled('[data-key="needs-fallback-agent:codex"]')
     assert page.locator(".fallback-agents .fallback-agent").count() == 2
     assert not errors

@@ -26,3 +26,9 @@ def test_needs_form_appends_the_agent_toggles_after_the_fallback_row():
     board = (STATIC / "board.js").read_text(encoding="utf-8")
     assert "return { row, agents, refresh, args };" in board
     assert "form.append(backup.row, backup.agents);" in board
+
+
+def test_board_js_says_the_run_stops_and_switches_off_when_every_agent_is_unticked():
+    board = (STATIC / "board.js").read_text(encoding="utf-8")
+    assert "If a model hits its usage limit, the run stops there" in board
+    assert "if (!kept().length) state.on = false;" in board
