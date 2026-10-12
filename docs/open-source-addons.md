@@ -133,6 +133,7 @@ from a reply, self-check pass/fail/retry with a fake model, toggle on/off throug
   changed.
 - Diagram calls to a local model (Ollama, LM Studio) wait up to 600 seconds instead of 180, and a failure says
   the model needs a context window of at least 16k tokens for the skill's material.
+- Section 1 (Reverse engineer tab) isn't built: a model safety check stopped both the plan and the first builder, so it was left out of this branch.
 
 ---
 
