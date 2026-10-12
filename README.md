@@ -60,8 +60,10 @@ curl -fsSL https://ixelai.com/ixel-mat/install.sh | sh
 ```
 
 Then open a new terminal and run `ixel setup` to choose your models. You need Python 3.10 or newer and Git;
-the installer offers to get them where it can. It installs Ixel MAT with the Ixel app. For
-[Handoff](https://ixelai.com/handoff/) too, [install all of Ixel](https://ixelai.com/docs/install/#pick) instead.
+the installer offers to get them where it can. It installs Ixel MAT with the Ixel app. On Linux it also offers the
+GTK and WebKit packages Ixel's own window needs (it asks first); without them, `ixel app` opens in your browser
+instead. For [Handoff](https://ixelai.com/handoff/) too,
+[install all of Ixel](https://ixelai.com/docs/install/#pick) instead.
 
 To update or uninstall, see the [install guide](https://ixelai.com/docs/install/). To install from source, or
 with pipx or uv, see [CONTRIBUTING.md](CONTRIBUTING.md).

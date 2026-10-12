@@ -32,6 +32,7 @@ from ixel_mat.agents.launch import find_on_path
 INSTALL_INFO = Path(sys.prefix).parent / "install.json"
 CHECK_FILE = Path.home() / ".config" / "ixel-mat" / "update_check.json"
 CHECK_EVERY = timedelta(days=1)
+STALE_LOCK_AFTER = timedelta(minutes=30)  # an install.lock.d folder older than this was left by an install that died
 
 # For the background check: never ask for a password or open a browser. Terminal prompts off,
 # every askpass program off (an empty GIT_ASKPASS stops git falling back to core.askPass or
@@ -431,13 +432,23 @@ STILL_INSTALLING = ("An update is still installing, in another window. Let it fi
 def _install_lock():
     """
     On macOS and Linux, for as long as the block runs: an exclusive lock on install.lock, so a second
-    `ixel update` sees that one is installing. Yields False when another holds it. (On Windows,
+    `ixel update` sees that one is installing. Yields False when another holds it. That includes
+    install.sh run by hand: it locks the same file, or, where there's no flock command (macOS has
+    none), makes an install.lock.d folder beside it and removes the folder when it's done. A folder
+    more than half an hour old was left by an install that died, so it doesn't count. (On Windows,
     install.ps1 holds the file open itself while it runs.)
     """
     if os.name == "nt":
         yield not _windows_installing()
         return
     import fcntl
+    try:
+        age = datetime.now(timezone.utc).timestamp() - INSTALL_INFO.with_name("install.lock.d").stat().st_mtime
+    except OSError:  # no such folder
+        age = None
+    if age is not None and age < STALE_LOCK_AFTER.total_seconds():
+        yield False
+        return
     try:
         handle = open(INSTALL_INFO.with_name("install.lock"), "a+b")
     except OSError:  # a folder Ixel can't write to: go on without the lock, as before
@@ -494,6 +505,7 @@ def _reinstall(info: dict, say) -> int:
                          creationflags=subprocess.CREATE_NEW_CONSOLE)  # type: ignore[attr-defined]
         say("Finishing the update in a new window. When it says Ixel is installed, you're done.")
         return 0
+    env["IXEL_INSTALL_LOCK_HELD"] = "1"  # run_update holds install.lock while this runs; install.sh needn't take it
     result = subprocess.run([_program("bash"), str(source / "install.sh")], env=env)
     if result.returncode == 0:
         say("Updated. Restart any open ixel windows to use the new version.")

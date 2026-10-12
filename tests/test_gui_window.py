@@ -481,7 +481,7 @@ def _install_app(tmp_path: Path, python: Path):
     """install.sh's install_app on its own (Linux), as the installer runs it."""
     import subprocess
     script = (ROOT / "install.sh").read_text(encoding="utf-8")
-    functions = script[script.index("linux_window_hint() {"):script.index("\nPYTHON_BIN=")]
+    functions = script[script.index("window_ready() {"):script.index("\nPYTHON_BIN=")]
     venv = python.parent.parent
     return subprocess.run(["bash", "-c", "set -euo pipefail\n" + functions + '\nAPP_NOTE=""\nAPP_PATH=""\ninstall_app\nprintf "%s\\n%s" "$APP_PATH" "$APP_NOTE"'],
                           capture_output=True, text=True,

@@ -139,20 +139,98 @@ append_path_hint() {
   fi
 }
 
-linux_window_hint() {
-  # One line on getting GTK and WebKit for the system's Python, which Ixel's own window on Linux uses
-  local id="" like=""
-  if [[ -r /etc/os-release ]]; then
-    # shellcheck disable=SC1091
-    id="$(. /etc/os-release && echo "${ID:-}")"
-    like="$(. /etc/os-release && echo "${ID_LIKE:-}")"
+take_install_lock() {
+  # One install at a time: $1 is the lock file, the one `ixel update` locks too. `ixel update` holds it
+  # while it runs this script, and says so. Plain POSIX sh, so the tests can run it under sh.
+  if [ "${IXEL_INSTALL_LOCK_HELD:-0}" = "1" ]; then
+    return 0
   fi
-  case " $id $like " in
-    *" debian "*|*" ubuntu "*) echo "  For Ixel's own window:  sudo apt install python3-gi gir1.2-webkit2-4.1" ;;
-    *" fedora "*|*" rhel "*)   echo "  For Ixel's own window:  sudo dnf install python3-gobject webkit2gtk4.1" ;;
-    *" arch "*)                echo "  For Ixel's own window:  sudo pacman -S python-gobject webkit2gtk-4.1" ;;
-    *)                         echo "  For Ixel's own window, install PyGObject and WebKit2GTK for the system's python3." ;;
+  if command -v flock >/dev/null 2>&1; then
+    # Held until this script ends; a folder we can't write to goes without a lock, as `ixel update` does
+    if ! ( exec 9>>"$1" ) 2>/dev/null; then
+      return 0
+    fi
+    exec 9>>"$1"
+    if flock -n 9; then
+      return 0
+    fi
+  else
+    # No flock command (macOS has none): the folder "$1.d" is the lock. One that's over half an hour old
+    # belongs to an install that died without cleaning up, so it's taken over.
+    if [ -d "$1.d" ] && [ -n "$(find "$1.d" -prune -mmin +30 2>/dev/null)" ]; then
+      echo "warning: taking over a stale install lock, left by an install that didn't finish" >&2
+      rm -rf "$1.d" || true
+    fi
+    if mkdir "$1.d" 2>/dev/null; then
+      INSTALL_LOCK_DIR="$1.d"
+      trap 'rm -rf "$INSTALL_LOCK_DIR"' EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+      return 0
+    fi
+    if [ ! -d "$1.d" ]; then
+      return 0
+    fi
+  fi
+  echo "error: Ixel is already being installed or updated, in another window. Let that finish, then try again." >&2
+  exit 1
+}
+
+window_ready() {
+  # Can Ixel's own window open? It needs a system Python with GTK and WebKit, which the installed Ixel looks for.
+  "$VENV_DIR/bin/python" -I -c 'import sys; from ixel_mat.gui.window import linux_window_command; sys.exit(0 if linux_window_command() else 1)' >/dev/null 2>&1
+}
+
+offer_window_packages() {
+  # On Linux: the package line for GTK and WebKit (Ixel's own window), and an offer to run it. Asks only at a
+  # terminal, never during `ixel update`, and runs nothing unless the answer is yes.
+  os_release="${OS_RELEASE:-/etc/os-release}"
+  os_id=""
+  os_like=""
+  if [ -r "$os_release" ]; then
+    os_id="$(. "$os_release" && echo "${ID:-}")" || os_id=""
+    os_like="$(. "$os_release" && echo "${ID_LIKE:-}")" || os_like=""
+  fi
+  case " $os_id $os_like " in
+    *" debian "*|*" ubuntu "*)
+      set -- apt install python3-gi gir1.2-webkit2-4.1 ;;
+    *" fedora "*|*" rhel "*|*" centos "*)
+      set -- dnf install python3-gobject webkit2gtk4.1 ;;
+    *" arch "*)
+      set -- pacman -S python-gobject webkit2gtk-4.1 ;;
+    *" suse "*|*" opensuse "*|*" opensuse-"*)
+      set -- zypper install python3-gobject typelib-1_0-WebKit2-4_1 ;;
+    *)
+      set -- ;;
   esac
+  echo "Ixel's own window needs GTK and WebKit for the system's Python; without them, \`ixel app\` opens in your browser instead."
+  if [ "$#" -eq 0 ]; then
+    echo "  Install PyGObject and WebKit2GTK 4.1 for the system's python3 with your package manager."
+    return 0
+  fi
+  if [ "$(id -u 2>/dev/null)" != "0" ]; then
+    set -- sudo "$@"
+  fi
+  printf '  Install them with:  %s\n' "$*"
+  if [ ! -t 0 ] || [ "${IXEL_INSTALL_LOCK_HELD:-0}" = "1" ]; then
+    return 0
+  fi
+  printf 'Install them now? [y/N] '
+  read -r reply || reply=""
+  case "$reply" in
+    y|Y|yes|Yes) ;;
+    *) return 0 ;;
+  esac
+  if "$@"; then
+    if window_ready; then
+      echo "Ixel's own window is ready."
+    else
+      echo "Installed, but Ixel's own window still wasn't found; \`ixel app\` opens in your browser instead."
+    fi
+  else
+    echo "warning: that didn't finish; \`ixel app\` opens in your browser instead." >&2
+  fi
+  return 0
 }
 
 desktop_taken() {
@@ -228,13 +306,14 @@ DESKTOP
   fi
   APP_NOTE="$name in your app menu (or: ixel app)"
   APP_PATH="$apps/$entry.desktop"
-  if ! "$python" -I -c 'import sys; from ixel_mat.gui.window import linux_window_command; sys.exit(0 if linux_window_command() else 1)' 2>/dev/null; then
-    APP_NOTE="$APP_NOTE, in Chrome's app mode or your browser for now"$'\n'"$(linux_window_hint)"
+  if ! window_ready; then
+    APP_NOTE="$APP_NOTE, in Chrome's app mode or your browser for now"
   fi
 }
 
 PYTHON_BIN="$(pick_python)"
 mkdir -p "$INSTALL_ROOT" "$BIN_DIR"
+take_install_lock "$INSTALL_ROOT/install.lock"
 
 # Install the checkout this script lives in, if it is one; otherwise clone.
 SCRIPT_DIR=""
@@ -311,3 +390,8 @@ echo "Update:  ixel update"
 echo "Remove:  rm -rf \"$INSTALL_ROOT\" \"$WRAPPER_PATH\"${APP_PATH:+ \"$APP_PATH\"}"
 echo "If your shell cannot find 'ixel' yet, restart the shell or run:"
 echo "  export PATH=\"$BIN_DIR:\$PATH\""
+
+if [[ "$(uname -s)" == "Linux" ]] && ! window_ready; then
+  echo
+  offer_window_packages
+fi

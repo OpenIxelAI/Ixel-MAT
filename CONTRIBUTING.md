@@ -3,7 +3,8 @@
 ## Install from source
 
 You need Python 3.10 or newer and Git. The installer makes a private environment in your home folder, adds the
-`ixel` command and the Ixel app, and never uses `sudo` or touches system Python.
+`ixel` command and the Ixel app, and never touches system Python. It runs `sudo` only if you answer yes to the
+Linux window packages offer below.
 
 macOS and Linux (it needs bash; tried on Ubuntu, Debian, Fedora and Arch):
 
@@ -16,6 +17,11 @@ cd ixel-mat
 If Python is missing or too old, it names the command to get it (`brew install python@3.13`, or
 `sudo apt install python3-venv` on Debian and Ubuntu). It uses [uv](https://docs.astral.sh/uv/) when it's
 installed. Set `IXEL_PYTHON=/path/to/python` to choose the interpreter.
+
+Two installs at once can't interleave: the installer takes a lock in the install folder (`install.lock`), and
+the second one says so and stops. On Linux, when Ixel's own window can't open, it prints the GTK and WebKit
+packages for your distribution and, at a terminal, offers to run that line (default No, and never during
+`ixel update`); without them `ixel app` opens in the browser instead.
 
 Windows, in a normal PowerShell window (not "Run as administrator"), one line at a time:
 
