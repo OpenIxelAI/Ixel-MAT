@@ -19,7 +19,7 @@ TOKEN = "obviously-fake-agent-session-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 RUN_KEYS = {"id", "status", "goal", "model", "workspace", "started", "answer", "error", "steps",
             "pending", "usage", "uploads", "computer", "follows"}
-STEP_KEYS = {"n", "thought", "action", "args", "ok", "result", "usage"}
+STEP_KEYS = {"n", "thought", "action", "args", "ok", "result", "usage", "ms", "tokens"}
 ROW_KEYS = {"id", "goal", "status", "started", "model", "workspace", "computer", "follows"}
 
 
