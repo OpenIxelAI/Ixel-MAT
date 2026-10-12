@@ -383,7 +383,7 @@ class AgentRun:
                                 "sandboxed": (not self.computer and can_sandbox()
                                               if action.action == "run_command" else False)}
                 if action.action == "screenshot":
-                    self.pending["diff"] = "Take a picture of the screen (macOS only) and send it to the model."
+                    self.pending["diff"] = "Take a picture of the screen and send it to the model."
                 elif opened is not None:
                     self.pending.update(argv=opened, diff=f"Open {action.args['target']!r} using {opened!r}.")
                 elif action.action == "use_tool":

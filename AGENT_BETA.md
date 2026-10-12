@@ -154,7 +154,9 @@ With it on, for that run only:
 - `run_command` runs without `sandbox-exec`, with the network; still the key-free environment; still an
   approval every time (the allowlist doesn't apply).
 - New action `screenshot` (no args): after approval, a picture of the screen (`screencapture -x` on macOS;
-  elsewhere the step says it isn't supported), given to the model like `view_file`.
+  PowerShell with `System.Drawing` on Windows; `grim` on Wayland or the first of `gnome-screenshot`, `scrot`
+  and ImageMagick's `import` on X11), given to the model like `view_file`. Without a display or a capture
+  program the step says what to install.
 - New action `open` (`target`: a path, an `https://` link, or an app name): after approval, opened with
   `open` (macOS), `xdg-open` (Linux) or `start` (Windows), never through a shell.
 - The run shows a red **Computer access** badge, and its session records that it was on.

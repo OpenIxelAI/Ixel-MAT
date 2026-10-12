@@ -429,13 +429,6 @@ def test_a_model_without_vision_still_waits_but_does_not_capture(home: Path, mon
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("platform", ["linux", "win32"])
-def test_screenshot_is_unsupported_elsewhere(home: Path, monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
-    monkeypatch.setattr(tools.sys, "platform", platform)
-    viewed = Workspace(home / "workspace", computer=True).screenshot()
-    assert "isn't supported" in viewed.text and viewed.pictures == []
-
-
 @pytest.mark.skipif(os.name == "nt", reason="a Python program on PATH is a POSIX stand-in")
 @pytest.mark.parametrize("platform,program,target", [
     ("darwin", "open", "Fake App $(touch shell-ran)"),
