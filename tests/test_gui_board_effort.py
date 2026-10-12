@@ -1,6 +1,5 @@
 """The Board's answer and review runs carry the effort picked for the worker, and nothing when Default is picked."""
 import pytest
-
 from test_gui_board import fake, gui_with, post, project  # noqa: F401
 
 
