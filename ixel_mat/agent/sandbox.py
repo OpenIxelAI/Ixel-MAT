@@ -5,8 +5,12 @@ The model never gets a shell: a command is a list of words, run as it is, with t
 a time limit, at most 64 KB of its output kept, and the environment without any keys saved in Ixel
 (child_env). On a Mac it runs under sandbox-exec and on Linux under bubblewrap (bwrap), with the network
 denied and writes allowed only in the workspace and the temp folder; on Linux the secret and browser folders
-(secret_folders) are hidden too. Where neither is there to use (no bwrap, a system that won't let it start,
-or another system), the result says it ran unsandboxed, and the approval card says so before it runs;
+(secret_folders) are hidden too. On Windows (winsandbox.py) it runs with a low-integrity token in a job
+object: writes land only in the workspace and a private temp folder, but the network is on and reads aren't
+limited, so the secret and browser folders can be read there. CommandResult.sandbox says which of "full",
+"writes-only" (Windows) and "none" a run had, and sandbox_kind which the next one will have. Where there is
+none to use (no bwrap, a system that won't let it start, a Windows sandbox that fails its test, or another
+system), the result says it ran unsandboxed, and the approval card says so before it runs;
 sandbox_unavailable_reason says why.
 With Computer access on, it runs without the sandbox and with the network, keeping the same environment,
 time limit, output limit and way of stopping its children.
@@ -30,6 +34,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from ixel_mat.agent import winsandbox
 from ixel_mat.agent.secret_folders import secret_folders
 from ixel_mat.config.secrets import child_env
 from ixel_mat.material import mask_secrets
@@ -64,17 +69,30 @@ _PYTHON_NAME = re.compile(r"(python|pypy)(\d+(\.\d+)*)?[a-z]?")
 _VERSIONED_INTERPRETER = re.compile(r"(ruby|perl|php|lua|tclsh|rscript)(\d+(\.\d+)*)?")
 
 
+SANDBOX_KINDS = ("full", "writes-only", "none")
+
+
 @dataclass
 class CommandResult:
-    """What a command did. returncode is None when it was stopped at the time limit; sandboxed says whether
-    it ran under sandbox-exec (macOS) or bubblewrap (Linux): network denied, writes only in the workspace and
-    the temp folder."""
+    """What a command did. returncode is None when it was stopped at the time limit. sandbox says how it was
+    confined: "full" (sandbox-exec on a Mac or bubblewrap on Linux: network denied, writes only in the
+    workspace and the temp folder), "writes-only" (Windows: writes only in the workspace and a private temp
+    folder, but the network is on and reads aren't limited) or "none". sandboxed is True only for "full";
+    when sandbox is left out it follows sandboxed."""
     argv: list[str]
     returncode: int | None
     output: str
     timed_out: bool
     sandboxed: bool
     cancelled: bool = False
+    sandbox: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.sandbox:
+            self.sandbox = "full" if self.sandboxed else "none"
+        elif self.sandbox not in SANDBOX_KINDS:
+            raise ValueError(f"sandbox is one of {', '.join(SANDBOX_KINDS)}")
+        self.sandboxed = self.sandbox == "full"
 
 
 def _program(word: str) -> str:
@@ -237,8 +255,10 @@ def _bwrap_status() -> tuple[str | None, str | None]:
 
 
 def can_sandbox() -> bool:
-    """Whether commands run sandboxed on this computer: a Mac with sandbox-exec, or Linux with a working
-    bubblewrap (bwrap on the PATH, and a test run of it that succeeded, done once)."""
+    """Whether commands run fully sandboxed on this computer (network denied, writes only in the workspace and
+    the temp folder): a Mac with sandbox-exec, or Linux with a working bubblewrap (bwrap on the PATH, and a
+    test run of it that succeeded, done once). Always False on Windows, whose sandbox is for Agent commands
+    only and limits writes alone: see sandbox_kind."""
     if sys.platform == "darwin":
         return os.path.exists(SANDBOX_EXEC)
     if sys.platform.startswith("linux"):
@@ -246,15 +266,32 @@ def can_sandbox() -> bool:
     return False
 
 
+def sandbox_kind() -> str:
+    """How far an Agent command is sandboxed here: "full" (can_sandbox), "writes-only" (Windows, when the
+    low-integrity sandbox passed its test: writes only in the workspace and a private temp folder, with the
+    network on and reads not limited) or "none". Add-ons and sandboxed_argv follow can_sandbox, so they
+    aren't sandboxed on Windows."""
+    if can_sandbox():
+        return "full"
+    if sys.platform == "win32" and winsandbox.available():
+        return "writes-only"
+    return "none"
+
+
 def sandbox_unavailable_reason() -> str | None:
-    """None when commands run sandboxed here, otherwise a sentence saying why they don't and what to do."""
+    """None when commands run fully sandboxed here, otherwise a sentence saying why they don't and what to
+    do. On Windows, where the sandbox limits writes only, it is the sentence saying what that leaves open
+    when it works, and the reason when it doesn't."""
     if sys.platform == "darwin":
         if os.path.exists(SANDBOX_EXEC):
             return None
         return f"Commands run without a sandbox because sandbox-exec isn't at {SANDBOX_EXEC} on this Mac."
     if sys.platform.startswith("linux"):
         return _bwrap_status()[1]
-    return "Commands run without a sandbox because there's none for this system yet (macOS and Linux have one)."
+    if sys.platform == "win32":
+        return winsandbox.WRITES_ONLY_NOTE if winsandbox.available() else winsandbox.unavailable_reason()
+    return ("Commands run without a sandbox because there's none for this system yet (macOS, Linux and, for "
+            "writes only, Windows have one).")
 
 
 def sandboxed_argv(argv: list[str], workspace: Path, *, network: bool = False, files: str = "chosen-folder",
@@ -270,8 +307,12 @@ def sandboxed_argv(argv: list[str], workspace: Path, *, network: bool = False, f
     return bwrap_argv(workspace, argv, network=network, files=files, temporary=temporary)
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
+def _kill_tree(proc: subprocess.Popen | winsandbox.LowProcess) -> None:
     """Stop a command and everything it started."""
+    if isinstance(proc, winsandbox.LowProcess):
+        with suppress(OSError):
+            proc.kill()  # its job object holds everything it started
+        return
     if os.name == "posix":
         # It leads its own process group (start_new_session), and its children are in it unless they left
         with suppress(ProcessLookupError, PermissionError):
@@ -333,26 +374,36 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
     if not folder.is_dir():
         raise ValueError("the workspace isn't a folder")
     argv = list(argv)
-    sandboxed = not computer and can_sandbox()
+    kind = "none" if computer else sandbox_kind()
+    sandboxed = kind == "full"
     if cancel is not None and cancel.is_set():
-        return CommandResult(argv, None, "[stopped by the person]", False, sandboxed, cancelled=True)
-    command = sandboxed_argv(argv, folder) if sandboxed else argv
-    options: dict = {"start_new_session": True} if os.name == "posix" else {}
-    if os.name == "nt":
-        from ixel_mat.agents.launch import NO_WINDOW_FLAGS
-        options["creationflags"] = NO_WINDOW_FLAGS
+        return CommandResult(argv, None, "[stopped by the person]", False, sandboxed, cancelled=True, sandbox=kind)
     try:
-        proc = subprocess.Popen(command, cwd=folder, env=child_env(nested=False), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options)
+        if kind == "writes-only":
+            proc = winsandbox.start(argv, folder, child_env(nested=False))
+        else:
+            command = sandboxed_argv(argv, folder) if sandboxed else argv
+            options: dict = {"start_new_session": True} if os.name == "posix" else {}
+            if os.name == "nt":
+                from ixel_mat.agents.launch import NO_WINDOW_FLAGS
+                options["creationflags"] = NO_WINDOW_FLAGS
+            proc = subprocess.Popen(command, cwd=folder, env=child_env(nested=False), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options)
+    except winsandbox.SetupError as exc:
+        # Not run, rather than run without the limits the card promised; the next card says it isn't sandboxed
+        winsandbox.mark_broken(exc)
+        return CommandResult(argv, 126, f"[not run: the Windows sandbox couldn't be set up: {exc}. Nothing was "
+                                        "started. Commands will say they aren't sandboxed until Ixel is "
+                                        "restarted.]", False, False, sandbox="none")
     except FileNotFoundError:
         return CommandResult(argv, 127, f"there's no program {argv[0]!r} (check the name, or give its full path)",
-                             False, sandboxed)
+                             False, sandboxed, sandbox=kind)
     except PermissionError:
         return CommandResult(argv, 126, f"{argv[0]!r} can't be run (it isn't a program, or isn't allowed)",
-                             False, sandboxed)
+                             False, sandboxed, sandbox=kind)
     except OSError as exc:
         return CommandResult(argv, 126, f"{argv[0]!r} couldn't start: {exc.strerror or type(exc).__name__}",
-                             False, sandboxed)
+                             False, sandboxed, sandbox=kind)
 
     output = _Output(proc.stdout)
     deadline = time.monotonic() + timeout
@@ -388,6 +439,8 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
         output.thread.join(_DRAIN_WAIT)
         with suppress(OSError):
             proc.stdout.close()
+        if isinstance(proc, winsandbox.LowProcess):
+            proc.close()  # its private temp folder goes, and the workspace's Low label if this was the last run
     return CommandResult(argv=argv, returncode=None if timed_out else proc.returncode,
                          output=mask_secrets(output.text()) + note, timed_out=timed_out, sandboxed=sandboxed,
-                         cancelled=cancelled)
+                         cancelled=cancelled, sandbox=kind)
