@@ -99,6 +99,8 @@ def server_parameters(card: Card, workspace: Path) -> StdioServerParameters:
     # restoring a saved key in any of those default names after child_env withheld it.
     env = {key: "" for key in get_default_environment()}
     env.update(child_env(nested=False))
+    # Under bwrap the names that point at the host's sockets are dropped; stdio_client adds only its defaults
+    env = sandbox.sandboxed_env(env)
     return StdioServerParameters(command=command[0], args=command[1:], env=env, cwd=str(workspace))
 
 
