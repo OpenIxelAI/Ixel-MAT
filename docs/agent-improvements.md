@@ -21,6 +21,15 @@ How this was put together, through Ixel itself:
 
 Effects are estimates until the benchmark (number 9) measures them.
 
+### Security first
+
+0. **Keep approved commands away from your secrets.** The macOS sandbox blocks the network and writes outside the
+   workspace, but not reads, so an approved command could read `~/.ssh`, cloud logins or browser data and print
+   them back to the model. Add `deny file-read*` rules for the same secret folders Computer access already
+   refuses (`~/.ssh`, `~/.aws`, `~/.gnupg`, keychains, browser profiles, Ixel's own config and keys). Allowing
+   reads only inside the workspace would break most programs, which need system folders, so a deny list is the
+   practical fix. *Where:* `sandbox.sandbox_profile`, with a test that `cat ~/.ssh/...` fails under it.
+
 ### Quick wins (small changes, low risk)
 
 1. **Several reads in one reply.** Let a reply hold up to 5 read-only actions (`list_dir`, `read_file`, `search`,
@@ -80,5 +89,5 @@ Effects are estimates until the benchmark (number 9) measures them.
 
 ## Suggested order
 
-Quick wins 1–8 as one Board batch (planned by Opus at xhigh, built by Sonnet and Haiku, tests by OpenCode's
+Number 0 first, then quick wins 1–8 as one Board batch (planned by Opus at xhigh, built by Sonnet and Haiku, tests by OpenCode's
 free model), then the benchmark (9), then 10–15 one at a time, each judged by the benchmark.
