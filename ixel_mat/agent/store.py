@@ -37,23 +37,21 @@ MAX_SKILL_CHARS = 64 * 1024
 MAX_SKILL_DESCRIPTION_CHARS = 500
 MAX_SESSIONS_LISTED = 50
 
-SOUL_DEFAULT = """# Soul
+# The starter files a new agent folder begins with (ixel_mat/agent/starter/, written by a small local model
+# and checked by hand): SOUL.md, USER.md, MEMORY.md, and the example skills under skills/
+STARTER = Path(__file__).parent / "starter"
 
-You are a careful, friendly assistant working in one folder on this computer.
-- Read before you change anything, and keep changes small and easy to review.
-- Say plainly what you did, what you didn't, and what you're unsure of.
-- When the goal is unclear, finish and ask rather than guess.
-"""
 
-USER_DEFAULT = """# About me
+def _starter(name: str) -> str:
+    try:
+        return (STARTER / name).read_text(encoding="utf-8")
+    except OSError:  # an install without the package data still starts, with a header only
+        return f"# {name.removesuffix('.md').title()}\n"
 
-(Write here what the agent should know about you: what you work on, how you like answers, the tools you use.)
-"""
 
-MEMORY_DEFAULT = """# Memory
-
-Things the agent learned in earlier runs, one per line. You can edit or delete any of them.
-"""
+SOUL_DEFAULT = _starter("SOUL.md")
+USER_DEFAULT = _starter("USER.md")
+MEMORY_DEFAULT = _starter("MEMORY.md")
 
 _FILES = {"soul": ("SOUL.md", SOUL_DEFAULT), "user": ("USER.md", USER_DEFAULT),
           "memory": ("MEMORY.md", MEMORY_DEFAULT)}
@@ -133,6 +131,18 @@ class AgentStore:
                 if os.name == "posix":
                     with suppress(OSError):
                         os.chmod(folder, 0o700)
+                if folder.name == "skills":
+                    self._copy_starter_skills(folder)
+
+    @staticmethod
+    def _copy_starter_skills(skills: Path) -> None:
+        """The example skills, into a skills/ folder made just now (never over one you have)."""
+        with suppress(OSError):
+            for skill in sorted((STARTER / "skills").iterdir()):
+                text = skill / "SKILL.md"
+                if skill.is_dir() and text.is_file() and not (skills / skill.name).exists():
+                    (skills / skill.name).mkdir(mode=0o700)
+                    write_private_file(skills / skill.name / "SKILL.md", text.read_bytes())
 
     # ── SOUL.md, USER.md, MEMORY.md ─────────────────────────────────────────
 
