@@ -6,6 +6,8 @@ a time limit, at most 64 KB of its output kept, and the environment without any 
 (child_env). On a Mac it runs under sandbox-exec, with the network denied and writes allowed only in the
 workspace and the temp folder. Elsewhere nothing like that is there to use, so the result says it ran
 unsandboxed, and the approval card says so before it runs.
+With Computer access on, it runs without sandbox-exec and with the network, keeping the same environment,
+time limit, output limit and way of stopping its children.
 
 is_shell_or_interpreter tells the commands that can run anything at all (a shell, `python -c`, `node -e`)
 from the rest. The allowlist never matches those, so they always ask.
@@ -186,23 +188,25 @@ class _Output:
 
 
 def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEOUT,
-                cancel: threading.Event | None = None) -> CommandResult:
+                cancel: threading.Event | None = None, computer: bool = False) -> CommandResult:
     """Run an approved command in the workspace and wait for it, at most timeout seconds (then it and
     everything it started are stopped). cancel lets Stop end it sooner. Output and errors come back
-    together, secrets masked.
+    together, secrets masked. computer skips the sandbox for a run the person opted into.
 
     ValueError when argv isn't a non-empty list of text; nothing has run then."""
     if not isinstance(argv, list) or not argv or not all(isinstance(word, str) for word in argv):
         raise ValueError("a command is a non-empty list of text, like [\"pytest\", \"-q\"]")
     if any("\x00" in word for word in argv):
         raise ValueError("a command can't contain a NUL character")
+    if not isinstance(computer, bool):
+        raise ValueError("computer must be true or false")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not timeout > 0:
         raise ValueError("the time limit must be a number of seconds above 0")
     folder = Path(workspace).resolve()
     if not folder.is_dir():
         raise ValueError("the workspace isn't a folder")
     argv = list(argv)
-    sandboxed = can_sandbox()
+    sandboxed = not computer and can_sandbox()
     if cancel is not None and cancel.is_set():
         return CommandResult(argv, None, "[stopped by the person]", False, sandboxed, cancelled=True)
     command = [SANDBOX_EXEC, "-p", sandbox_profile(folder), *argv] if sandboxed else argv

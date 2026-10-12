@@ -85,6 +85,7 @@ def page_run(data: dict) -> dict:
         out["steps"].append(entry)
     uploads = data.get("uploads", [])
     out["uploads"] = copy.deepcopy(uploads) if isinstance(uploads, list) else []
+    out["computer"] = data.get("computer") is True  # a run saved before Computer access existed had it off
     out["pending"] = copy.deepcopy(data.get("pending")) if out["status"] == "waiting" else None
     return out
 

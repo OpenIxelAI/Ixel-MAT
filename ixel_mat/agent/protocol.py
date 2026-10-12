@@ -46,11 +46,18 @@ ACTIONS: dict[str, dict[str, Any]] = {
     "run_command": {"required": {"argv": list}, "optional": {},
                     "about": "run a command, as a list like [\"pytest\", \"-q\"] (no shell), in the workspace; "
                              "waits for approval unless the person always allows it"},
+    "screenshot": {"required": {}, "optional": {},
+                   "about": "take a picture of the screen on macOS, after approval; it reaches you with your "
+                            "next turn; Computer access only"},
+    "open": {"required": {"target": str}, "optional": {},
+             "about": "open a path, an https:// link or an app name (macOS), after approval; Computer access "
+                      "only; never through a shell"},
     "finish": {"required": {"answer": str}, "optional": {},
                "about": "end the run, saying what you did or found"},
 }
-# The actions that change something, and so wait for the person
-NEEDS_APPROVAL = ("write_file", "edit_file", "run_command")
+# Changes, commands and looking at the screen or opening something wait for the person
+NEEDS_APPROVAL = ("write_file", "edit_file", "run_command", "screenshot", "open")
+COMPUTER_ACTIONS = ("screenshot", "open")
 
 MAX_GOAL_CHARS = 20_000
 MAX_ARGS_CHARS = 2_000          # a step's arguments as shown in its header (a write's content can be long)
@@ -105,7 +112,7 @@ def _type_ok(value: Any, kind: type) -> bool:
     return isinstance(value, kind)
 
 
-def parse_reply(text: str) -> Action:
+def parse_reply(text: str, computer: bool = False) -> Action:
     """The one action in a model's reply, checked against ACTIONS. ProtocolError when there isn't exactly one
     valid action; its message is meant for the model."""
     if not isinstance(text, str) or not text.strip():
@@ -133,8 +140,9 @@ def parse_reply(text: str) -> Action:
         raise ProtocolError('"thought" must be text')
     if not isinstance(name, str):
         raise ProtocolError(f'"action" must be text, one of: {", ".join(ACTIONS)}')
-    if name not in ACTIONS:
-        raise ProtocolError(f'unknown action "{_clip(name, 60)}"; one of: {", ".join(ACTIONS)}')
+    available = [name for name in ACTIONS if computer or name not in COMPUTER_ACTIONS]
+    if name not in available:
+        raise ProtocolError(f'unknown action "{_clip(name, 60)}"; one of: {", ".join(available)}')
     args = obj.get("args")
     if args is None:
         args = {}
@@ -169,13 +177,12 @@ you see the result in the next turn.
 Rules:
 - Answer with one JSON object and nothing else: {{"thought": "short reason", "action": "name", "args": {{...}}}}
 - One action per reply.
-- Paths are relative to the workspace, like src/app.py. Paths outside it, Git's .git folder and files that look \
-like secrets (.env, keys) are refused.
+- {paths}
 - Files the person attached to this run are listed under "your files in this run". Name one as upload:NAME in \
 read_file or view_file; they can't be written, searched or listed.
 - view_file shows you pictures with your next turn, not in the step result; look, then say what you see.
-- write_file, edit_file and run_command wait for the person's approval, and they may say no. run_command takes \
-a list of words, never a shell command line.
+- {approval}
+- {computer}
 - Read before you change: edit_file's old must be copied exactly from read_file.
 - When the goal is done, or can't be done, use finish with an answer saying what you did or found.
 - {untrusted} The one exception is the block tagged "goal": that is the person's request, the work to do (it \
@@ -186,12 +193,18 @@ Actions:
 {actions}"""
 
 
-def _action_table() -> str:
+def _action_table(computer: bool = False) -> str:
     lines = []
     for name, spec in ACTIONS.items():
+        if not computer and name in COMPUTER_ACTIONS:
+            continue
         args = [f"{key} ({_TYPE_NAMES[kind]})" for key, kind in spec["required"].items()]
         args += [f"{key} ({_TYPE_NAMES[kind]}, optional)" for key, kind in spec["optional"].items()]
-        lines.append(f"- {name}: {', '.join(args) or 'no args'}. {spec['about']}")
+        about = spec["about"]
+        if computer and name == "run_command":
+            about = ('run a command as a list like ["pytest", "-q"] (no shell), in the workspace; always '
+                     'waits for approval; no sandbox, with the network')
+        lines.append(f"- {name}: {', '.join(args) or 'no args'}. {about}")
     return "\n".join(lines)
 
 
@@ -238,7 +251,7 @@ def _upload_line(upload: Any, fence: str) -> str:
 
 
 def build_prompt(goal: str, files: dict, skills: list, steps: list[dict], fence: str | None = None,
-                 uploads: list[dict] | None = None) -> str:
+                 uploads: list[dict] | None = None, computer: bool = False) -> str:
     """The whole prompt for one turn.
 
     files: {"soul", "user", "memory"} texts (already clipped by the store); skills: (name, description) pairs;
@@ -247,7 +260,20 @@ def build_prompt(goal: str, files: dict, skills: list, steps: list[dict], fence:
     skill index so the agent knows what upload:NAME can name (nothing is added when there are none)."""
     fence = fence or f"IXEL-{secrets.token_hex(6)}"
     untrusted = _UNTRUSTED_NOTE.format(fence=fence)
-    parts = [_RULES.format(untrusted=untrusted, actions=_action_table())]
+    paths = ("Paths may be relative to the workspace, absolute or start with ~, anywhere under the home "
+             "folder. Git's .git folder, secret files, .ssh, .aws, .gnupg, Library/Keychains, browser "
+             "profiles and Ixel's config folder are refused." if computer else
+             "Paths are relative to the workspace, like src/app.py. Paths outside it, Git's .git folder "
+             "and files that look like secrets (.env, keys) are refused.")
+    approval = ("Every write_file, edit_file, run_command, screenshot and open waits for the person's "
+                "approval, and they may say no. The command allowlist does not apply." if computer else
+                "write_file, edit_file and run_command wait for the person's approval, and they may say no.")
+    access = ("Computer access is on for this run. Commands run without a sandbox and with the network. "
+              "screenshot shows pictures with your next turn, like view_file." if computer else
+              "Computer access is off: screenshot and open are unknown actions.")
+    parts = [_RULES.format(untrusted=untrusted, actions=_action_table(computer), paths=paths,
+                          approval=approval + " run_command takes a list of words, never a shell command line.",
+                          computer=access)]
 
     files = files or {}
     for key, tag in (("soul", "your persona (SOUL.md)"), ("user", "about the person (USER.md)"),

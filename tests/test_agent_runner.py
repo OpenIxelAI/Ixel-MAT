@@ -69,7 +69,7 @@ def test_finished_run_has_the_page_shape_and_saves_every_step(tmp_path):
         run.start()
         page = await _done(run)
         assert set(page) == {"id", "status", "goal", "model", "workspace", "started", "answer", "error",
-                             "steps", "pending", "usage", "uploads"}
+                             "steps", "pending", "usage", "uploads", "computer"}
         assert page["status"] == "done"
         assert page["model"] == "fake"
         assert page["workspace"] == str(tmp_path / "workspace")
@@ -538,7 +538,7 @@ def test_stop_signals_the_approved_command_to_end(tmp_path, monkeypatch):
         ended = threading.Event()
         loop = asyncio.get_running_loop()
 
-        def command(argv, workspace, *, cancel):
+        def command(argv, workspace, *, cancel, computer=False):
             loop.call_soon_threadsafe(entered.set)
             was_cancelled = cancel.wait(timeout=2)
             ended.set()
