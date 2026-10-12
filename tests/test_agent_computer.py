@@ -147,7 +147,8 @@ def test_a_workspace_does_not_turn_computer_access_on_for_a_run(home: Path) -> N
 def test_computer_access_reads_and_changes_files_elsewhere_in_home(home: Path, path: str) -> None:
     note = home / "Documents/note.txt"
     note.parent.mkdir()
-    note.write_text("before\n", encoding="utf-8")
+    # Exactly these bytes: read_file keeps a file's line endings, and write_text would write \r\n on Windows
+    note.write_bytes(b"before\n")
     if path == "absolute":
         path = str(note)
     workspace = Workspace(home / "workspace", computer=True)
@@ -228,7 +229,8 @@ def test_search_skips_secret_folders_under_home(home: Path) -> None:
         target.mkdir(parents=True)
         (target / "note.txt").write_text("fake match", encoding="utf-8")
     found = Workspace(home / "workspace", computer=True).search("fake match", "~")
-    assert found == f"{home}/Documents/note.txt:1: fake match"
+    # A file outside the workspace is shown by its own full path: with \ between folders on Windows
+    assert found == f"{home / 'Documents' / 'note.txt'}:1: fake match"
 
 
 @pytest.mark.parametrize("action,args", [("screenshot", {"path": "~/note.png"}), ("open", {}),
