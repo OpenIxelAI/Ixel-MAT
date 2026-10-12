@@ -39,7 +39,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit
 
 from ixel_mat import documents, pictures
-from ixel_mat.agent.sandbox import CommandResult, run_command
+from ixel_mat.agent.sandbox import SECRET_HOME_FOLDERS, CommandResult, run_command
 from ixel_mat.config import secrets as _secrets
 from ixel_mat.material import mask_secrets
 from ixel_mat.pictures import Picture
@@ -76,24 +76,8 @@ _SCRATCH_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}")
 _SECRET_PREFIXES = (".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 _SECRET_SUFFIXES = (".pem", ".key")
 _SECRET_NAMES = frozenset({".netrc", ".npmrc", ".pypirc"})
-# Home folders that hold keys or browser sessions, on macOS, Linux and Windows. Refuse the whole browser
-# folder, including cookies and login databases outside its Profiles subfolder.
-_COMPUTER_SECRET_FOLDERS = (
-    ".ssh", ".aws", ".gnupg", "Library/Keychains", "Library/Safari", "Library/Cookies",
-    "Library/WebKit", "Library/Containers/com.apple.Safari",
-    "Library/Group Containers/group.com.apple.Safari",
-    "Library/Application Support/Google/Chrome", "Library/Application Support/Chromium",
-    "Library/Application Support/Firefox", "Library/Application Support/BraveSoftware",
-    "Library/Application Support/Microsoft Edge", "Library/Application Support/Arc",
-    "Library/Application Support/Vivaldi", "Library/Application Support/com.operasoftware.Opera",
-    ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
-    ".config/microsoft-edge", ".config/vivaldi", ".config/opera", ".config/mozilla",
-    ".var/app/org.mozilla.firefox", ".var/app/com.google.Chrome", ".var/app/org.chromium.Chromium",
-    ".var/app/com.brave.Browser", "snap/firefox", "snap/chromium",
-    "AppData/Local/Google/Chrome", "AppData/Local/Chromium", "AppData/Local/BraveSoftware",
-    "AppData/Local/Microsoft/Edge", "AppData/Local/Vivaldi", "AppData/Local/Mozilla/Firefox",
-    "AppData/Roaming/Mozilla/Firefox", "AppData/Roaming/Opera Software",
-)
+# The list lives in sandbox.py (the sandbox denies reads of the same folders); the old name still works here
+_COMPUTER_SECRET_FOLDERS = SECRET_HOME_FOLDERS
 
 
 class WorkspaceError(Exception):

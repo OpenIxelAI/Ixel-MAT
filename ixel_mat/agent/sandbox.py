@@ -2,10 +2,11 @@
 Running a command the person approved (or always allows), for the agent's run_command.
 
 The model never gets a shell: a command is a list of words, run as it is, with the workspace as its folder,
-a time limit, at most 64 KB of its output kept, and the environment without any keys saved in Ixel
-(child_env). On a Mac it runs under sandbox-exec, with the network denied and writes allowed only in the
-workspace and the temp folder. Elsewhere nothing like that is there to use, so the result says it ran
-unsandboxed, and the approval card says so before it runs.
+a time limit, its first and last 32 KB of output kept (a line says how much was left out between), and the
+environment without any keys saved in Ixel (child_env). On a Mac it runs under sandbox-exec, with the network
+denied, writes allowed only in the workspace and the temp folder, and the secret folders under the home folder
+and Ixel's config folder unreadable (other reads work, so programs run). Elsewhere nothing like that is there to
+use, so the result says it ran unsandboxed, and the approval card says so before it runs.
 With Computer access on, it runs without sandbox-exec and with the network, keeping the same environment,
 time limit, output limit and way of stopping its children.
 
@@ -26,16 +27,39 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from ixel_mat.config import secrets as _secrets
 from ixel_mat.config.secrets import child_env
 from ixel_mat.material import mask_secrets
 
 DEFAULT_TIMEOUT = 120.0
 MAX_OUTPUT_BYTES = 64 * 1024
+# The output kept is its first and last parts, half of MAX_OUTPUT_BYTES each
+_HEAD_BYTES = MAX_OUTPUT_BYTES // 2
+_TAIL_BYTES = MAX_OUTPUT_BYTES - _HEAD_BYTES
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 _READ_CHUNK = 8 * 1024
 # After the command itself ended, how long the output is still read while programs it left running in the
 # background hold it open, before they're stopped too
 _DRAIN_WAIT = 2.0
+# Home folders that hold keys or browser sessions, on macOS, Linux and Windows. tools.py refuses paths under
+# them for Computer access, and the sandbox denies reads of them (secret_folders). Refuse the whole browser
+# folder, including cookies and login databases outside its Profiles subfolder.
+SECRET_HOME_FOLDERS = (
+    ".ssh", ".aws", ".gnupg", "Library/Keychains", "Library/Safari", "Library/Cookies",
+    "Library/WebKit", "Library/Containers/com.apple.Safari",
+    "Library/Group Containers/group.com.apple.Safari",
+    "Library/Application Support/Google/Chrome", "Library/Application Support/Chromium",
+    "Library/Application Support/Firefox", "Library/Application Support/BraveSoftware",
+    "Library/Application Support/Microsoft Edge", "Library/Application Support/Arc",
+    "Library/Application Support/Vivaldi", "Library/Application Support/com.operasoftware.Opera",
+    ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
+    ".config/microsoft-edge", ".config/vivaldi", ".config/opera", ".config/mozilla",
+    ".var/app/org.mozilla.firefox", ".var/app/com.google.Chrome", ".var/app/org.chromium.Chromium",
+    ".var/app/com.brave.Browser", "snap/firefox", "snap/chromium",
+    "AppData/Local/Google/Chrome", "AppData/Local/Chromium", "AppData/Local/BraveSoftware",
+    "AppData/Local/Microsoft/Edge", "AppData/Local/Vivaldi", "AppData/Local/Mozilla/Firefox",
+    "AppData/Roaming/Mozilla/Firefox", "AppData/Roaming/Opera Software",
+)
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "ash", "csh", "tcsh", "yash", "nu",
                      "xonsh", "elvish", "busybox", "cmd", "powershell", "pwsh"})
@@ -58,7 +82,8 @@ _VERSIONED_INTERPRETER = re.compile(r"(ruby|perl|php|lua|tclsh|rscript)(\d+(\.\d
 @dataclass
 class CommandResult:
     """What a command did. returncode is None when it was stopped at the time limit; sandboxed says whether
-    it ran under sandbox-exec (network denied, writes only in the workspace and the temp folder)."""
+    it ran under sandbox-exec (network denied, writes only in the workspace and the temp folder, the secret
+    folders unreadable)."""
     argv: list[str]
     returncode: int | None
     output: str
@@ -129,21 +154,49 @@ def _quoted(path: str) -> str:
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def secret_folders() -> list[str]:
+    """The real paths a command must not read: the secret and browser folders (SECRET_HOME_FOLDERS) under the
+    home folder, and under the account's own home folder too when $HOME points somewhere else, then Ixel's
+    own config folder, where its keys live. Read each time, so tests can move the home."""
+    homes = [Path.home()]
+    if os.name == "posix":
+        try:
+            import pwd
+            account = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (ImportError, KeyError, OSError):
+            account = None
+        if account is not None and account != homes[0]:
+            homes.append(account)
+    paths = [os.path.realpath(home / folder) for home in homes for folder in SECRET_HOME_FOLDERS]
+    paths.append(os.path.realpath(_secrets._ENV_DIR))
+    return list(dict.fromkeys(paths))
+
+
 def sandbox_profile(workspace: Path, *, network: bool = False, files: str = "chosen-folder",
                     temporary: bool = True) -> str:
     """The shared sandbox profile. Commands default to no network and workspace/temp writes; MCP cards
     pass their network/files permissions and temporary=False to allow only workspace writes, or none.
+    Reads of the secret folders (secret_folders) are denied for every profile, MCP ones too. A workspace
+    inside one of them (a fetched repo, in Ixel's config folder) is read again, when files allow it.
     Paths are real paths, because the sandbox sees /var as /private/var."""
     if files not in ("none", "output-folder", "chosen-folder"):
         raise ValueError("unknown files permission")
-    allowed = [os.path.realpath(workspace)] if files != "none" else []
+    real = os.path.realpath(workspace)
+    allowed = [real] if files != "none" else []
     if temporary:
         allowed += [os.path.realpath(tempfile.gettempdir()), "/private/tmp"]
     subpaths = " ".join(f"(subpath {_quoted(path)})" for path in dict.fromkeys(allowed))
     devices = ' (literal "/dev/null") (regex #"^/dev/tty")' if temporary else ""
     writes = f" (allow file-write* {subpaths}{devices})" if subpaths or devices else ""
+    secret = secret_folders()
+    denied = " ".join(f"(subpath {_quoted(path)})" for path in secret)
+    # A later rule wins, so a workspace inside a denied folder is allowed again after the deny. A workspace
+    # that only contains one (the home folder, say) keeps the deny.
+    reread = ""
+    if files != "none" and any(Path(real).is_relative_to(folder) for folder in map(Path, secret)):
+        reread = f" (allow file-read* (subpath {_quoted(real)}))"
     return ("(version 1) (allow default) " + ("" if network else "(deny network*) ")
-            + "(deny file-write*)" + writes)
+            + "(deny file-write*)" + writes + f" (deny file-read* {denied})" + reread)
 
 
 def can_sandbox() -> bool:
@@ -170,11 +223,12 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 class _Output:
-    """Reads a command's output as it comes, keeping the first MAX_OUTPUT_BYTES and counting the rest (it's
-    still read, so the command never stops on a full pipe)."""
+    """Reads a command's output as it comes, keeping the first and last part of the output and counting the
+    rest (it's still all read, so the command never stops on a full pipe)."""
 
     def __init__(self, stream):
-        self.kept = bytearray()
+        self.head = bytearray()
+        self.tail = bytearray()
         self.total = 0
         self._stream = stream
         self.thread = threading.Thread(target=self._read, name="ixel-agent-output", daemon=True)
@@ -184,15 +238,23 @@ class _Output:
         with suppress(OSError, ValueError):
             while chunk := self._stream.read1(_READ_CHUNK):  # what's there now, up to a chunk
                 self.total += len(chunk)
-                room = MAX_OUTPUT_BYTES - len(self.kept)
+                room = _HEAD_BYTES - len(self.head)
                 if room > 0:
-                    self.kept += chunk[:room]
+                    self.head += chunk[:room]
+                    chunk = chunk[room:]
+                if chunk:
+                    self.tail += chunk
+                    if len(self.tail) > _TAIL_BYTES:
+                        del self.tail[:len(self.tail) - _TAIL_BYTES]
 
     def text(self) -> str:
-        text = bytes(self.kept).decode("utf-8", errors="replace")
-        if self.total > len(self.kept):
-            text += f"\n[output cut at {MAX_OUTPUT_BYTES // 1024} KB; it was {self.total} bytes in all]"
-        return text
+        head, tail, total = bytes(self.head), bytes(self.tail), self.total
+        if total <= len(head) + len(tail):
+            return (head + tail).decode("utf-8", errors="replace")
+        left_out = total - len(head) - len(tail)
+        marker = (f"\n[output cut at {MAX_OUTPUT_BYTES // 1024} KB: {left_out} bytes left out here, "
+                  f"of {total} in all]\n")
+        return head.decode("utf-8", errors="replace") + marker + tail.decode("utf-8", errors="replace")
 
 
 def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEOUT,
