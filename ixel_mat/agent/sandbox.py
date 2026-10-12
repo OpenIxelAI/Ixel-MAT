@@ -431,10 +431,15 @@ def run_command(argv: list[str], workspace: Path, timeout: float = DEFAULT_TIMEO
     if not folder.is_dir():
         raise ValueError("the workspace isn't a folder")
     argv = list(argv)
+    if cancel is not None and cancel.is_set():
+        # A stopped command starts nothing, not even sandbox_kind's first test run of bwrap on Linux: the kind
+        # it reports is the one already known, or "none"
+        unknown = sys.platform.startswith("linux") and _bwrap_status.cache_info().currsize == 0
+        kind = "none" if computer or unknown else sandbox_kind()
+        return CommandResult(argv, None, "[stopped by the person]", False, kind == "full", cancelled=True,
+                             sandbox=kind)
     kind = "none" if computer else sandbox_kind()
     sandboxed = kind == "full"
-    if cancel is not None and cancel.is_set():
-        return CommandResult(argv, None, "[stopped by the person]", False, sandboxed, cancelled=True, sandbox=kind)
     try:
         if kind == "writes-only":
             proc = winsandbox.start(argv, folder, child_env(nested=False))
