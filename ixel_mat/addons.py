@@ -481,7 +481,7 @@ def save_diagram(html: str, question: str, *, folder: Path | None = None, now: d
     while True:
         path = where / (f"{stem}.html" if number == 1 else f"{stem}-{number}.html")
         try:
-            with open(path, "x", encoding="utf-8") as out:
+            with open(path, "x", encoding="utf-8", newline="") as out:  # the model's bytes, untranslated
                 out.write(html)
             return path
         except FileExistsError:
@@ -568,7 +568,7 @@ async def make_diagram(cfg, question: str, folder: Path, *, ask=ixel_mat.ask.ask
     if html2 is None:
         check = CheckResult(check.ok, check.messages + ["The retry didn't answer with an HTML document."], check.ran)
         return DiagramResult(path, kind, check, True, calls)
-    path.write_text(html2, encoding="utf-8")
+    path.write_text(html2, encoding="utf-8", newline="")
     check = await asyncio.to_thread(self_check, folder, path)
     await _emit(on_event, "check", {"attempt": 2, **check.to_dict()})
     return DiagramResult(path, kind, check, True, calls)
