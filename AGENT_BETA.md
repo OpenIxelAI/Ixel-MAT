@@ -55,7 +55,8 @@ machine), cron jobs and sub-agents.
 - `run_command` takes an argv list, never a shell string, runs with the workspace as its folder, a
   120-second limit, at most 64 KB of output kept, and **the environment without any keys saved in Ixel**
   (`child_env`). On macOS it runs under `sandbox-exec` with network access denied and writes allowed only
-  in the workspace and the temp folder; elsewhere the approval card says it is not sandboxed.
+  in the workspace and the temp folder. Reads aren't limited: a sandboxed command can still read any file
+  your user can. Elsewhere the approval card says it is not sandboxed.
 - The allowlist holds exact argv prefixes you approved with "Always allow" (for example `["pytest"]`),
   per workspace. It never matches shells or interpreters with `-c` (`sh`, `bash`, `zsh`, `python -c`,
   `node -e`), which always ask.
@@ -232,6 +233,6 @@ New actions (they work with or without Computer access):
   `commands` entry as an argv list, never a shell, `{addon}` filled with the card's installed files and
   `{output}` with the run's workspace; with the key-free environment; under `sandbox-exec` on macOS with the
   network allowed only when the card says `network = true`, and writes only in the workspace (`files =
-  "output-folder"` or `"chosen-folder"`) or nowhere (`"none"`). The first call to each add-on in a run asks
+  "output-folder"` or `"chosen-folder"`) or nowhere (`"none"`); reads aren't limited. The first call to each add-on in a run asks
   for approval (showing the add-on, the tool and its arguments); "Always allow" covers that add-on for the
   rest of the run. Servers are stopped when the run ends.
