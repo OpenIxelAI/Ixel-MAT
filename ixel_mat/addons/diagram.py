@@ -410,27 +410,66 @@ async def make_diagram(cfg, question: str, folder: Path, *, ask=ixel_mat.ask.ask
     return DiagramResult(path, kind, check, True, calls)
 
 
+def _run_quietly(argv: list[str], timeout: float) -> int | None:
+    """Run argv with no input or output shown; its exit code, or None when it couldn't start or ran too long."""
+    try:
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              env=child_env(nested=False), timeout=timeout, creationflags=NO_WINDOW_FLAGS)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.returncode
+
+
+def _file_uri(path: Path) -> str | None:
+    """The percent-encoded file: URI of path; None when it can't have one."""
+    try:
+        return path.absolute().as_uri()
+    except (OSError, ValueError):
+        return None
+
+
+def _gvariant_string(text: str) -> str:
+    """text as one single-quoted GVariant string, with backslashes and quotes escaped."""
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _show_items_argv(uri: str) -> list[str] | None:
+    """The D-Bus call that selects uri in the file manager: gdbus if there is one, else dbus-send;
+    None when neither can make it."""
+    gdbus = find_on_path("gdbus")
+    if gdbus:
+        return [gdbus, "call", "--session", "--dest", "org.freedesktop.FileManager1",
+                "--object-path", "/org/freedesktop/FileManager1",
+                "--method", "org.freedesktop.FileManager1.ShowItems", f"[{_gvariant_string(uri)}]", "''"]
+    dbus_send = find_on_path("dbus-send")
+    # dbus-send's array:string: splits on commas, so a URI with one can't be passed as a single item
+    if dbus_send and "," not in uri:
+        return [dbus_send, "--session", "--print-reply", "--dest=org.freedesktop.FileManager1",
+                "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems",
+                f"array:string:{uri}", "string:"]
+    return None
+
+
 def show_in_folder(path: Path) -> bool:
-    """Show path in the file manager (selected where the system can); True when that started."""
+    """Show path in the file manager (selected where the system can); True when that started.
+    On Linux the file is selected through the file manager's FileManager1 D-Bus API, else its folder
+    is opened with xdg-open."""
     if sys.platform == "darwin":
-        argv = ["/usr/bin/open", "-R", str(path)]
-    elif sys.platform == "win32":
+        return _run_quietly(["/usr/bin/open", "-R", str(path)], 15) == 0
+    if sys.platform == "win32":
         explorer = find_on_path("explorer")
         if not explorer:
             return False
-        argv = [explorer, f"/select,{path}"]
-    else:
-        opener = find_on_path("xdg-open")
-        if not opener:
-            return False
-        argv = [opener, str(path.parent)]
-    try:
-        done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              env=child_env(nested=False), timeout=15, creationflags=NO_WINDOW_FLAGS)
-    except (OSError, subprocess.SubprocessError):
+        # explorer /select returns 1 even when it worked
+        return _run_quietly([explorer, f"/select,{path}"], 15) is not None
+    uri = _file_uri(path)
+    call = _show_items_argv(uri) if uri else None
+    if call is not None and _run_quietly(call, 5) == 0:
+        return True
+    opener = find_on_path("xdg-open")
+    if not opener:
         return False
-    # explorer /select returns 1 even when it worked
-    return sys.platform == "win32" or done.returncode == 0
+    return _run_quietly([opener, str(path.parent)], 15) == 0
 
 
 class DiagramStore:
