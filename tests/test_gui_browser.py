@@ -645,6 +645,8 @@ class FakeBoard:
         self.slow_levels = 0.0  # seconds a model's levels take to come back
         self.spent = None  # what every run on the board cost, from a Handoff that says
         self.usage = None  # and model by model
+        self.fallbacks = None  # who takes over at a usage limit, from a Handoff that says: kind -> list
+        self.asked_fallbacks = []  # what the page asked about
         self.tasks = {
             "T-1": self.task(1, "Pick the launch date " + HOSTILE, "open", "human"),
             "T-2": self.task(2, "Write release notes", "in_progress", "claude",
@@ -713,6 +715,12 @@ class FakeBoard:
             return reply({"ollama": {"models": ["qwen3:4b", "llama3.2:3b"], "default": "qwen3:4b"},
                           "opencode": {"models": ["anthropic/claude-haiku-5-5", "opencode/step-5-preview-free"],
                                        "default": None}}.get(query.get("agent"), {"models": [], "default": None}))
+        if url.path == "/api/board/fallbacks":
+            self.asked_fallbacks.append(query)
+            found = (self.fallbacks or {}).get(query.get("kind"), [])
+            if query.get("models", "").startswith("claude-haiku"):
+                found = ["ollama:qwen3:4b-instruct"]
+            return reply({"fallbacks": found, "words": ", then ".join(found)})
         if url.path == "/api/board/agents":
             return reply({"agents": [{"name": "claude"}, {"name": "codex"}, {"name": "grok", "label": "Grok"}],
                           "problems": []})
@@ -2727,3 +2735,62 @@ def test_settings_gets_a_model_through_an_ollama_of_yours(tmp_path, browser):
             shots = os.environ.get("IXEL_SCREENSHOT_DIR")
             if shots:
                 group.screenshot(path=os.path.join(shots, "ixel-settings-get-model.png"))
+
+
+def test_board_shows_who_takes_over_at_a_usage_limit_and_seals_what_it_showed(gui_url, browser):
+    fake = FakeBoard()
+    fake.fallbacks = {"edit": ["claude:claude-sonnet-5-5", "codex:gpt-6-astra"], "answer": ["codex", "gemini"]}
+    fake.tasks["T-6"] = fake.task(6, "Add a parser", "open", "claude")
+    base = fake.detail
+
+    def detail(ref):
+        data = base(ref)
+        if ref == "T-6":
+            data["actions"][0] = {**data["actions"][0], "args": {"agent": "claude", "kind": "edit"},
+                                  "kinds": ["edit", "answer", "review"]}
+            data["task"]["workers"] = WORKERS
+        return data
+    fake.detail = detail
+    page, errors, _ = open_board(browser, fake)
+    page.goto(gui_url)
+    page.click(".rail-item[data-view=board]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+
+    # An edit on its own model: the next best coders, shown before the yes, and on unless switched off
+    page.wait_for_selector(".fallback-row:not([hidden])")
+    assert page.inner_text(".fallback-row") == ("If a model hits its usage limit, go on with claude:claude-sonnet-5-5, "
+                                                "then codex:gpt-6-astra")
+    assert page.is_checked("#needs-fallback")
+    # a model typed in counts: the list is the one for it, and that's what's sent
+    page.select_option("#needs-run-mode", "one")
+    page.fill("[data-key=needs-model-0]", "claude-haiku-5-5")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["models"] == ["claude-haiku-5-5"] and approve["fallbacks"] == ["ollama:qwen3:4b-instruct"]
+
+    # An answer: the next best agents; switched off, none are sent
+    fake.tasks["T-6"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    page.check("input[name=needs-kind][value=answer]")
+    wait_until(page, "document.querySelector('.fallback-row').innerText.includes('codex, then gemini')")
+    page.uncheck("#needs-fallback")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert approve["kind"] == "answer" and "fallbacks" not in approve
+
+    # A Handoff that can't say shows nothing and sends nothing
+    fake.fallbacks = None
+    fake.tasks["T-6"]["run"] = None
+    page.click(".task-card[data-ref=T-1]")
+    page.click(".task-card[data-ref=T-6]")
+    page.click("#task-panel .actions .btn.primary")
+    page.click(".needs button[type=submit]")
+    wait_until(page, "!document.querySelector('.needs')")
+    approve = [args for op, args in fake.actions if op == "approve"][-1]
+    assert "fallbacks" not in approve and page.locator(".fallback-row:not([hidden])").count() == 0
+    assert not errors
