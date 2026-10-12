@@ -124,7 +124,7 @@ from a reply, self-check pass/fail/retry with a fake model, toggle on/off throug
 - The release is pinned in `ixel_mat/addons.py` as `PINNED_COMMIT`, `PINNED_TREE_FILES` and
   `PINNED_TREE_SHA256` (the tree hash described above). To move the pin: clone the new commit, compute
   `addons.tree_hash()` of its `skills/diagram-design/` folder, and update all three.
-- Section 1 (Reverse engineer tab) is not part of this build yet.
+- Section 1 (Reverse engineer tab) isn't built: a model safety check stopped both the plan and the first builder, so it was left out of this branch.
 
 ---
 
