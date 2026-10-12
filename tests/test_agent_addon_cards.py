@@ -395,6 +395,13 @@ async def _fetch_then_wait_for_the_card(run: AgentRun) -> dict:
     return await _until_waiting(run)
 
 
+@pytest.fixture(autouse=True)
+def _agent_rules_only(monkeypatch):
+    """These tests check the agent's own rules for a card and its fetch, so the real add-ons module (when
+    this Ixel has it) stays out of them; the canonical fixture puts a stand-in for it back."""
+    import sys
+    monkeypatch.setitem(sys.modules, "ixel_mat.addons", None)
+
 @pytest.fixture
 def canonical(tmp_path, monkeypatch):
     """A stand-in for ixel_mat.addons, the one writer of cards: it checks a card with the agent's own rules and
