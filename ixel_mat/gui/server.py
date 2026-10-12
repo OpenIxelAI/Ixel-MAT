@@ -722,9 +722,15 @@ class GuiServer:
                 data += chunk
                 if len(data) > cap:
                     return _json_error(413, too_big)
-            if await reader.next() is not None:
+            # aiohttp's reader raises instead of showing the part after one it was fed in pieces, and a body
+            # with a second part is one of those: either way there is more than the one file the page sends
+            try:
+                another = await reader.next() is not None
+            except (ValueError, aiohttp.http_exceptions.BadHttpMessage):
+                another = True
+            if another:
                 return _json_error(400, "Send one file per request.")
-        except ValueError:  # a malformed multipart body
+        except (ValueError, aiohttp.http_exceptions.BadHttpMessage):  # a malformed multipart body
             return _json_error(400, "The upload isn't a readable multipart body.")
         try:
             return web.json_response(_clean(await asyncio.to_thread(self.agent.save_upload, name, bytes(data))))
