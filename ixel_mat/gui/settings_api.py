@@ -704,6 +704,75 @@ def _new_problems(settings):
     return check
 
 
+# ── Add-ons ───────────────────────────────────────────────────────────────────
+
+def addons_list(settings) -> dict:
+    """Each add-on Ixel knows, and whether it's on, installed and pinned (see addons.py)."""
+    from ixel_mat import addons
+    return {"addons": addons.status(settings.config)}
+
+
+def set_addon(settings, body: Any) -> dict:
+    """Switch an add-on on (download and unpack its pinned release, then [addons] <setting> = true) or off (the
+    key taken out, then its files removed)."""
+    from ixel_mat import addons
+    if not isinstance(body, dict):
+        raise SettingsError("Expected a JSON object.")
+    name, on = body.get("name"), body.get("on")
+    if not isinstance(name, str) or name not in addons.ADDONS:
+        raise SettingsError("That isn't an add-on Ixel has.")
+    addon = addons.ADDONS[name]
+    if not isinstance(on, bool):
+        raise SettingsError(f"{addon.label} must be on or off.")
+    if settings.config.get("_error"):
+        raise SettingsError("There's no settings file this page can change. Run ixel setup first.", 409)
+    path = _path(settings)
+    version = body.get("version")
+    if not isinstance(version, str) or (not version and path is not None):
+        raise SettingsError("The page didn't say which version of the file it read. Here it is again; make the "
+                            "change once more.", 409)
+    # Before downloading anything: a page that read an older file is told now, not after the download
+    if path is not None and edit.file_version(path) != version:
+        raise SettingsError("The settings file changed since this page read it. Here it is again; make the "
+                            "change once more.", 409)
+    section = settings.config.get("addons") if isinstance(settings.config.get("addons"), dict) else {}
+    after = {k: v for k, v in section.items() if k != addon.setting}
+    if on:
+        try:
+            addons.install(addon)
+        except addons.AddonError as exc:
+            raise SettingsError(str(exc), exc.status) from None
+        after[addon.setting] = True
+    if on or path is not None:
+        value = True if on else edit.REMOVE
+
+        def change_text(text: str) -> str:
+            return edit.set_values(text, ("addons",), {addon.setting: value})
+        made = path is None
+        if made:
+            path, version = _new_file(version)
+        try:
+            edit.change_file(path, change_text, version, backup=not (made or _holds_secrets(settings.config)),
+                             check=_new_problems(settings))
+        except edit.Changed as exc:
+            raise SettingsError(f"{exc} Here it is again; make the change once more.", 409) from None
+        except edit.EditError as exc:
+            raise SettingsError(f"Ixel didn't change the file: {exc}. Change it by hand in {path}.", 422) from None
+        finally:
+            if made and path.read_text(encoding="utf-8") == NEW_FILE:
+                path.unlink()  # the change didn't go in: no empty file left behind
+    if on:
+        said = f"{addon.label} is on. Press Diagram in Ask, or start a question with /diagram."
+    else:
+        try:
+            addons.remove(addon)
+        except OSError as exc:
+            raise SettingsError(f"{addon.label} is off, but Ixel couldn't remove its files: "
+                                f"{exc.strerror or exc}. Delete {addons.folder(addon)} by hand.", 500) from None
+        said = f"{addon.label} is off and its files are removed."
+    return {"message": said, "addons": addons.status({**settings.config, "addons": after})}
+
+
 # ── Keys ──────────────────────────────────────────────────────────────────────
 
 def check_key_value(value: Any) -> str:
