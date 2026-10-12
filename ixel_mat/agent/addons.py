@@ -60,6 +60,15 @@ def enabled_cards() -> list[Card]:
             if card.kind == "mcp" and getattr(card, "enabled", True)]
 
 
+def check_installed(card: Card) -> None:
+    """The add-ons module's own check that an enabled card's installed files still match its tree hash and
+    file count (edited files after approval); it raises when they don't. No module, or an older one without
+    the check, checks nothing more than enabled_cards did."""
+    check = getattr(addon_module(), "check_installed", None)
+    if callable(check):
+        check(card)
+
+
 def server_parameters(card: Card, workspace: Path) -> StdioServerParameters:
     """The card's single argv, with only installed files and output substituted; never a shell."""
     commands = card.permissions.commands
@@ -181,6 +190,14 @@ class AddonServers:
     async def start(self) -> None:
         for card in enabled_cards():
             if card.id in self.servers:
+                continue
+            try:
+                check_installed(card)
+            except Exception as exc:  # noqa: BLE001 — the add-ons module's AddonError, or anything it raises
+                self.tools.append({"addon": card.id, "name": card.name, "tools": [],
+                                   "error": "its installed files don't match what was approved, so it wasn't "
+                                            f"started; approve it again in Settings › Add-ons "
+                                            f"({mask_secrets(str(exc))})"})
                 continue
             try:
                 server = _Server(card, self.workspace, self.timeout)

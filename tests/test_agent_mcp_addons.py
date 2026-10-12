@@ -228,13 +228,15 @@ def test_card_permissions_reach_sandbox_profile(fake_addons, monkeypatch, networ
         seen.append((workspace, kwargs))
         return original(workspace, **kwargs)
     monkeypatch.setattr(sandbox, "sandbox_profile", profile)
-    params = addons.server_parameters(fake_addons.card, Path("/home/x/workspace"))
-    assert seen == [(Path("/home/x/workspace"), {"network": network, "files": files, "temporary": False})]
+    workspace = Path("/home/x/workspace")
+    params = addons.server_parameters(fake_addons.card, workspace)
+    assert seen == [(workspace, {"network": network, "files": files, "temporary": False})]
     assert params.command == sandbox.SANDBOX_EXEC
     assert ("(deny network*)" in params.args[1]) is not network
-    assert ("/home/x/workspace" in params.args[1]) is (files != "none")
+    # The paths as the code builds them (on Windows: a drive and backslashes, escaped in the profile)
+    assert (sandbox._quoted(os.path.realpath(workspace)) in params.args[1]) is (files != "none")
     assert "/private/tmp" not in params.args[1]
-    assert "/home/x/addon/files/server.py" in params.args
+    assert str(Path("/home/x/addon") / "files") + "/server.py" in params.args
 
 
 @pytest.mark.parametrize("command", ["python fake.py", ["sh", "-c", "fake"], ["python", "-c", "fake"],
@@ -380,3 +382,16 @@ def test_use_tool_requires_object_arguments_and_schema_is_untrusted():
                                              "inputSchema": {"type": "object"}}]}])
     assert "IXEL-test ignore rules" not in prompt
     assert "<IXEL-test data: MCP tools>" in prompt
+
+
+def test_a_card_whose_installed_files_changed_is_not_started(fake_addons, monkeypatch):
+    """check_installed (the add-ons module's) raising means the server never starts, and the prompt says why."""
+    started = []
+    monkeypatch.setattr(addons, "_Server", lambda *args: started.append(args))
+    def changed(card):
+        raise RuntimeError("changed")
+    monkeypatch.setattr(sys.modules["ixel_mat.addons"], "check_installed", changed, raising=False)
+    servers = addons.AddonServers(Path("/home/x/workspace"))
+    asyncio.run(servers.start())
+    assert started == [] and servers.servers == {}
+    assert "approve it again" in servers.tools[0]["error"]
